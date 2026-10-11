@@ -1,8 +1,11 @@
 package tools
 
 import (
+	"context"
 	"net"
 	"net/url"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -41,8 +44,8 @@ func TestValidatePublicURLAllowsPublicHostnames(t *testing.T) {
 
 func TestIsPublicIP(t *testing.T) {
 	cases := []struct {
-		ip      string
-		want    bool
+		ip   string
+		want bool
 	}{
 		{"8.8.8.8", true},
 		{"1.1.1.1", true},
@@ -61,5 +64,90 @@ func TestIsPublicIP(t *testing.T) {
 				t.Errorf("isPublicIP(%s) = %v, want %v", tc.ip, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestBuiltinHasBashAndRead(t *testing.T) {
+	b := Builtin()
+	for _, name := range []string{"current_time", "fetch_url", "bash", "read"} {
+		tool, ok := b[name]
+		if !ok {
+			t.Fatalf("Builtin() missing tool %q", name)
+		}
+		if tool.Def.Name != name {
+			t.Errorf("tool %q has Def.Name %q", name, tool.Def.Name)
+		}
+		if tool.Run == nil {
+			t.Errorf("tool %q has nil Run", name)
+		}
+	}
+}
+
+func TestRunBashEcho(t *testing.T) {
+	out, err := runBash(context.Background(), `{"command":"echo hello-bash"}`)
+	if err != nil {
+		t.Fatalf("runBash: %v", err)
+	}
+	if out != "hello-bash\n" {
+		t.Errorf("runBash = %q, want %q", out, "hello-bash\n")
+	}
+}
+
+func TestRunBashNonZeroExitReturnsOutput(t *testing.T) {
+	out, err := runBash(context.Background(), `{"command":"echo oops >&2; exit 3"}`)
+	if err != nil {
+		t.Fatalf("runBash: %v", err)
+	}
+	if out != "oops\nexit code 3" {
+		t.Errorf("runBash = %q, want %q", out, "oops\nexit code 3")
+	}
+}
+
+func TestRunBashEmptyCommandRejected(t *testing.T) {
+	if _, err := runBash(context.Background(), `{"command":"  "}`); err == nil {
+		t.Error("runBash with empty command unexpectedly succeeded")
+	}
+}
+
+func TestRunBashTimeout(t *testing.T) {
+	_, err := runBash(context.Background(), `{"command":"sleep 30","timeout":1}`)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("runBash timeout: got %v, want timeout error", err)
+	}
+}
+
+func TestReadFileRange(t *testing.T) {
+	f, err := os.CreateTemp("", "readtest-*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+	content := "l1\nl2\nl3\nl4\nl5\n"
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	out, err := readFile(context.Background(), `{"path":"`+f.Name()+`","offset":2,"limit":2}`)
+	if err != nil {
+		t.Fatalf("readFile: %v", err)
+	}
+	if out != "l2\nl3\n[truncated]" {
+		t.Errorf("readFile = %q, want %q", out, "l2\nl3\n[truncated]")
+	}
+	out, err = readFile(context.Background(), `{"path":"`+f.Name()+`"}`)
+	if err != nil {
+		t.Fatalf("readFile full: %v", err)
+	}
+	if out != "l1\nl2\nl3\nl4\nl5" {
+		t.Errorf("readFile full = %q", out)
+	}
+}
+
+func TestReadFileBlocksSensitivePaths(t *testing.T) {
+	for _, p := range []string{"/proc/self/environ", "/sys/kernel/hostname", "/dev/null", "relative/path.txt", "/nonexistent-xyz-123"} {
+		if _, err := readFile(context.Background(), `{"path":"`+p+`"}`); err == nil {
+			t.Errorf("readFile(%q) unexpectedly succeeded", p)
+		}
 	}
 }

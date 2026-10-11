@@ -8,6 +8,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -55,7 +58,184 @@ func Builtin() map[string]Tool {
 			},
 			Run: fetchURL,
 		},
+		"bash": {
+			Def: provider.ToolDef{
+				Name:        "bash",
+				Description: "Executes a shell command on the host (sh -c) and returns combined stdout and stderr output.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"command": map[string]any{
+							"type":        "string",
+							"description": "Shell command to execute.",
+						},
+						"timeout": map[string]any{
+							"type":        "number",
+							"description": "Timeout in seconds. Defaults to 60, capped at 300.",
+						},
+						"workdir": map[string]any{
+							"type":        "string",
+							"description": "Working directory. Defaults to /kaggle/working when it exists, else the process directory.",
+						},
+					},
+					"required": []any{"command"},
+				},
+			},
+			Run: runBash,
+		},
+		"read": {
+			Def: provider.ToolDef{
+				Name:        "read",
+				Description: "Reads a text file from the host filesystem and returns its contents, optionally a line range.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{
+							"type":        "string",
+							"description": "Absolute path of the file to read.",
+						},
+						"offset": map[string]any{
+							"type":        "number",
+							"description": "1-based first line to return. Defaults to 1.",
+						},
+						"limit": map[string]any{
+							"type":        "number",
+							"description": "Maximum lines to return. Defaults to 2000.",
+						},
+					},
+					"required": []any{"path"},
+				},
+			},
+			Run: readFile,
+		},
 	}
+}
+
+func runBash(ctx context.Context, args string) (string, error) {
+	input := struct {
+		Command string  `json:"command"`
+		Timeout float64 `json:"timeout"`
+		Workdir string  `json:"workdir"`
+	}{}
+	if err := json.Unmarshal([]byte(args), &input); err != nil {
+		return "", fmt.Errorf("invalid arguments: %w", err)
+	}
+	if strings.TrimSpace(input.Command) == "" {
+		return "", fmt.Errorf("command must not be empty")
+	}
+	timeout := 60 * time.Second
+	if input.Timeout > 0 {
+		timeout = time.Duration(input.Timeout * float64(time.Second))
+		if timeout > 300*time.Second {
+			timeout = 300 * time.Second
+		}
+		if timeout < time.Second {
+			timeout = time.Second
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", input.Command)
+	if dir := strings.TrimSpace(input.Workdir); dir != "" {
+		cmd.Dir = dir
+	} else if st, err := os.Stat("/kaggle/working"); err == nil && st.IsDir() {
+		cmd.Dir = "/kaggle/working"
+	}
+	out, err := cmd.CombinedOutput()
+	text := string(out)
+	if len(text) > 32*1024 {
+		text = text[:32*1024] + "\n[truncated]"
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		return text, fmt.Errorf("command timed out after %s", timeout)
+	}
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return fmt.Sprintf("%sexit code %d", text, exitErr.ExitCode()), nil
+		}
+		return text, err
+	}
+	return text, nil
+}
+
+func readFile(ctx context.Context, args string) (string, error) {
+	input := struct {
+		Path   string  `json:"path"`
+		Offset float64 `json:"offset"`
+		Limit  float64 `json:"limit"`
+	}{}
+	if err := json.Unmarshal([]byte(args), &input); err != nil {
+		return "", fmt.Errorf("invalid arguments: %w", err)
+	}
+	p := strings.TrimSpace(input.Path)
+	if p == "" {
+		return "", fmt.Errorf("path must not be empty")
+	}
+	if !filepath.IsAbs(p) {
+		return "", fmt.Errorf("path must be absolute")
+	}
+	clean := filepath.Clean(p)
+	// Block virtual filesystems: /proc/self/environ and friends would leak
+	// process secrets, and device files are never valid read targets.
+	for _, blocked := range []string{"/proc", "/sys", "/dev"} {
+		if clean == blocked || strings.HasPrefix(clean, blocked+"/") {
+			return "", fmt.Errorf("reading %s is not allowed", blocked)
+		}
+	}
+	st, err := os.Stat(clean)
+	if err != nil {
+		return "", fmt.Errorf("cannot stat %s: %w", p, err)
+	}
+	if st.IsDir() {
+		return "", fmt.Errorf("%s is a directory", p)
+	}
+	if !st.Mode().IsRegular() {
+		return "", fmt.Errorf("%s is not a regular file", p)
+	}
+	const maxBytes = int64(256 * 1024)
+	if st.Size() > 4*1024*1024 {
+		return "", fmt.Errorf("%s is too large (%.1f MB)", p, float64(st.Size())/1048576)
+	}
+	f, err := os.Open(clean)
+	if err != nil {
+		return "", fmt.Errorf("cannot open %s: %w", p, err)
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("cannot read %s: %w", p, err)
+	}
+	text := string(raw)
+	truncated := false
+	if int64(len(raw)) > maxBytes {
+		text = text[:maxBytes]
+		truncated = true
+	}
+	offset := int(input.Offset)
+	if offset < 1 {
+		offset = 1
+	}
+	limit := int(input.Limit)
+	if limit < 1 {
+		limit = 2000
+	}
+	lines := strings.Split(text, "\n")
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1] // drop phantom element from trailing newline
+	}
+	if offset > len(lines) {
+		return "", fmt.Errorf("offset %d beyond end of file (%d lines)", offset, len(lines))
+	}
+	end := offset - 1 + limit
+	if end > len(lines) {
+		end = len(lines)
+	}
+	out := strings.Join(lines[offset-1:end], "\n")
+	if truncated || end < len(lines) {
+		out += "\n[truncated]"
+	}
+	return out, nil
 }
 
 func currentTime(ctx context.Context, args string) (string, error) {
@@ -133,7 +313,6 @@ func fetchURL(ctx context.Context, args string) (string, error) {
 	}
 	return fmt.Sprintf("HTTP %d\n%s", response.StatusCode, text), nil
 }
-
 
 // validatePublicURL rejects literal private and local addresses before dialing.
 // safePublicDialContext repeats the check after DNS resolution to prevent
