@@ -13,7 +13,7 @@ import (
 	"ai-engine/provider/openai"
 )
 
-const clientID = "opencode/1.18.31"
+const clientID = "opencode/1.18.35 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
 
 const (
 	shellTool = "shell"
@@ -37,11 +37,14 @@ func (a *Adapter) Name() string { return "opencode" }
 
 func (a *Adapter) headers() map[string]string {
 	return map[string]string{
-		"User-Agent":         clientID,
-		"x-opencode-client":  "cli",
-		"x-opencode-project": "global",
-		"x-opencode-session": a.session,
-		"x-opencode-request": newID("msg_"),
+		"User-Agent":            clientID,
+		"x-opencode-client":     "cli",
+		"x-opencode-project":    "global",
+		"x-opencode-session":    a.session,
+		"x-opencode-request":    newID("msg_"),
+		"x-opencode-session-id": a.session,
+		"x-session-affinity":    a.session,
+		"x-session-id":          a.session,
 	}
 }
 
@@ -101,11 +104,24 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 	if !isToolProtocolError(err3) {
 		return nil, err3
 	}
-	// Attempt 4: OpenAI Responses API (/v1/responses). Some models only
-	// serve this protocol and reject chat completions outright.
-	via, err4 := a.inner.CompleteViaResponses(ctx, &stripped, prov, key)
-	if err4 != nil {
+	// Attempt 4: OpenAI Responses API (/v1/responses) with the full tool
+	// set, mirroring what the reference CLI sends. Some models only serve
+	// this protocol and reject chat completions outright.
+	full := *req
+	if resp4, err4 := a.inner.CompleteViaResponses(ctx, &full, prov, key); err4 == nil {
+		if emit != nil {
+			if err := emit(resp4.Content); err != nil {
+				return nil, err
+			}
+		}
+		return resp4, nil
+	} else if emitted || !isToolProtocolError(err4) {
 		return nil, err4
+	}
+	// Attempt 5: Responses API bare (no tools at all).
+	via, err5 := a.inner.CompleteViaResponses(ctx, &stripped, prov, key)
+	if err5 != nil {
+		return nil, err5
 	}
 	if emit != nil {
 		if err := emit(via.Content); err != nil {

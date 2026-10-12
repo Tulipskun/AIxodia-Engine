@@ -79,7 +79,7 @@ func TestFreeTierContractOnComplete(t *testing.T) {
 	}
 	got := (*seen)[0]
 
-	if ua := got.Header.Get("User-Agent"); ua != "opencode/1.18.31" {
+	if ua := got.Header.Get("User-Agent"); !strings.HasPrefix(ua, "opencode/1.18.") {
 		t.Errorf("User-Agent = %q", ua)
 	}
 	session := got.Header.Get("X-Opencode-Session")
@@ -334,5 +334,55 @@ func TestRetryViaResponsesAPIWhenChatRejected(t *testing.T) {
 	}
 	if got := paths[len(paths)-1]; !strings.HasSuffix(got, "/responses") {
 		t.Errorf("last request should hit /responses, got %s", got)
+	}
+}
+
+func TestResponsesFallbackKeepsFullTools(t *testing.T) {
+	var paths []string
+	var bodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		body, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/responses") {
+			_, _ = io.WriteString(w, `{"id":"resp-2","model":"zen-model","object":"response","output":[{"type":"message","content":[{"type":"output_text","text":"via-resp-full"}]}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"message":"Model does not support this protocol."}`)
+	}))
+	t.Cleanup(server.Close)
+
+	adapter := New()
+	resp, err := adapter.Complete(context.Background(), &provider.Request{
+		Model:    "zen-model",
+		Messages: []provider.Message{{Role: "user", Content: "hi"}},
+		Tools:    []provider.ToolDef{{Name: "current_time", Description: "now"}},
+	}, providerFor(server), "key")
+	if err != nil {
+		t.Fatalf("responses fallback: %v", err)
+	}
+	if resp.Content != "via-resp-full" {
+		t.Errorf("content = %q", resp.Content)
+	}
+	// last request must be /responses carrying the original tool
+	last := bodies[len(bodies)-1]
+	var parsed struct {
+		Tools []struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	_ = json.Unmarshal(last, &parsed)
+	found := false
+	for _, tool := range parsed.Tools {
+		if tool.Function.Name == "current_time" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("responses fallback should carry original tools, body: %s", last)
 	}
 }
