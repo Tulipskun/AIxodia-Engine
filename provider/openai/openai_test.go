@@ -100,3 +100,29 @@ func TestBuildRequestStreamOptionsAndToolChoice(t *testing.T) {
 		}
 	}
 }
+
+func TestZZResponsesToolHistoryMapping(t *testing.T) {
+	req := &provider.Request{
+		Model: "m",
+		Messages: []provider.Message{
+			{Role: "user", Content: "run echo hi"},
+			{Role: "assistant", Content: "on it", ToolCalls: []provider.ToolCall{{ID: "call_1", Name: "bash", Arguments: `{"command":"echo hi"}`}}},
+			{Role: "tool", ToolCallID: "call_1", Content: "hi\n"},
+		},
+		MaxTokens: 100,
+		Tools:     []provider.ToolDef{{Name: "bash"}},
+	}
+	body := buildResponsesRequest(req, true)
+	items, ok := body.Input.([]any)
+	if !ok || len(items) != 4 {
+		t.Fatalf("input items = %#v", body.Input)
+	}
+	fc, _ := items[2].(map[string]any)
+	if fc["type"] != "function_call" || fc["call_id"] != "call_1" || fc["name"] != "bash" {
+		t.Errorf("function_call item = %v", fc)
+	}
+	fco, _ := items[3].(map[string]any)
+	if fco["type"] != "function_call_output" || fco["call_id"] != "call_1" {
+		t.Errorf("function_call_output item = %v", fco)
+	}
+}

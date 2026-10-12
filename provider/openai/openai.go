@@ -368,6 +368,32 @@ type responsesResponse struct {
 func buildResponsesRequest(req *provider.Request, stream bool) responsesRequest {
 	items := make([]any, 0, len(req.Messages))
 	for _, m := range req.Messages {
+		// The Responses API has no role=tool message: tool results travel
+		// as function_call_output items and model tool calls as
+		// function_call items. Sending chat-style tool messages back gets
+		// "`input[N]` did not match any supported type".
+		if m.Role == "tool" {
+			items = append(items, map[string]any{
+				"type":    "function_call_output",
+				"call_id": m.ToolCallID,
+				"output":  textContent(m.Content),
+			})
+			continue
+		}
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			if text := textContent(m.Content); text != "" {
+				items = append(items, map[string]any{"role": "assistant", "content": text})
+			}
+			for _, call := range m.ToolCalls {
+				items = append(items, map[string]any{
+					"type":      "function_call",
+					"call_id":   call.ID,
+					"name":      call.Name,
+					"arguments": call.Arguments,
+				})
+			}
+			continue
+		}
 		items = append(items, map[string]any{"role": m.Role, "content": textContent(m.Content)})
 	}
 	bodyReq := responsesRequest{Model: req.Model, Input: items, Stream: stream}
