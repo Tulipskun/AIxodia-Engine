@@ -31,6 +31,10 @@ type chatRequest struct {
 	MaxTokens   int           `json:"max_tokens"`
 	Tools       *[]string     `json:"tools"`
 	User        string        `json:"user"`
+	// Append says the messages are the new turns only, not a transcript. The
+	// WebSocket sends one new message per turn; without this flag the history is
+	// matched against a single message, never matches, and is discarded.
+	Append bool `json:"append,omitempty"`
 }
 
 type route struct {
@@ -91,7 +95,11 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, "database_error", err.Error())
 			return
 		}
-		history, delta = mergeHistory(saved, incoming)
+		if body.Append {
+			history, delta = appendDelta(saved, incoming)
+		} else {
+			history, delta = mergeHistory(saved, incoming)
+		}
 	}
 
 	primary, err := g.resolveRoute(stored, body)
@@ -674,6 +682,27 @@ func mergeHistory(stored, incoming []provider.Message) (full, delta []provider.M
 		full = append(append([]provider.Message(nil), stored[:cut]...), incoming[common:]...)
 		return full, incoming[common:]
 	}
+}
+
+// appendDelta keeps the stored conversation and adds only what is new.
+//
+// It exists because mergeHistory matches a common prefix, which is right for a
+// client that resends its whole transcript but wrong for one that sends a single
+// new turn: stored[0] and the new message never agree, so the default branch
+// cut at the first mismatch and every earlier turn was dropped. The model then
+// answered each question as if it were the first of the conversation.
+func appendDelta(stored, incoming []provider.Message) (full, delta []provider.Message) {
+	full = append([]provider.Message(nil), stored...)
+	// A retry after a failed attempt reuses the question that was already
+	// recorded, instead of stacking a twin the model would see twice.
+	if n := len(stored); n > 0 && len(incoming) == 1 &&
+		!session.IsToolMessage(stored[n-1]) &&
+		stored[n-1].Role == incoming[0].Role &&
+		stored[n-1].Content == incoming[0].Content {
+		return full, nil
+	}
+	full = append(full, incoming...)
+	return full, incoming
 }
 
 func toInternalProvider(cfg config.Provider) provider.Provider {

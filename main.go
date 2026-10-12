@@ -205,7 +205,11 @@ func chatViaGateway(h http.Handler, model string) mobile.ChatFunc {
 			"session_id": sessionID,
 			"model":      sessionModel(h, sessionID, model),
 			"stream":     true,
-			"messages":   []map[string]string{{"role": "user", "content": text}},
+			// This frame carries only the message just typed, not the
+			// transcript: the gateway appends it to the stored history instead
+			// of trying to match a prefix it cannot share.
+			"append":   true,
+			"messages": []map[string]string{{"role": "user", "content": text}},
 		})
 		if err != nil {
 			return "", 0, 0, err

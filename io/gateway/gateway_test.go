@@ -625,3 +625,42 @@ func TestSafeFileName(t *testing.T) {
 		t.Errorf("safeSegment = %q", got)
 	}
 }
+
+func TestAppendDeltaKeepsStoredHistory(t *testing.T) {
+	user := func(s string) provider.Message { return provider.Message{Role: "user", Content: s} }
+	asst := func(s string) provider.Message { return provider.Message{Role: "assistant", Content: s} }
+	stored := []provider.Message{user("คำถามแรก"), asst("คำตอบแรก"), user("คำถามที่สอง"), asst("คำตอบที่สอง")}
+	incoming := []provider.Message{user("คำถามที่สาม")}
+
+	// What the WebSocket path used to do: a single new message shares no
+	// prefix with the stored transcript, so everything before it was cut and
+	// the model answered as if this were a fresh conversation.
+	if _, full := mergeHistory(stored, incoming); len(full) != 1 {
+		t.Fatalf("mergeHistory is expected to drop history for a single new turn; got %d messages", len(full))
+	}
+
+	full, delta := appendDelta(stored, incoming)
+	if len(full) != 5 {
+		t.Fatalf("appendDelta kept %d messages, want the whole conversation (5)", len(full))
+	}
+	if full[0].Content != "คำถามแรก" {
+		t.Errorf("first message = %q, want คำถามแรก", full[0].Content)
+	}
+	if len(delta) != 1 || delta[0].Content != "คำถามที่สาม" {
+		t.Errorf("delta = %+v, want only the new turn", delta)
+	}
+}
+
+func TestAppendDeltaReusesRecordedQuestionOnRetry(t *testing.T) {
+	user := func(s string) provider.Message { return provider.Message{Role: "user", Content: s} }
+	// The failed attempt already recorded the question; a retry must not
+	// stack a twin the model would read as the user asking twice.
+	stored := []provider.Message{user("ก่อนหน้า"), user("คำถามที่ล้มแล้ว")}
+	full, delta := appendDelta(stored, []provider.Message{user("คำถามที่ล้มแล้ว")})
+	if len(full) != 2 {
+		t.Errorf("retry stacked a twin: %d messages, want 2", len(full))
+	}
+	if len(delta) != 0 {
+		t.Errorf("retry should persist nothing new, got %d messages", len(delta))
+	}
+}
