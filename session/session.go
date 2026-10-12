@@ -28,15 +28,21 @@ type Session struct {
 }
 
 type Turn struct {
-	SessionID    string `json:"session_id"`
-	Seq          int    `json:"seq"`
-	Role         string `json:"role"`
-	Text         string `json:"text"`
-	Model        string `json:"model,omitempty"`
-	InputTokens  int    `json:"input_tokens,omitempty"`
-	OutputTokens int    `json:"output_tokens,omitempty"`
-	DurationMS   int64  `json:"duration_ms,omitempty"`
-	CreatedAt    int64  `json:"created_at"`
+	SessionID          string `json:"session_id"`
+	Seq                int    `json:"seq"`
+	Role               string `json:"role"`
+	Agent              string `json:"agent,omitempty"`
+	JobID              string `json:"job_id,omitempty"`
+	Text               string `json:"text"`
+	Model              string `json:"model,omitempty"`
+	InputTokens        int    `json:"input_tokens,omitempty"`
+	OutputTokens       int    `json:"output_tokens,omitempty"`
+	CacheReadTokens    int    `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens   int    `json:"cache_write_tokens,omitempty"`
+	ReasoningTokens    int    `json:"reasoning_tokens,omitempty"`
+	InputIncludesCache bool   `json:"input_includes_cache,omitempty"`
+	DurationMS         int64  `json:"duration_ms,omitempty"`
+	CreatedAt          int64  `json:"created_at"`
 }
 
 type NewSession struct {
@@ -159,15 +165,21 @@ func (d *D1) Turns(id string) ([]Turn, error) {
 	turns := make([]Turn, 0, len(rows))
 	for _, row := range rows {
 		turns = append(turns, Turn{
-			SessionID:    stringField(row, "session_id"),
-			Seq:          intField(row, "seq"),
-			Role:         stringField(row, "role"),
-			Text:         stringField(row, "text"),
-			Model:        stringField(row, "model"),
-			InputTokens:  intField(row, "input_tokens"),
-			OutputTokens: intField(row, "output_tokens"),
-			DurationMS:   int64Field(row, "duration_ms"),
-			CreatedAt:    int64Field(row, "created_at"),
+			SessionID:          stringField(row, "session_id"),
+			Seq:                intField(row, "seq"),
+			Role:               stringField(row, "role"),
+			Agent:              stringField(row, "agent"),
+			JobID:              stringField(row, "job_id"),
+			Text:               stringField(row, "text"),
+			Model:              stringField(row, "model"),
+			InputTokens:        intField(row, "input_tokens"),
+			OutputTokens:       intField(row, "output_tokens"),
+			CacheReadTokens:    intField(row, "cache_read_tokens"),
+			CacheWriteTokens:   intField(row, "cache_write_tokens"),
+			ReasoningTokens:    intField(row, "reasoning_tokens"),
+			InputIncludesCache: intField(row, "input_includes_cache") != 0,
+			DurationMS:         int64Field(row, "duration_ms"),
+			CreatedAt:          int64Field(row, "created_at"),
 		})
 	}
 	return turns, nil

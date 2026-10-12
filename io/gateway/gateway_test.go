@@ -581,3 +581,29 @@ func TestToolHooksFireDuringRounds(t *testing.T) {
 		t.Errorf("tool results = %v, want [current_time]", results)
 	}
 }
+
+func TestUISpecMerge(t *testing.T) {
+	gateway, _ := newTestGateway(t, newMemStore())
+	spec, err := gateway.uiSpec()
+	if err != nil {
+		t.Fatalf("uiSpec: %v", err)
+	}
+	var base map[string]any
+	if err := json.Unmarshal(spec, &base); err != nil {
+		t.Fatalf("spec not json: %v", err)
+	}
+	strings, _ := base["strings"].(map[string]any)
+	if strings["retry"] != "ลองอีกครั้ง" {
+		t.Errorf("default retry = %v", strings["retry"])
+	}
+	// A partial override changes only the keys it names.
+	dst := map[string]any{"strings": map[string]any{"retry": "กดซ้ำ", "dismiss": "ปิด"}}
+	mergeMaps(dst, map[string]any{"strings": map[string]any{"retry": "ใหม่"}})
+	merged := dst["strings"].(map[string]any)
+	if merged["retry"] != "ใหม่" {
+		t.Errorf("retry = %v, want ใหม่", merged["retry"])
+	}
+	if merged["dismiss"] != "ปิด" {
+		t.Errorf("dismiss was dropped: %v", merged["dismiss"])
+	}
+}
