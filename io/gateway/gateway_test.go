@@ -704,3 +704,16 @@ func TestFinalAnswerHoldsOnlyTheLastToolRound(t *testing.T) {
 		t.Errorf("answer = %q, want only the last round's text", resp.Content)
 	}
 }
+
+func TestGenerationMillisCountsWritingNotWaiting(t *testing.T) {
+	// A turn that reached a provider reports how long the model spent writing,
+	// which is what the elapsed figure and the tokens-per-second both mean.
+	if got := generationMillis(time.Now().Add(-time.Hour), &provider.Response{GenerationMS: 4200}); got != 4200 {
+		t.Errorf("generation = %d, want 4200 (not the wall time)", got)
+	}
+	// A turn that never reached a provider still reports something sensible
+	// rather than "0s".
+	if got := generationMillis(time.Now().Add(-150*time.Millisecond), &provider.Response{}); got < 140 {
+		t.Errorf("fallback = %d, want roughly the wall time", got)
+	}
+}

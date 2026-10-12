@@ -139,8 +139,7 @@ func (g *Gateway) chatOnce(w http.ResponseWriter, r *http.Request, stored *sessi
 		writeUpstreamError(w, err)
 		return
 	}
-	duration := time.Since(started).Milliseconds()
-	g.persist(stored, delta, resp, options, duration)
+	g.persist(stored, delta, resp, options, generationMillis(started, resp))
 
 	id := resp.ID
 	if id == "" {
@@ -222,8 +221,7 @@ func (g *Gateway) chatStream(w http.ResponseWriter, r *http.Request, stored *ses
 		writeSSEDone(w, flusher)
 		return
 	}
-	duration := time.Since(started).Milliseconds()
-	g.persist(stored, delta, resp, options, duration)
+	g.persist(stored, delta, resp, options, generationMillis(started, resp))
 
 	finish := resp.FinishReason
 	if finish == "" {
@@ -378,7 +376,11 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 			User:        options.user,
 		}
 
+		callStarted := time.Now()
 		resp, err := g.call(ctx, current, request, emit, canRetry)
+		// A failed attempt still cost time, and it is time the turn spent
+		// talking to a provider, so it counts towards the generation figure.
+		final.GenerationMS += time.Since(callStarted).Milliseconds()
 		if err != nil {
 			if fallback != nil && !usedFallback && canRetry() {
 				current = *fallback
@@ -448,7 +450,9 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 			Stream:      options.stream,
 			User:        options.user,
 		}
+		callStarted := time.Now()
 		resp, err := g.call(ctx, current, request, emit, canRetry)
+		final.GenerationMS += time.Since(callStarted).Milliseconds()
 		if err != nil {
 			return nil, err
 		}
@@ -707,6 +711,18 @@ func appendDelta(stored, incoming []provider.Message) (full, delta []provider.Me
 	}
 	full = append(full, incoming...)
 	return full, incoming
+}
+
+// generationMillis is the turn's duration as a reader understands it: how long
+// the model spent writing. The wall clock also counts the queue before the first
+// token and every tool that ran in between, and using it made both the elapsed
+// figure and the tokens-per-second read wrong. A turn that never reached a
+// provider falls back to the wall time so it is never reported as "0s".
+func generationMillis(started time.Time, resp *provider.Response) int64 {
+	if resp.GenerationMS > 0 {
+		return resp.GenerationMS
+	}
+	return time.Since(started).Milliseconds()
 }
 
 func toInternalProvider(cfg config.Provider) provider.Provider {

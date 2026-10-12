@@ -57,6 +57,11 @@ type Response struct {
 	// Trail holds the tool steps taken while producing Content, in order: an
 	// assistant message carrying ToolCalls, then one tool message per call.
 	Trail []Message
+	// GenerationMS is the time spent inside the provider calls, summed over every
+	// round. It is not the wall time of the turn: that also covers waiting for
+	// the provider and running tools, and dividing the token count by it reported
+	// a speed the model never had.
+	GenerationMS int64
 }
 
 type Usage struct {
