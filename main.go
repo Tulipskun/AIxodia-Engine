@@ -175,7 +175,7 @@ func startTunnel(ctx context.Context) (string, error) {
 // otherwise the agent default — without this every chat is answered with
 // the default even after the user pins another model mid-session.
 func chatViaGateway(h http.Handler, model string) mobile.ChatFunc {
-	return func(ctx context.Context, sessionID, text string, onDelta func(string)) (string, int, int, error) {
+	return func(ctx context.Context, sessionID, text string, onDelta func(string), onTool func(mobile.ToolEvent)) (string, int, int, error) {
 		body, err := json.Marshal(map[string]any{
 			"session_id": sessionID,
 			"model":      sessionModel(h, sessionID, model),
@@ -194,6 +194,12 @@ func chatViaGateway(h http.Handler, model string) mobile.ChatFunc {
 		sw := &sseWriter{header: http.Header{}, status: http.StatusOK}
 		sw.onEvent = func(data []byte) {
 			if bytes.Equal(data, []byte("[DONE]")) {
+				return
+			}
+			if ev, ok := parseToolEvent(data); ok {
+				if onTool != nil {
+					onTool(ev)
+				}
 				return
 			}
 			var ev struct {
@@ -236,6 +242,31 @@ func chatViaGateway(h http.Handler, model string) mobile.ChatFunc {
 		}
 		return full.String(), inTok, outTok, nil
 	}
+}
+
+// parseToolEvent decodes a gateway tool_event SSE payload into a mobile
+// tool event. It reports false when the payload is anything else.
+func parseToolEvent(data []byte) (mobile.ToolEvent, bool) {
+	var wrapped struct {
+		ToolEvent *struct {
+			Stage      string `json:"stage"`
+			Name       string `json:"name"`
+			CallID     string `json:"call_id"`
+			Arguments  string `json:"arguments"`
+			Text       string `json:"text"`
+			IsError    bool   `json:"is_error"`
+			DurationMs int64  `json:"duration_ms"`
+		} `json:"tool_event"`
+	}
+	if err := json.Unmarshal(data, &wrapped); err != nil || wrapped.ToolEvent == nil {
+		return mobile.ToolEvent{}, false
+	}
+	te := wrapped.ToolEvent
+	return mobile.ToolEvent{
+		Stage: te.Stage, Name: te.Name, CallID: te.CallID,
+		Arguments: te.Arguments, Text: te.Text,
+		IsError: te.IsError, DurationMs: te.DurationMs,
+	}, true
 }
 
 // sessionModel returns the chat's pinned provider/model when one is stored,

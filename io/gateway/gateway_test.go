@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -541,5 +542,42 @@ func TestIsRepeatOfTail(t *testing.T) {
 	}
 	if isRepeatOfTail(nil, []provider.Message{user("hi")}) {
 		t.Error("empty history must not count as repeat")
+	}
+}
+
+func TestToolHooksFireDuringRounds(t *testing.T) {
+	gateway, _ := newTestGateway(t, newMemStore())
+	impl, err := gateway.registry.Require("openai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Providers[0]
+	primary := route{adapter: impl, prov: toInternalProvider(cfg), model: "test-model"}
+	defs := []provider.ToolDef{tools.Builtin()["current_time"].Def}
+	var calls []string
+	var results []string
+	options := completionOptions{
+		maxTokens: 50,
+		tools:     defs,
+		onToolCall: func(call provider.ToolCall) {
+			calls = append(calls, call.Name)
+		},
+		onToolResult: func(call provider.ToolCall, text string, durationMs int64, isError bool) {
+			results = append(results, call.Name)
+		},
+	}
+	resp, err := gateway.complete(context.Background(), primary, nil,
+		[]provider.Message{{Role: "user", Content: "what time is it"}}, options)
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if resp.Content != "done" {
+		t.Errorf("content = %q, want done", resp.Content)
+	}
+	if len(calls) != 1 || calls[0] != "current_time" {
+		t.Errorf("tool calls = %v, want [current_time]", calls)
+	}
+	if len(results) != 1 || results[0] != "current_time" {
+		t.Errorf("tool results = %v, want [current_time]", results)
 	}
 }

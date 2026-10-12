@@ -25,9 +25,20 @@ const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 const maxFrame = 1 << 20
 
 // ChatFunc answers one user message in a session, calling onDelta for each
-// streamed piece, and returns the full reply plus token counts. It must stop
-// when ctx is cancelled.
-type ChatFunc func(ctx context.Context, sessionID, text string, onDelta func(string)) (reply string, inTokens, outTokens int, err error)
+// streamed piece and onTool for each live tool activity, and returns the
+// full reply plus token counts. It must stop when ctx is cancelled.
+type ChatFunc func(ctx context.Context, sessionID, text string, onDelta func(string), onTool func(ToolEvent)) (reply string, inTokens, outTokens int, err error)
+
+// ToolEvent is one live tool activity inside a turn.
+type ToolEvent struct {
+	Stage      string
+	Name       string
+	CallID     string
+	Arguments  string
+	Text       string
+	IsError    bool
+	DurationMs int64
+}
 
 type inFrame struct {
 	Type      string `json:"type"`
@@ -48,9 +59,26 @@ type outFrame struct {
 	Role         string `json:"role,omitempty"`
 	Agent        string `json:"agent,omitempty"`
 	ClientMsgID  string `json:"client_msg_id,omitempty"`
+	Stage        string `json:"stage,omitempty"`
+	ToolCall     *toolCallJSON `json:"tool_call,omitempty"`
+	ToolResult   *toolResultJSON `json:"tool_result,omitempty"`
+	ToolDuration int64  `json:"tool_duration_ms,omitempty"`
 	Seq          int64  `json:"seq,omitempty"`
 	InputTokens  int    `json:"input_tokens,omitempty"`
 	OutputTokens int    `json:"output_tokens,omitempty"`
+}
+
+type toolCallJSON struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type toolResultJSON struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Text    string `json:"text"`
+	IsError bool   `json:"is_error"`
 }
 
 // Handler upgrades /ws to a WebSocket after checking the bearer token.
@@ -204,7 +232,20 @@ func (p *peer) answer(ctx context.Context, cancel context.CancelFunc, key string
 	onDelta := func(piece string) {
 		_ = p.send(outFrame{Kind: "delta", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID, Text: piece, Role: "model", Agent: "main"})
 	}
-	reply, inTok, outTok, err := chat(ctx, in.SessionID, text, onDelta)
+	onTool := func(ev ToolEvent) {
+		frame := outFrame{Kind: "trace", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID, Agent: "main", Stage: ev.Stage, ToolDuration: ev.DurationMs}
+		switch ev.Stage {
+		case "tool_call":
+			frame.ToolCall = &toolCallJSON{ID: ev.CallID, Name: ev.Name, Arguments: ev.Arguments}
+		case "tool_result":
+			frame.ToolResult = &toolResultJSON{ID: ev.CallID, Name: ev.Name, Text: ev.Text, IsError: ev.IsError}
+			frame.ToolCall = &toolCallJSON{ID: ev.CallID, Name: ev.Name}
+		default:
+			frame.Text = ev.Text
+		}
+		_ = p.send(frame)
+	}
+	reply, inTok, outTok, err := chat(ctx, in.SessionID, text, onDelta, onTool)
 	if ctx.Err() != nil {
 		_ = p.send(outFrame{Kind: "done", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID, Text: "cancelled"})
 		return

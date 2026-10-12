@@ -47,6 +47,11 @@ type completionOptions struct {
 	stream      bool
 	user        string
 	emit        func(string) error
+	// Live tool activity, reported around each execution. Nil when nobody
+	// watches (non-streaming API); the streaming API and the phone socket
+	// forward them so tool use is visible while it runs.
+	onToolCall   func(call provider.ToolCall)
+	onToolResult func(call provider.ToolCall, text string, durationMs int64, isError bool)
 }
 
 func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
@@ -191,9 +196,19 @@ func (g *Gateway) chatStream(w http.ResponseWriter, r *http.Request, stored *ses
 	}
 
 	started := time.Now()
+	options.onToolCall = func(call provider.ToolCall) {
+		_ = writeSSE(w, flusher, map[string]any{"tool_event": map[string]any{
+			"stage": "tool_call", "name": call.Name, "call_id": call.ID, "arguments": call.Arguments,
+		}})
+	}
+	options.onToolResult = func(call provider.ToolCall, text string, durationMs int64, isError bool) {
+		_ = writeSSE(w, flusher, map[string]any{"tool_event": map[string]any{
+			"stage": "tool_result", "name": call.Name, "call_id": call.ID,
+			"text": truncate(text, 4096), "is_error": isError, "duration_ms": durationMs,
+		}})
+	}
 	resp, err := g.complete(r.Context(), primary, fallback, history, options)
 	if err != nil {
-		g.persistUserDelta(stored, history, delta)
 		payload := map[string]any{"error": map[string]any{"message": err.Error(), "type": "upstream_error"}}
 		_ = writeSSE(w, flusher, payload)
 		writeSSEDone(w, flusher)
@@ -391,11 +406,19 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 		conversation = append(conversation, assistant)
 		final.Trail = append(final.Trail, assistant)
 		for _, call := range resp.ToolCalls {
+			if options.onToolCall != nil {
+				options.onToolCall(call)
+			}
+			started := time.Now()
+			output := g.runTool(ctx, call)
+			if options.onToolResult != nil {
+				options.onToolResult(call, output, time.Since(started).Milliseconds(), isToolError(output))
+			}
 			result := provider.Message{
 				Role:       "tool",
 				ToolCallID: call.ID,
 				ToolName:   call.Name,
-				Content:    g.runTool(ctx, call),
+				Content:    output,
 			}
 			conversation = append(conversation, result)
 			final.Trail = append(final.Trail, result)
@@ -496,8 +519,14 @@ func (g *Gateway) runTool(ctx context.Context, call provider.ToolCall) string {
 	return truncate(result, 32*1024)
 }
 
-func toolError(message string) string {
-	encoded, err := json.Marshal(map[string]string{"error": message})
+// isToolError reports whether tool output is a toolError envelope (a failed
+// execution), as opposed to genuine command output.
+func isToolError(output string) bool {
+	trimmed := strings.TrimSpace(output)
+	return strings.HasPrefix(trimmed, `{"error":`) || strings.HasPrefix(trimmed, `{"error" :`)
+}
+
+func toolError(message string) string {	encoded, err := json.Marshal(map[string]string{"error": message})
 	if err != nil {
 		return `{"error":"tool failed"}`
 	}
