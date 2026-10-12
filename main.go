@@ -54,6 +54,14 @@ func main() {
 
 	g := gateway.New(session.NewD1(), registry.New(), tools.Builtin())
 	g.SetStartedAt(startedAt)
+	// Attachments land here; the agent reads them from these paths. Kaggle's
+	// /kaggle/working is the writable directory, and the env can point it
+	// somewhere else (or to nothing, which disables uploads).
+	uploads := strings.TrimSpace(os.Getenv("AIXODIA_UPLOADS"))
+	if uploads == "" {
+		uploads = "/kaggle/working/uploads"
+	}
+	g.SetUploadDir(uploads)
 	gw := g.Handler()
 	model := strings.TrimSpace(os.Getenv("AIXODIA_MODEL"))
 	if model == "" {

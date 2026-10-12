@@ -141,3 +141,13 @@ func TestHubBroadcastUIFrame(t *testing.T) {
 		t.Errorf("source = %v", f["source"])
 	}
 }
+
+func TestAttachmentNote(t *testing.T) {
+	if got := attachmentNote(nil); got != "" {
+		t.Errorf("empty attachments should add nothing, got %q", got)
+	}
+	got := attachmentNote([]attachment{{Name: "a.jpg", Path: "/tmp/a.jpg", Mime: "image/jpeg"}})
+	if !strings.Contains(got, "a.jpg") || !strings.Contains(got, "/tmp/a.jpg") {
+		t.Errorf("note missing name/path: %q", got)
+	}
+}

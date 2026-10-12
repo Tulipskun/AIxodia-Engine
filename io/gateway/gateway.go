@@ -54,6 +54,8 @@ type Gateway struct {
 	// uiChanged is called with the new spec whenever it is saved, so the
 	// daemon can push it to every connected phone instead of the phone polling.
 	uiChanged func(json.RawMessage)
+	// uploadDir is where attachments are stored, so the agent can read them.
+	uploadDir string
 }
 
 type modelCache struct {

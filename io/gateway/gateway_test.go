@@ -607,3 +607,21 @@ func TestUISpecMerge(t *testing.T) {
 		t.Errorf("dismiss was dropped: %v", merged["dismiss"])
 	}
 }
+
+func TestSafeFileName(t *testing.T) {
+	cases := map[string]string{
+		"../../etc/passwd": "passwd",
+		"/abs/photo.jpg":   "photo.jpg",
+		"my file (1).png":  "my file (1).png",
+		"...":              "",
+		"รูปถ่าย.jpg":        "รูปถ่าย.jpg",
+	}
+	for in, want := range cases {
+		if got := safeFileName(in); got != want {
+			t.Errorf("safeFileName(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := safeSegment("ses-1/../../x"); got != "ses-1x" {
+		t.Errorf("safeSegment = %q", got)
+	}
+}

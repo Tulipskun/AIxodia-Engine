@@ -49,6 +49,16 @@ type inFrame struct {
 	} `json:"content"`
 	ClientMsgID string `json:"client_msg_id"`
 	JobID       string `json:"job_id"`
+	// Attachments are files the phone already uploaded. Their daemon-side paths
+	// are handed to the agent, which reads them with its own tools.
+	Attachments []attachment `json:"attachments"`
+}
+
+type attachment struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	Mime string `json:"mime"`
+	Size int64  `json:"size"`
 }
 
 type outFrame struct {
@@ -268,6 +278,15 @@ func handle(p *peer, in inFrame, chat ChatFunc) {
 		}
 		text := strings.Join(parts, "\n")
 		_ = p.send(outFrame{Kind: "ack", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID})
+		if note := attachmentNote(in.Attachments); note != "" {
+			// The note travels with the message, so the stored turn shows what
+			// was attached and the agent is told where to find it.
+			if strings.TrimSpace(text) == "" {
+				text = note
+			} else {
+				text = text + "\n\n" + note
+			}
+		}
 		if strings.TrimSpace(text) == "" {
 			_ = p.send(outFrame{Kind: "error", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID, Text: "ข้อความว่าง"})
 			return
@@ -282,6 +301,35 @@ func handle(p *peer, in inFrame, chat ChatFunc) {
 		p.register(key, cancel)
 		go p.answer(ctx, cancel, key, in, text, chat)
 	}
+}
+
+// attachmentNote is the line appended to a message that carried files, so the
+// agent knows what was attached and where each file sits on disk.
+func attachmentNote(items []attachment) string {
+	if len(items) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("[ไฟล์แนบ]")
+	for _, a := range items {
+		b.WriteString("\n- ")
+		if a.Name != "" {
+			b.WriteString(a.Name)
+		} else {
+			b.WriteString("ไฟล์")
+		}
+		if a.Path != "" {
+			b.WriteString(" → ")
+			b.WriteString(a.Path)
+		}
+		if a.Mime != "" {
+			b.WriteString(" (")
+			b.WriteString(a.Mime)
+			b.WriteString(")")
+		}
+	}
+	b.WriteString("\nเปิดอ่านได้ด้วย tool read/bash ตามพาธด้านบน")
+	return b.String()
 }
 
 func (p *peer) answer(ctx context.Context, cancel context.CancelFunc, key string, in inFrame, text string, chat ChatFunc) {

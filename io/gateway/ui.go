@@ -33,6 +33,7 @@ func defaultUISpec() json.RawMessage {
     "app_name": "AIxodia",
     "composer_placeholder": "ส่งข้อความ…",
     "send": "ส่ง",
+    "attach": "แนบไฟล์",
     "stop": "หยุดการทำงาน",
     "retry": "ลองอีกครั้ง",
     "dismiss": "ปิด",
@@ -78,7 +79,8 @@ func defaultUISpec() json.RawMessage {
   },
   "composer": {
     "max_lines": 5,
-    "show_stop_button": true
+    "show_stop_button": true,
+    "show_attach": true
   }
 }`)
 }
