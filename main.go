@@ -171,11 +171,14 @@ func startTunnel(ctx context.Context) (string, error) {
 // chatViaGateway answers one message by calling the HTTP chat route in-process
 // with stream=true, so the WebSocket path shares routing, history, and
 // persistence with the API. Each SSE delta is forwarded through onDelta.
+// The model is the chat's pinned provider/model when one is stored,
+// otherwise the agent default — without this every chat is answered with
+// the default even after the user pins another model mid-session.
 func chatViaGateway(h http.Handler, model string) mobile.ChatFunc {
 	return func(ctx context.Context, sessionID, text string, onDelta func(string)) (string, int, int, error) {
 		body, err := json.Marshal(map[string]any{
 			"session_id": sessionID,
-			"model":      model,
+			"model":      sessionModel(h, sessionID, model),
 			"stream":     true,
 			"messages":   []map[string]string{{"role": "user", "content": text}},
 		})
@@ -233,6 +236,29 @@ func chatViaGateway(h http.Handler, model string) mobile.ChatFunc {
 		}
 		return full.String(), inTok, outTok, nil
 	}
+}
+
+// sessionModel returns the chat's pinned provider/model when one is stored,
+// otherwise the agent default.
+func sessionModel(h http.Handler, sessionID, def string) string {
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/"+sessionID, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return def
+	}
+	var got struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		Pinned   bool   `json:"pinned"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		return def
+	}
+	if !got.Pinned || got.Provider == "" || got.Model == "" {
+		return def
+	}
+	return got.Provider + "/" + got.Model
 }
 
 // sseWriter is a minimal in-process http.ResponseWriter that splits the SSE
