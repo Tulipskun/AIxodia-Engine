@@ -307,6 +307,7 @@ func (g *Gateway) apiModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	providers := config.GetProviders()
+	savedProvider, savedModel := g.savedMainModel()
 	views := make([]providerView, len(providers))
 	// providerModels caches each upstream's list for a minute, so opening the
 	// model picker does not ask all hundred providers again.
@@ -324,6 +325,17 @@ func (g *Gateway) apiModels(w http.ResponseWriter, r *http.Request) {
 			}
 			if len(ids) > 0 {
 				view.DefaultModel = ids[0]
+				// Point the default at the model saved in settings when it
+				// belongs to this provider, so the picker opens on what the
+				// user actually chose instead of the upstream list head.
+				if savedModel != "" && cfg.Name == savedProvider {
+					for _, id := range ids {
+						if id == savedModel {
+							view.DefaultModel = id
+							break
+						}
+					}
+				}
 			}
 		}
 		views[i] = view
@@ -332,6 +344,25 @@ func (g *Gateway) apiModels(w http.ResponseWriter, r *http.Request) {
 }
 
 const settingsStateKey = "settings"
+
+// savedMainModel returns the provider/model saved in settings, or ""/""
+// when nothing usable is stored.
+func (g *Gateway) savedMainModel() (string, string) {
+	rows, err := db.Select("state", db.Where{"key": settingsStateKey})
+	if err != nil || len(rows) == 0 {
+		return "", ""
+	}
+	var saved struct {
+		Main struct {
+			Provider string `json:"provider"`
+			Model    string `json:"model"`
+		} `json:"main"`
+	}
+	if err := json.Unmarshal([]byte(rowString(rows[0], "value")), &saved); err != nil {
+		return "", ""
+	}
+	return saved.Main.Provider, saved.Main.Model
+}
 
 func defaultSettings() json.RawMessage {
 	return json.RawMessage(`{"main":{"provider":"","model":"","generation":{}},"sub":{"provider":"","model":"","generation":{}},"sub_enabled":true}`)
