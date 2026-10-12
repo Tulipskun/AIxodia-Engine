@@ -1,0 +1,37 @@
+name: Release engine
+
+# Every push to main produces a fresh linux-amd64 binary on a rolling release.
+# The Kaggle notebook downloads it at startup, so an engine change no longer
+# needs a dataset version or a binary upload — only a kernel restart.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.2"
+
+      - name: Build
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags "-s -w" -o ai-engine .
+          ls -l ai-engine
+
+      - name: Publish rolling release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view engine-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create engine-latest --repo "$GITHUB_REPOSITORY" \
+              --title "engine-latest" --notes "Rolling build of main"
+          gh release upload engine-latest ai-engine --repo "$GITHUB_REPOSITORY" --clobber
