@@ -34,6 +34,9 @@ func defaultUISpec() json.RawMessage {
     "composer_placeholder": "ส่งข้อความ…",
     "send": "ส่ง",
     "attach": "แนบไฟล์",
+    "attach_title": "แนบสิ่งที่ต้องการ",
+    "attach_media": "รูปภาพ / วิดีโอ",
+    "attach_file": "ไฟล์แนบ",
     "stop": "หยุดการทำงาน",
     "retry": "ลองอีกครั้ง",
     "dismiss": "ปิด",
@@ -81,7 +84,37 @@ func defaultUISpec() json.RawMessage {
     "max_lines": 5,
     "show_stop_button": true,
     "show_attach": true
-  }
+  },
+  "screens": {
+    "example": {
+      "title": "หน้าจอตัวอย่าง (มาจาก daemon)",
+      "subtitle": "ทั้งหน้านี้ประกอบจาก spec — แก้ที่ daemon แล้วเห็นผลทันที ไม่ต้องติดตั้งแอพใหม่",
+      "body": [
+        { "type": "section", "label": "ปุ่ม", "subtitle": "กดแล้วสั่งงานแอพได้เลย",
+          "children": [
+            { "type": "button", "label": "แชทใหม่", "action": "new_chat" },
+            { "type": "button", "label": "ดึงข้อมูลล่าสุด", "action": "refresh", "style": "outlined" }
+          ] },
+        { "type": "section", "label": "สวิตช์", "subtitle": "ค่าถูกเก็บไว้ในเครื่องและอ่านกลับมาแสดงได้",
+          "children": [
+            { "type": "toggle", "label": "โหมดตัวอย่าง", "key": "demo_flag", "checked": false, "action": "set_value" }
+          ] },
+        { "type": "section", "label": "ช่องกรอก",
+          "children": [
+            { "type": "field", "label": "ชื่อเล่น", "key": "nickname", "placeholder": "พิมพ์ที่นี่", "action": "set_value" }
+          ] },
+        { "type": "text", "value": "ค่าที่เก็บไว้: {nickname}", "style": "caption" },
+        { "type": "divider" },
+        { "type": "list", "items": [
+          { "title": "ตั้งค่าแอพ", "subtitle": "หน้าตั้งค่าเดิม", "action": "open_settings" },
+          { "title": "ผู้ให้บริการ", "action": "open_providers" }
+        ] }
+      ]
+    }
+  },
+  "drawer_items": [
+    { "title": "ตัวอย่างหน้าจอ (จาก daemon)", "action": "open_screen", "params": { "screen": "example" } }
+  ]
 }`)
 }
 
