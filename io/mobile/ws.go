@@ -62,20 +62,20 @@ type attachment struct {
 }
 
 type outFrame struct {
-	Source       string `json:"source"`
-	SessionID    string `json:"session_id"`
-	Kind         string `json:"kind"`
-	Text         string `json:"text,omitempty"`
-	Role         string `json:"role,omitempty"`
-	Agent        string `json:"agent,omitempty"`
-	ClientMsgID  string `json:"client_msg_id,omitempty"`
-	Stage        string `json:"stage,omitempty"`
-	ToolCall     *toolCallJSON `json:"tool_call,omitempty"`
+	Source       string          `json:"source"`
+	SessionID    string          `json:"session_id"`
+	Kind         string          `json:"kind"`
+	Text         string          `json:"text,omitempty"`
+	Role         string          `json:"role,omitempty"`
+	Agent        string          `json:"agent,omitempty"`
+	ClientMsgID  string          `json:"client_msg_id,omitempty"`
+	Stage        string          `json:"stage,omitempty"`
+	ToolCall     *toolCallJSON   `json:"tool_call,omitempty"`
 	ToolResult   *toolResultJSON `json:"tool_result,omitempty"`
-	ToolDuration int64  `json:"tool_duration_ms,omitempty"`
-	Seq          int64  `json:"seq,omitempty"`
-	InputTokens  int    `json:"input_tokens,omitempty"`
-	OutputTokens int    `json:"output_tokens,omitempty"`
+	ToolDuration int64           `json:"tool_duration_ms,omitempty"`
+	Seq          int64           `json:"seq,omitempty"`
+	InputTokens  int             `json:"input_tokens,omitempty"`
+	OutputTokens int             `json:"output_tokens,omitempty"`
 	// UI carries the server-driven UI spec on a kind="ui" frame. It is sent
 	// when a phone connects and again whenever the spec changes, so the app
 	// never has to poll for it.

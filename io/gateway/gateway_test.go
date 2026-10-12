@@ -614,7 +614,7 @@ func TestSafeFileName(t *testing.T) {
 		"/abs/photo.jpg":   "photo.jpg",
 		"my file (1).png":  "my file (1).png",
 		"...":              "",
-		"รูปถ่าย.jpg":        "รูปถ่าย.jpg",
+		"รูปถ่าย.jpg":      "รูปถ่าย.jpg",
 	}
 	for in, want := range cases {
 		if got := safeFileName(in); got != want {

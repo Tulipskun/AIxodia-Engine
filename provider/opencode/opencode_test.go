@@ -440,10 +440,10 @@ func TestSparkChainReachesResponsesTools(t *testing.T) {
 	adapter := New()
 	var got []string
 	resp, err := adapter.Stream(context.Background(), &provider.Request{
-		Model:    "muse-spark-1.3-contributor-free",
-		Messages: []provider.Message{{Role: "user", Content: "hi"}},
+		Model:     "muse-spark-1.3-contributor-free",
+		Messages:  []provider.Message{{Role: "user", Content: "hi"}},
 		MaxTokens: 60,
-		Tools:    []provider.ToolDef{{Name: "bash", Description: "run"}, {Name: "read", Description: "read"}},
+		Tools:     []provider.ToolDef{{Name: "bash", Description: "run"}, {Name: "read", Description: "read"}},
 	}, providerFor(server), "key", func(s string) error { got = append(got, s); return nil })
 	if err != nil {
 		t.Fatalf("stream: %v (paths=%v)", err, paths)

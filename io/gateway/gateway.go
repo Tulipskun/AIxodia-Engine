@@ -77,6 +77,7 @@ func New(sessions SessionStore, reg *registry.Registry, toolset map[string]tools
 		probes:    newProbeCache(),
 	}
 }
+
 // SetStartedAt records when this engine process began, so /healthz can report
 // how long the daemon has been up.
 func (g *Gateway) SetStartedAt(unixSeconds int64) { g.startedAt = unixSeconds }

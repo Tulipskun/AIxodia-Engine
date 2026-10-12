@@ -526,7 +526,8 @@ func isToolError(output string) bool {
 	return strings.HasPrefix(trimmed, `{"error":`) || strings.HasPrefix(trimmed, `{"error" :`)
 }
 
-func toolError(message string) string {	encoded, err := json.Marshal(map[string]string{"error": message})
+func toolError(message string) string {
+	encoded, err := json.Marshal(map[string]string{"error": message})
 	if err != nil {
 		return `{"error":"tool failed"}`
 	}
@@ -600,7 +601,8 @@ func isRepeatOfTail(recorded, delta []provider.Message) bool {
 	return false
 }
 
-func (g *Gateway) persist(stored *session.Session, delta []provider.Message, resp *provider.Response, options completionOptions, duration int64) {	if stored == nil {
+func (g *Gateway) persist(stored *session.Session, delta []provider.Message, resp *provider.Response, options completionOptions, duration int64) {
+	if stored == nil {
 		return
 	}
 
