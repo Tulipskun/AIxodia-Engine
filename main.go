@@ -65,7 +65,7 @@ func main() {
 	// Self-update: the daemon can replace its own binary and re-execute, so a
 	// new engine build reaches a running kernel without a dataset version or a
 	// kernel restart.
-	g.SetEngineUpdater(selfUpdate)
+	g.SetEngineUpdater(prepareSelfUpdate)
 	gw := g.Handler()
 	model := strings.TrimSpace(os.Getenv("AIXODIA_MODEL"))
 	if model == "" {

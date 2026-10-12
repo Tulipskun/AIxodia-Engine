@@ -56,9 +56,10 @@ type Gateway struct {
 	uiChanged func(json.RawMessage)
 	// uploadDir is where attachments are stored, so the agent can read them.
 	uploadDir string
-	// engineUpdater replaces the running engine with a newer build. Nil when
-	// this deployment cannot update itself.
-	engineUpdater func() error
+	// engineUpdater downloads and verifies a newer build and returns the
+	// commit that swaps the process into it. Nil when this deployment cannot
+	// update itself.
+	engineUpdater func() (func() error, error)
 }
 
 type modelCache struct {
@@ -90,8 +91,10 @@ func (g *Gateway) SetUIChanged(fn func(json.RawMessage)) { g.uiChanged = fn }
 // connect or caches it.
 func (g *Gateway) UISpecJSON() (json.RawMessage, error) { return g.uiSpec() }
 
-// SetEngineUpdater registers the self-update routine behind POST /api/engine/update.
-func (g *Gateway) SetEngineUpdater(fn func() error) { g.engineUpdater = fn }
+// SetEngineUpdater registers the self-update routine behind
+// POST /api/engine/update. The routine returns a commit function so the handler
+// can answer before the process is replaced.
+func (g *Gateway) SetEngineUpdater(fn func() (func() error, error)) { g.engineUpdater = fn }
 
 func (g *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()
