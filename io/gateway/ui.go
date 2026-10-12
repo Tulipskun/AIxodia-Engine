@@ -104,6 +104,11 @@ func defaultUISpec() json.RawMessage {
             { "type": "field", "label": "ชื่อเล่น", "key": "nickname", "placeholder": "พิมพ์ที่นี่", "action": "set_value" }
           ] },
         { "type": "text", "value": "ค่าที่เก็บไว้: {nickname}", "style": "caption" },
+        { "type": "section", "label": "engine", "subtitle": "อัปเดตไบนารีจาก GitHub โดยไม่รีสตาร์ท session ของ Kaggle",
+          "children": [
+            { "type": "button", "label": "อัปเดต engine เดี๋ยวนี้", "style": "outlined",
+              "action": "api_post", "params": { "path": "/api/engine/update", "ok": "กำลังอัปเดต engine…" } }
+          ] },
         { "type": "divider" },
         { "type": "list", "items": [
           { "title": "ตั้งค่าแอพ", "subtitle": "หน้าตั้งค่าเดิม", "action": "open_settings" },
