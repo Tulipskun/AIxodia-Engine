@@ -719,7 +719,6 @@ func TestGenerationMillisCountsWritingNotWaiting(t *testing.T) {
 	}
 }
 
-
 // The footer shows two different numbers from one turn: how long the reader
 // waited (the whole turn) and how fast the model wrote (the provider window).
 // Collapsing them into one column made either the elapsed time or the rate

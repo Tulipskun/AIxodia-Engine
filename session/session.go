@@ -350,7 +350,6 @@ func boolField(row map[string]any, key string) bool {
 	}
 }
 
-
 // EnsureTurns has the columns the current engine writes. Adding a column is
 // cheap and idempotent, and doing it here means a database that predates the
 // generation clock keeps working instead of failing every insert.
