@@ -172,3 +172,90 @@ func contains(values []string, want string) bool {
 	}
 	return false
 }
+
+func TestContractToolsAreTruthful(t *testing.T) {
+	got := contractTools(nil)
+	names := map[string]provider.ToolDef{}
+	for _, d := range got {
+		names[d.Name] = d
+	}
+	for _, name := range []string{"shell", "read"} {
+		d, ok := names[name]
+		if !ok {
+			t.Fatalf("contractTools(nil) missing %q", name)
+		}
+		if strings.Contains(d.Description, "Not available") {
+			t.Errorf("placeholder %q still discourages use: %q", name, d.Description)
+		}
+		if len(d.Parameters) == 0 {
+			t.Errorf("placeholder %q has no parameters", name)
+		}
+	}
+}
+
+func TestRetryWithoutToolsOnProtocolRejection(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		body, _ := io.ReadAll(r.Body)
+		if calls == 1 {
+			if !strings.Contains(string(body), `"shell"`) {
+				t.Errorf("first request should carry injected tools")
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"message":"Model does not support this protocol."}`)
+			return
+		}
+		var parsed struct {
+			Tools []any `json:"tools"`
+		}
+		_ = json.Unmarshal(body, &parsed)
+		if parsed.Tools != nil {
+			t.Errorf("retry should carry no tools, got %v", parsed.Tools)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(server.Close)
+
+	adapter := New()
+	resp, err := adapter.Complete(context.Background(), &provider.Request{
+		Model:    "zen-model",
+		Messages: []provider.Message{{Role: "user", Content: "hi"}},
+		Tools:    []provider.ToolDef{{Name: "current_time", Description: "now"}},
+	}, providerFor(server), "key")
+	if err != nil {
+		t.Fatalf("retry without tools: %v", err)
+	}
+	if resp.Content != "recovered" {
+		t.Errorf("content = %q, want recovered", resp.Content)
+	}
+	if calls != 2 {
+		t.Errorf("requests = %d, want 2 (initial + tools-less retry)", calls)
+	}
+}
+
+func TestNoRetryOnUnrelatedErrors(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = io.WriteString(w, `{"message":"Insufficient account funds"}`)
+	}))
+	t.Cleanup(server.Close)
+
+	adapter := New()
+	_, err := adapter.Complete(context.Background(), &provider.Request{
+		Model:    "zen-model",
+		Messages: []provider.Message{{Role: "user", Content: "hi"}},
+	}, providerFor(server), "key")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if calls != 1 {
+		t.Errorf("requests = %d, want 1 (no retry on funds errors)", calls)
+	}
+}

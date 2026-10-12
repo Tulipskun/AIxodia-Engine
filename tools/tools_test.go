@@ -69,7 +69,7 @@ func TestIsPublicIP(t *testing.T) {
 
 func TestBuiltinHasBashAndRead(t *testing.T) {
 	b := Builtin()
-	for _, name := range []string{"current_time", "fetch_url", "bash", "read"} {
+	for _, name := range []string{"current_time", "fetch_url", "bash", "shell", "read"} {
 		tool, ok := b[name]
 		if !ok {
 			t.Fatalf("Builtin() missing tool %q", name)

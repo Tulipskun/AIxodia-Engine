@@ -24,7 +24,31 @@ type Tool struct {
 }
 
 func Builtin() map[string]Tool {
-	return map[string]Tool{
+	bashDef := provider.ToolDef{
+		Name:        "bash",
+		Description: "Executes a shell command on the host (sh -c) and returns combined stdout and stderr output.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"command": map[string]any{
+					"type":        "string",
+					"description": "Shell command to execute.",
+				},
+				"timeout": map[string]any{
+					"type":        "number",
+					"description": "Timeout in seconds. Defaults to 60, capped at 300.",
+				},
+				"workdir": map[string]any{
+					"type":        "string",
+					"description": "Working directory. Defaults to /kaggle/working when it exists, else the process directory.",
+				},
+			},
+			"required": []any{"command"},
+		},
+	}
+	shellDef := bashDef
+	shellDef.Name = "shell"
+	m := map[string]Tool{
 		"current_time": {
 			Def: provider.ToolDef{
 				Name:        "current_time",
@@ -58,31 +82,8 @@ func Builtin() map[string]Tool {
 			},
 			Run: fetchURL,
 		},
-		"bash": {
-			Def: provider.ToolDef{
-				Name:        "bash",
-				Description: "Executes a shell command on the host (sh -c) and returns combined stdout and stderr output.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"command": map[string]any{
-							"type":        "string",
-							"description": "Shell command to execute.",
-						},
-						"timeout": map[string]any{
-							"type":        "number",
-							"description": "Timeout in seconds. Defaults to 60, capped at 300.",
-						},
-						"workdir": map[string]any{
-							"type":        "string",
-							"description": "Working directory. Defaults to /kaggle/working when it exists, else the process directory.",
-						},
-					},
-					"required": []any{"command"},
-				},
-			},
-			Run: runBash,
-		},
+		"bash":  {Def: bashDef, Run: runBash},
+		"shell": {Def: shellDef, Run: runBash},
 		"read": {
 			Def: provider.ToolDef{
 				Name:        "read",
@@ -109,6 +110,7 @@ func Builtin() map[string]Tool {
 			Run: readFile,
 		},
 	}
+	return m
 }
 
 func runBash(ctx context.Context, args string) (string, error) {

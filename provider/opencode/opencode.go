@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
+	"net/http"
 	"strings"
 	"time"
 
@@ -59,7 +61,36 @@ func (a *Adapter) Complete(ctx context.Context, req *provider.Request, prov prov
 func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provider.Provider, key string, emit func(string) error) (*provider.Response, error) {
 	prepared := *req
 	prepared.Tools = contractTools(req.Tools)
-	return a.inner.Stream(ctx, &prepared, prov, key, emit)
+	resp, err := a.inner.Stream(ctx, &prepared, prov, key, emit)
+	if err != nil && len(prepared.Tools) > 0 && isToolProtocolError(err) {
+		// Some models do not accept function-calling payloads at all; retry
+		// once without any tools rather than failing the whole request.
+		stripped := *req
+		stripped.Tools = nil
+		return a.inner.Stream(ctx, &stripped, prov, key, emit)
+	}
+	return resp, err
+}
+
+// isToolProtocolError reports whether err looks like an upstream rejection of
+// the function-calling payload itself (as opposed to auth, credits, or model
+// availability), in which case a tools-less retry is worth one attempt.
+func isToolProtocolError(err error) bool {
+	var api *provider.APIError
+	if !errors.As(err, &api) {
+		return false
+	}
+	if api.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	msg := strings.ToLower(api.Message)
+	if strings.Contains(msg, "protocol") {
+		return true
+	}
+	hasToolWord := strings.Contains(msg, "tool") || strings.Contains(msg, "function")
+	hasRejectWord := strings.Contains(msg, "support") || strings.Contains(msg, "invalid") ||
+		strings.Contains(msg, "not allowed") || strings.Contains(msg, "refuse")
+	return hasToolWord && hasRejectWord
 }
 
 func contractTools(tools []provider.ToolDef) []provider.ToolDef {
@@ -78,10 +109,32 @@ func contractTools(tools []provider.ToolDef) []provider.ToolDef {
 }
 
 func placeholder(name string) provider.ToolDef {
+	// The zen free-tier contract expects shell/read to be declared. They are
+	// executed for real by the gateway (see tools.Builtin), so describe them
+	// truthfully instead of discouraging the model from calling them.
+	if name == shellTool {
+		return provider.ToolDef{
+			Name:        shellTool,
+			Description: "Executes a shell command on the host (sh -c) and returns combined stdout and stderr output.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"command": map[string]any{"type": "string", "description": "Shell command to execute."},
+				},
+				"required": []any{"command"},
+			},
+		}
+	}
 	return provider.ToolDef{
-		Name:        name,
-		Description: "Not available in this environment; calling it returns an error.",
-		Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+		Name:        readTool,
+		Description: "Reads a text file from the host filesystem and returns its contents.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{"type": "string", "description": "Absolute path of the file to read."},
+			},
+			"required": []any{"path"},
+		},
 	}
 }
 
