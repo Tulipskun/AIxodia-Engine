@@ -207,6 +207,12 @@ func isToolProtocolError(err error) bool {
 	if strings.Contains(msg, "protocol") {
 		return true
 	}
+	// The free-tier gate rejects shapes without the full tool declarations
+	// ("can only be used from within OpenCode"). A later attempt with the
+	// full tool set may still pass, so keep going instead of stopping here.
+	if strings.Contains(msg, "free tier") && strings.Contains(msg, "opencode") {
+		return true
+	}
 	hasToolWord := strings.Contains(msg, "tool") || strings.Contains(msg, "function")
 	hasRejectWord := strings.Contains(msg, "support") || strings.Contains(msg, "invalid") ||
 		strings.Contains(msg, "not allowed") || strings.Contains(msg, "refuse")
