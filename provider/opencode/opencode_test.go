@@ -391,19 +391,17 @@ func TestResponsesFallbackKeepsFullTools(t *testing.T) {
 	if resp.Content != "via-resp-full" {
 		t.Errorf("content = %q", resp.Content)
 	}
-	// last request must be /responses carrying the original tool
+	// last request must be /responses carrying the original tool (flat format)
 	last := bodies[len(bodies)-1]
 	var parsed struct {
 		Tools []struct {
-			Function struct {
-				Name string `json:"name"`
-			} `json:"function"`
+			Name string `json:"name"`
 		} `json:"tools"`
 	}
 	_ = json.Unmarshal(last, &parsed)
 	found := false
 	for _, tool := range parsed.Tools {
-		if tool.Function.Name == "current_time" {
+		if tool.Name == "current_time" {
 			found = true
 		}
 	}

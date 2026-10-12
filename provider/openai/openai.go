@@ -71,6 +71,16 @@ type tool struct {
 	} `json:"function"`
 }
 
+// respTool is the FLAT function-tool shape the Responses API expects
+// (NOT nested under "function" like chat completions). Sending nested
+// tools to /v1/responses gets the request rejected.
+type respTool struct {
+	Type        string         `json:"type"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters,omitempty"`
+}
+
 type chatResponse struct {
 	ID      string `json:"id"`
 	Model   string `json:"model"`
@@ -326,7 +336,7 @@ type responsesRequest struct {
 	Stream          bool           `json:"stream,omitempty"`
 	StreamOptions   *streamOptions `json:"stream_options,omitempty"`
 	MaxOutputTokens *int           `json:"max_output_tokens,omitempty"`
-	Tools           []tool         `json:"tools,omitempty"`
+	Tools           []respTool     `json:"tools,omitempty"`
 	ToolChoice      any            `json:"tool_choice,omitempty"`
 	User            string         `json:"user,omitempty"`
 	Include         []string       `json:"include,omitempty"`
@@ -382,12 +392,12 @@ func buildResponsesRequest(req *provider.Request, stream bool) responsesRequest 
 		bodyReq.User = req.User
 	}
 	for _, def := range req.Tools {
-		var t tool
-		t.Type = "function"
-		t.Function.Name = def.Name
-		t.Function.Description = def.Description
-		t.Function.Parameters = def.Parameters
-		bodyReq.Tools = append(bodyReq.Tools, t)
+		bodyReq.Tools = append(bodyReq.Tools, respTool{
+			Type:        "function",
+			Name:        def.Name,
+			Description: def.Description,
+			Parameters:  def.Parameters,
+		})
 	}
 	if len(bodyReq.Tools) > 0 {
 		bodyReq.ToolChoice = "auto"
