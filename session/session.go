@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	"ai-engine/db"
@@ -42,6 +43,7 @@ type Turn struct {
 	ReasoningTokens    int    `json:"reasoning_tokens,omitempty"`
 	InputIncludesCache bool   `json:"input_includes_cache,omitempty"`
 	DurationMS         int64  `json:"duration_ms,omitempty"`
+	GenerationMS       int64  `json:"generation_ms,omitempty"`
 	CreatedAt          int64  `json:"created_at"`
 }
 
@@ -64,7 +66,12 @@ type TurnInput struct {
 	Model        string
 	InputTokens  int
 	OutputTokens int
+	// DurationMS is the whole turn, from the question being sent to the answer
+	// being stored, which is the number a reader expects to see. GenerationMS is
+	// only the time the model spent writing, and it is what a rate is computed
+	// from: the two answer different questions.
 	DurationMS   int64
+	GenerationMS int64
 }
 
 type D1 struct{}
@@ -179,6 +186,7 @@ func (d *D1) Turns(id string) ([]Turn, error) {
 			ReasoningTokens:    intField(row, "reasoning_tokens"),
 			InputIncludesCache: intField(row, "input_includes_cache") != 0,
 			DurationMS:         int64Field(row, "duration_ms"),
+			GenerationMS:       int64Field(row, "generation_ms"),
 			CreatedAt:          int64Field(row, "created_at"),
 		})
 	}
@@ -214,6 +222,7 @@ func (d *D1) AppendTurns(id string, turns []TurnInput) error {
 				"input_tokens":  turn.InputTokens,
 				"output_tokens": turn.OutputTokens,
 				"duration_ms":   turn.DurationMS,
+				"generation_ms": turn.GenerationMS,
 				"created_at":    time.Now().Unix(),
 			})
 			if err != nil {
@@ -338,5 +347,15 @@ func boolField(row map[string]any, key string) bool {
 		return value == "1" || value == "true"
 	default:
 		return false
+	}
+}
+
+
+// EnsureTurns has the columns the current engine writes. Adding a column is
+// cheap and idempotent, and doing it here means a database that predates the
+// generation clock keeps working instead of failing every insert.
+func EnsureTurns() {
+	if _, err := db.Query("ALTER TABLE turns ADD COLUMN generation_ms INTEGER NOT NULL DEFAULT 0"); err != nil {
+		log.Printf("session: turns already has generation_ms (%v)", err)
 	}
 }

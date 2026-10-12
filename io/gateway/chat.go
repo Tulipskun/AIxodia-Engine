@@ -139,7 +139,7 @@ func (g *Gateway) chatOnce(w http.ResponseWriter, r *http.Request, stored *sessi
 		writeUpstreamError(w, err)
 		return
 	}
-	g.persist(stored, delta, resp, options, generationMillis(started, resp))
+	g.persist(stored, delta, resp, options, time.Since(started).Milliseconds())
 
 	id := resp.ID
 	if id == "" {
@@ -221,7 +221,7 @@ func (g *Gateway) chatStream(w http.ResponseWriter, r *http.Request, stored *ses
 		writeSSEDone(w, flusher)
 		return
 	}
-	g.persist(stored, delta, resp, options, generationMillis(started, resp))
+	g.persist(stored, delta, resp, options, time.Since(started).Milliseconds())
 
 	finish := resp.FinishReason
 	if finish == "" {
@@ -634,6 +634,13 @@ func (g *Gateway) persist(stored *session.Session, delta []provider.Message, res
 		}
 	}
 	turns = append(turns, session.TrailTurns(resp.Trail)...)
+	generation := resp.GenerationMS
+	if generation <= 0 || generation > duration {
+		// Either the provider reported no time of its own, or it reported more
+		// than the turn took (clock skew between here and upstream). Either way
+		// the wall clock is the honest fallback.
+		generation = duration
+	}
 	turns = append(turns, session.TurnInput{
 		Role:         "assistant",
 		Text:         resp.Content,
@@ -641,6 +648,7 @@ func (g *Gateway) persist(stored *session.Session, delta []provider.Message, res
 		InputTokens:  resp.Usage.PromptTokens,
 		OutputTokens: resp.Usage.CompletionTokens,
 		DurationMS:   duration,
+		GenerationMS: generation,
 	})
 
 	if err := g.sessions.AppendTurns(stored.ID, turns); err != nil {
@@ -713,11 +721,13 @@ func appendDelta(stored, incoming []provider.Message) (full, delta []provider.Me
 	return full, incoming
 }
 
-// generationMillis is the turn's duration as a reader understands it: how long
-// the model spent writing. The wall clock also counts the queue before the first
-// token and every tool that ran in between, and using it made both the elapsed
-// figure and the tokens-per-second read wrong. A turn that never reached a
-// provider falls back to the wall time so it is never reported as "0s".
+// generationMillis is how long the model spent writing, which is the window a
+// tokens-per-second rate is computed from. It is deliberately not the duration
+// shown to the reader: the wall clock also counts the queue before the first
+// token and every tool that ran in between, so a rate built on it read as
+// "1t/s" no matter how fast the model actually wrote. A turn that never
+// reached a provider falls back to the wall time so it is never reported as
+// "0s".
 func generationMillis(started time.Time, resp *provider.Response) int64 {
 	if resp.GenerationMS > 0 {
 		return resp.GenerationMS

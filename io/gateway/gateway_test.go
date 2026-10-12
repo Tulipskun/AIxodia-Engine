@@ -117,6 +117,7 @@ func (m *memStore) AppendTurns(id string, turns []session.TurnInput) error {
 			InputTokens:  turn.InputTokens,
 			OutputTokens: turn.OutputTokens,
 			DurationMS:   turn.DurationMS,
+			GenerationMS: turn.GenerationMS,
 		})
 	}
 	return nil
@@ -715,5 +716,49 @@ func TestGenerationMillisCountsWritingNotWaiting(t *testing.T) {
 	// rather than "0s".
 	if got := generationMillis(time.Now().Add(-150*time.Millisecond), &provider.Response{}); got < 140 {
 		t.Errorf("fallback = %d, want roughly the wall time", got)
+	}
+}
+
+
+// The footer shows two different numbers from one turn: how long the reader
+// waited (the whole turn) and how fast the model wrote (the provider window).
+// Collapsing them into one column made either the elapsed time or the rate
+// wrong, so both are stored and both are checked here.
+func TestTurnStoresBothTheWaitAndTheWrite(t *testing.T) {
+	store := &memStore{turns: map[string][]session.Turn{}}
+	g := &Gateway{sessions: store}
+
+	resp := &provider.Response{
+		Content:      "ตอบแล้ว",
+		Model:        "muse-spark",
+		GenerationMS: 4200,
+		Usage:        provider.Usage{PromptTokens: 10, CompletionTokens: 84},
+	}
+	g.persist(&session.Session{ID: "s1"}, []provider.Message{{Role: "user", Content: "ถาม"}}, resp, completionOptions{}, 9000)
+
+	if len(store.turns["s1"]) != 2 {
+		t.Fatalf("want the question and the answer stored, got %d turns", len(store.turns["s1"]))
+	}
+	got := store.turns["s1"][1]
+	if got.DurationMS != 9000 {
+		t.Errorf("wait = %dms, want the whole turn 9000ms", got.DurationMS)
+	}
+	if got.GenerationMS != 4200 {
+		t.Errorf("write = %dms, want the provider window 4200ms", got.GenerationMS)
+	}
+}
+
+// A provider that reports nothing usable must not produce a rate window longer
+// than the turn itself, which would divide the token count by a time that never
+// happened.
+func TestGenerationFallsBackToTheTurn(t *testing.T) {
+	store := &memStore{turns: map[string][]session.Turn{}}
+	g := &Gateway{sessions: store}
+
+	resp := &provider.Response{Content: "ตอบแล้ว", GenerationMS: 60000, Usage: provider.Usage{CompletionTokens: 10}}
+	g.persist(&session.Session{ID: "s2"}, []provider.Message{{Role: "user", Content: "ถาม"}}, resp, completionOptions{}, 2500)
+
+	if got := store.turns["s2"][1].GenerationMS; got != 2500 {
+		t.Errorf("write = %dms, want the turn 2500ms rather than the impossible 60000ms", got)
 	}
 }

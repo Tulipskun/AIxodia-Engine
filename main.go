@@ -50,6 +50,11 @@ func main() {
 		return
 	}
 
+	// Columns the current engine writes are added before anything can insert
+	// them, so a database that predates this version serves instead of failing
+	// every turn on an unknown column.
+	session.EnsureTurns()
+
 	startConfigReloader(ctx)
 
 	g := gateway.New(session.NewD1(), registry.New(), tools.Builtin())
