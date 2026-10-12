@@ -267,9 +267,6 @@ func buildRequest(req *provider.Request, stream bool) request {
 		User:      req.User,
 		options:   options{Temperature: req.Temperature, TopP: req.TopP},
 	}
-	if stream {
-		out.StreamOptions = &streamOptions{IncludeUsage: true}
-	}
 	for _, def := range req.Tools {
 		var t tool
 		t.Type = "function"
@@ -374,9 +371,6 @@ func buildResponsesRequest(req *provider.Request, stream bool) responsesRequest 
 		items = append(items, map[string]any{"role": m.Role, "content": textContent(m.Content)})
 	}
 	bodyReq := responsesRequest{Model: req.Model, Input: items, Stream: stream}
-	if stream {
-		bodyReq.StreamOptions = &streamOptions{IncludeUsage: true}
-	}
 	if req.MaxTokens > 0 {
 		n := req.MaxTokens
 		bodyReq.MaxOutputTokens = &n

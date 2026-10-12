@@ -74,8 +74,8 @@ func TestBuildRequestStreamOptionsAndToolChoice(t *testing.T) {
 		Messages: []provider.Message{{Role: "user", Content: "hi"}},
 		Tools:    []provider.ToolDef{{Name: "a", Description: "b"}},
 	}, true)
-	if withTools.StreamOptions == nil || !withTools.StreamOptions.IncludeUsage {
-		t.Errorf("streaming request should set stream_options.include_usage, got %+v", withTools.StreamOptions)
+	if withTools.StreamOptions != nil {
+		t.Errorf("streaming request must omit stream_options, got %+v", withTools.StreamOptions)
 	}
 	if withTools.ToolChoice != "auto" {
 		t.Errorf("request with tools should set tool_choice=auto, got %v", withTools.ToolChoice)
