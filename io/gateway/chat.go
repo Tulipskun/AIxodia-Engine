@@ -395,7 +395,11 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 		final.ID = resp.ID
 		final.Model = current.model
 		final.Provider = served
-		final.Content += resp.Content
+		// The last round's text is the answer. Earlier rounds are narration
+		// before a tool call; they stay with that tool step in the trail.
+		// Accumulating them here ran every round together with no separator,
+		// so one stored answer read "กำลังเปิดอ่าน...ครับเปิดรูปไม่ขึ้น...ครับ".
+		final.Content = resp.Content
 		final.Usage.PromptTokens += resp.Usage.PromptTokens
 		final.Usage.CompletionTokens += resp.Usage.CompletionTokens
 		final.Usage.TotalTokens += resp.Usage.TotalTokens
@@ -448,7 +452,7 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 		if err != nil {
 			return nil, err
 		}
-		final.Content += resp.Content
+		final.Content = resp.Content
 		final.Usage.PromptTokens += resp.Usage.PromptTokens
 		final.Usage.CompletionTokens += resp.Usage.CompletionTokens
 		final.Usage.TotalTokens += resp.Usage.TotalTokens

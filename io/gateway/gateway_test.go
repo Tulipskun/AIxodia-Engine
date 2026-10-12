@@ -664,3 +664,43 @@ func TestAppendDeltaReusesRecordedQuestionOnRetry(t *testing.T) {
 		t.Errorf("retry should persist nothing new, got %d messages", len(delta))
 	}
 }
+
+func TestFinalAnswerHoldsOnlyTheLastToolRound(t *testing.T) {
+	// A model that narrates before each tool call. Accumulating those rounds into
+	// the final message produced one run-on answer: "กำลังดูครับคำตอบสุดท้าย".
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), `"tool_call_id"`) {
+			writeFake(w, "คำตอบสุดท้าย", nil, "")
+			return
+		}
+		writeFake(w, "กำลังดูครับ", []string{"current_time"}, "tool_calls")
+	}))
+	t.Cleanup(upstream.Close)
+	config.Providers = []config.Provider{{
+		ID: "9", Name: "mock", APIURL: upstream.URL,
+		Keys: []string{"test-key"}, Adapter: "openai",
+	}}
+	gateway := New(newMemStore(), registry.New(), tools.Builtin())
+
+	impl, err := gateway.registry.Require("openai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	primary := route{adapter: impl, prov: toInternalProvider(config.Providers[0]), model: "test-model"}
+	defs := []provider.ToolDef{tools.Builtin()["current_time"].Def}
+
+	resp, err := gateway.complete(context.Background(), primary, nil,
+		[]provider.Message{{Role: "user", Content: "เวลาเท่าไหร่"}},
+		completionOptions{maxTokens: 100, tools: defs})
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if resp.Content != "คำตอบสุดท้าย" {
+		t.Errorf("answer = %q, want only the last round's text", resp.Content)
+	}
+}

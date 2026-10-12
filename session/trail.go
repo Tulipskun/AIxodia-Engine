@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"strings"
 
 	"ai-engine/provider"
 )
@@ -30,12 +31,18 @@ func TrailTurns(trail []provider.Message) []TurnInput {
 	for _, msg := range trail {
 		switch {
 		case msg.Role == "assistant" && len(msg.ToolCalls) > 0:
-			for i, call := range msg.ToolCalls {
-				row := toolCallRow{ID: call.ID, Name: call.Name, Arguments: call.Arguments}
-				if i == 0 {
-					row.Content = msg.Content
-				}
-				out = append(out, TurnInput{Role: "tool_call", Text: mustJSON(row)})
+			// The model's words before a tool call are its own turn, not part
+			// of the call. Hiding them inside the call row put sentences the
+			// user wrote to the model inside a tool block.
+			if text := strings.TrimSpace(msg.Content); text != "" {
+				out = append(out, TurnInput{Role: "assistant", Text: text})
+			}
+			for _, call := range msg.ToolCalls {
+				out = append(out, TurnInput{Role: "tool_call", Text: mustJSON(toolCallRow{
+					ID:        call.ID,
+					Name:      call.Name,
+					Arguments: call.Arguments,
+				})})
 			}
 		case msg.Role == "tool":
 			out = append(out, TurnInput{Role: "tool_result", Text: mustJSON(toolResultRow{

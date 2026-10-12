@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"testing"
 
 	"ai-engine/provider"
@@ -20,20 +21,23 @@ func TestTrailRoundTripsThroughTurns(t *testing.T) {
 	for _, input := range TrailTurns(trail) {
 		turns = append(turns, Turn{Role: input.Role, Text: input.Text})
 	}
-	if len(turns) != 4 {
-		t.Fatalf("stored rows = %d, want 4", len(turns))
+	// The words before the calls are their own row: narration, call, call, result, result.
+	if len(turns) != 5 {
+		t.Fatalf("stored rows = %d, want 5: %+v", len(turns), turns)
 	}
 
 	rebuilt := MessagesFromTurns(turns)
-	// Each stored call becomes its own assistant message, followed by its result.
-	if len(rebuilt) != 4 {
-		t.Fatalf("rebuilt = %d messages, want 4", len(rebuilt))
+	if len(rebuilt) != 5 {
+		t.Fatalf("rebuilt = %d messages, want 5: %+v", len(rebuilt), rebuilt)
 	}
-	if rebuilt[0].Content != "checking" || rebuilt[0].ToolCalls[0].ID != "a" {
-		t.Errorf("first call lost its text or id: %+v", rebuilt[0])
+	if rebuilt[0].Role != "assistant" || rebuilt[0].Content != "checking" {
+		t.Errorf("narration = %+v, want a plain assistant turn", rebuilt[0])
 	}
-	if rebuilt[3].Role != "tool" || rebuilt[3].ToolCallID != "b" || rebuilt[3].Content != "hot" {
-		t.Errorf("last result = %+v", rebuilt[3])
+	if rebuilt[1].ToolCalls == nil || rebuilt[1].ToolCalls[0].ID != "a" {
+		t.Errorf("first call lost its id: %+v", rebuilt[1])
+	}
+	if rebuilt[4].Role != "tool" || rebuilt[4].ToolCallID != "b" || rebuilt[4].Content != "hot" {
+		t.Errorf("last result = %+v", rebuilt[4])
 	}
 }
 
@@ -45,5 +49,67 @@ func TestMessagesFromTurnsSkipsBrokenRows(t *testing.T) {
 	})
 	if len(rebuilt) != 1 || rebuilt[0].Content != "still here" {
 		t.Errorf("rebuilt = %+v", rebuilt)
+	}
+}
+
+func TestTrailTurnsKeepsNarrationOutOfToolRows(t *testing.T) {
+	// A model that says something before it calls a tool: those words are its
+	// own turn. Storing them inside the call row put the model's sentences
+	// inside a tool block in the app.
+	trail := []provider.Message{
+		{Role: "assistant", Content: "กำลังเปิดดูไฟล์นะครับ", ToolCalls: []provider.ToolCall{
+			{ID: "c1", Name: "read", Arguments: `{"filePath":"/a.png"}`},
+		}},
+		{Role: "tool", ToolCallID: "c1", ToolName: "read", Content: "bytes"},
+	}
+
+	turns := TrailTurns(trail)
+	if len(turns) != 3 {
+		t.Fatalf("got %d turns, want 3 (narration, call, result): %+v", len(turns), turns)
+	}
+	if turns[0].Role != "assistant" || turns[0].Text != "กำลังเปิดดูไฟล์นะครับ" {
+		t.Errorf("first turn = %+v, want the narration as an assistant turn", turns[0])
+	}
+	if turns[1].Role != "tool_call" {
+		t.Errorf("second turn = %+v, want tool_call", turns[1])
+	}
+	var row toolCallRow
+	if err := json.Unmarshal([]byte(turns[1].Text), &row); err != nil {
+		t.Fatalf("tool_call row: %v", err)
+	}
+	if row.Content != "" {
+		t.Errorf("tool row still carries text: %q", row.Content)
+	}
+}
+
+func TestMessagesFromTurnsReadsNarrationBack(t *testing.T) {
+	trail := []provider.Message{
+		{Role: "assistant", Content: "เดี๋ยวผมลองอีกครั้ง", ToolCalls: []provider.ToolCall{
+			{ID: "c1", Name: "bash", Arguments: `{"command":"ls"}`},
+		}},
+		{Role: "tool", ToolCallID: "c1", ToolName: "bash", Content: "a b"},
+	}
+	turns := TrailTurns(trail)
+
+	stored := make([]Turn, 0, len(turns))
+	for i, in := range turns {
+		stored = append(stored, Turn{Role: in.Role, Text: in.Text, Seq: i + 1})
+	}
+	got := MessagesFromTurns(stored)
+	if len(got) != 3 {
+		t.Fatalf("got %d messages, want 3: %+v", len(got), got)
+	}
+	if got[0].Role != "assistant" || got[0].Content != "เดี๋ยวผมลองอีกครั้ง" {
+		t.Errorf("message 0 = %+v", got[0])
+	}
+	// The narration is a turn of its own; the call it led into is the next one.
+	if len(got[0].ToolCalls) != 0 {
+		t.Errorf("narration row should carry no tool calls: %+v", got[0])
+	}
+	if got[1].ToolCalls == nil || len(got[1].ToolCalls) != 1 || got[1].ToolCalls[0].Name != "bash" {
+		t.Errorf("the call itself should be the next message: %+v", got[1])
+	}
+	if got[2].Role != "tool" || got[2].Content != "a b" {
+		t.Errorf("message 2 = %+v", got[2])
 	}
 }
