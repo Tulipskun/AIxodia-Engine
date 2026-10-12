@@ -29,6 +29,7 @@ type chatRequest struct {
 	TopP        *float64      `json:"top_p"`
 	MaxTokens   int           `json:"max_tokens"`
 	Tools       *[]string     `json:"tools"`
+	User        string        `json:"user"`
 }
 
 type route struct {
@@ -43,6 +44,7 @@ type completionOptions struct {
 	topP        *float64
 	tools       []provider.ToolDef
 	stream      bool
+	user        string
 	emit        func(string) error
 }
 
@@ -104,6 +106,7 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 		topP:        firstNonZeroPtr(body.TopP, storedTopP(stored)),
 		tools:       toolset,
 		stream:      body.Stream,
+		user:        body.User,
 	}
 	fallback := g.fallbackRoute(stored)
 
@@ -346,6 +349,7 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 			TopP:        options.topP,
 			Stream:      options.stream,
 			Tools:       options.tools,
+			User:        options.user,
 		}
 
 		resp, err := g.call(ctx, current, request, emit, canRetry)
@@ -404,6 +408,7 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 			Temperature: options.temperature,
 			TopP:        options.topP,
 			Stream:      options.stream,
+			User:        options.user,
 		}
 		resp, err := g.call(ctx, current, request, emit, canRetry)
 		if err != nil {

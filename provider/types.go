@@ -43,6 +43,7 @@ type Request struct {
 	TopP        *float64
 	Stream      bool
 	Tools       []ToolDef
+	User        string
 }
 
 type Response struct {

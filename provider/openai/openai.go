@@ -34,6 +34,7 @@ type request struct {
 	Stream    bool      `json:"stream,omitempty"`
 	Tools     []tool    `json:"tools,omitempty"`
 	MaxTokens int       `json:"max_tokens,omitempty"`
+	User      string    `json:"user,omitempty"`
 	options
 }
 
@@ -245,6 +246,7 @@ func buildRequest(req *provider.Request, stream bool) request {
 		Messages:  toMessages(req.Messages),
 		Stream:    stream,
 		MaxTokens: req.MaxTokens,
+		User:      req.User,
 		options:   options{Temperature: req.Temperature, TopP: req.TopP},
 	}
 	for _, def := range req.Tools {
