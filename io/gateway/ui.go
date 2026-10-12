@@ -83,7 +83,8 @@ func defaultUISpec() json.RawMessage {
   "composer": {
     "max_lines": 5,
     "show_stop_button": true,
-    "show_attach": true
+    "show_attach": true,
+    "show_attach_title": false
   },
   "screens": {
     "example": {
