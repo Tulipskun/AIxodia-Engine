@@ -151,3 +151,19 @@ func TestAttachmentNote(t *testing.T) {
 		t.Errorf("note missing name/path: %q", got)
 	}
 }
+
+func TestAttachmentNoteListsEveryFile(t *testing.T) {
+	got := attachmentNote([]attachment{
+		{Name: "a.png", Path: "/u/s/a.png", Mime: "image/png"},
+		{Name: "b.pdf", Path: "/u/s/b.pdf", Mime: "application/pdf"},
+		{Name: "c.txt", Path: "/u/s/c.txt"},
+	})
+	for _, want := range []string{"a.png", "/u/s/a.png", "image/png", "b.pdf", "/u/s/b.pdf", "c.txt"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("note is missing %q:\n%s", want, got)
+		}
+	}
+	if lines := strings.Count(got, "\n- "); lines != 3 {
+		t.Errorf("note has %d file lines, want 3:\n%s", lines, got)
+	}
+}
