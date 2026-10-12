@@ -128,18 +128,18 @@ func TestReadFileRange(t *testing.T) {
 	}
 	f.Close()
 
-	out, err := readFile(context.Background(), `{"path":"`+f.Name()+`","offset":2,"limit":2}`)
+	out, err := readFile(context.Background(), `{"filePath":"`+f.Name()+`","offset":2,"limit":2}`)
 	if err != nil {
 		t.Fatalf("readFile: %v", err)
 	}
-	if out != "l2\nl3\n[truncated]" {
-		t.Errorf("readFile = %q, want %q", out, "l2\nl3\n[truncated]")
+	if out != "2: l2\n3: l3\n[truncated]" {
+		t.Errorf("readFile = %q", out)
 	}
 	out, err = readFile(context.Background(), `{"path":"`+f.Name()+`"}`)
 	if err != nil {
-		t.Fatalf("readFile full: %v", err)
+		t.Fatalf("readFile full (path alias): %v", err)
 	}
-	if out != "l1\nl2\nl3\nl4\nl5" {
+	if out != "1: l1\n2: l2\n3: l3\n4: l4\n5: l5\n" {
 		t.Errorf("readFile full = %q", out)
 	}
 }
@@ -149,5 +149,22 @@ func TestReadFileBlocksSensitivePaths(t *testing.T) {
 		if _, err := readFile(context.Background(), `{"path":"`+p+`"}`); err == nil {
 			t.Errorf("readFile(%q) unexpectedly succeeded", p)
 		}
+	}
+}
+
+func TestReadFileDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/a.txt", []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir+"/sub", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := readFile(context.Background(), `{"filePath":"`+dir+`"}`)
+	if err != nil {
+		t.Fatalf("readFile dir: %v", err)
+	}
+	if out != "a.txt\nsub/\n" {
+		t.Errorf("readFile dir = %q", out)
 	}
 }

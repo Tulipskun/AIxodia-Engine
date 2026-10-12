@@ -25,22 +25,28 @@ type Tool struct {
 
 func Builtin() map[string]Tool {
 	bashDef := provider.ToolDef{
-		Name:        "bash",
-		Description: "Executes a shell command on the host (sh -c) and returns combined stdout and stderr output.",
+		Name: "bash",
+		Description: "Executes a given bash command in a persistent shell session with optional timeout, " +
+			"ensuring proper handling and security measures.\n\nBe aware: OS: linux, Shell: bash\n\n" +
+			"All commands run in the current working directory by default. Use the `workdir` parameter if you " +
+			"need to run a command in a different directory. AVOID using `cd <directory> && <command>` patterns - " +
+			"use `workdir` instead.\n\nThe command argument is required. " +
+			"Output combines stdout and stderr; a non-zero exit is reported as `exit code N` after the output. " +
+			"If the output is very large it is truncated.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"command": map[string]any{
 					"type":        "string",
-					"description": "Shell command to execute.",
+					"description": "The command to execute.",
 				},
 				"timeout": map[string]any{
 					"type":        "number",
-					"description": "Timeout in seconds. Defaults to 60, capped at 300.",
+					"description": "Optional timeout in milliseconds. Defaults to 120000, capped at 300000.",
 				},
 				"workdir": map[string]any{
 					"type":        "string",
-					"description": "Working directory. Defaults to /kaggle/working when it exists, else the process directory.",
+					"description": "The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.",
 				},
 			},
 			"required": []any{"command"},
@@ -48,6 +54,36 @@ func Builtin() map[string]Tool {
 	}
 	shellDef := bashDef
 	shellDef.Name = "shell"
+	readDef := provider.ToolDef{
+		Name: "read",
+		Description: "Read a file or directory from the local filesystem. If the path does not exist, an error is returned.\n\n" +
+			"Usage:\n" +
+			"- The filePath parameter should be an absolute path.\n" +
+			"- By default, this tool returns up to 2000 lines from the start of the file.\n" +
+			"- The offset parameter is the line number to start from (1-indexed).\n" +
+			"- To read later sections, call this tool again with a larger offset.\n" +
+			"- Contents are returned with each line prefixed by its line number as `<line>: <content>`.\n" +
+			"- For directories, entries are returned one per line (without line numbers) with a trailing `/` for subdirectories.\n" +
+			"- Any line longer than 2000 characters is truncated.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"filePath": map[string]any{
+					"type":        "string",
+					"description": "The absolute path to the file or directory to read.",
+				},
+				"offset": map[string]any{
+					"type":        "number",
+					"description": "The line number to start reading from (1-indexed). Defaults to 1.",
+				},
+				"limit": map[string]any{
+					"type":        "number",
+					"description": "The maximum number of lines to read (defaults to 2000).",
+				},
+			},
+			"required": []any{"filePath"},
+		},
+	}
 	m := map[string]Tool{
 		"current_time": {
 			Def: provider.ToolDef{
@@ -84,31 +120,7 @@ func Builtin() map[string]Tool {
 		},
 		"bash":  {Def: bashDef, Run: runBash},
 		"shell": {Def: shellDef, Run: runBash},
-		"read": {
-			Def: provider.ToolDef{
-				Name:        "read",
-				Description: "Reads a text file from the host filesystem and returns its contents, optionally a line range.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"path": map[string]any{
-							"type":        "string",
-							"description": "Absolute path of the file to read.",
-						},
-						"offset": map[string]any{
-							"type":        "number",
-							"description": "1-based first line to return. Defaults to 1.",
-						},
-						"limit": map[string]any{
-							"type":        "number",
-							"description": "Maximum lines to return. Defaults to 2000.",
-						},
-					},
-					"required": []any{"path"},
-				},
-			},
-			Run: readFile,
-		},
+		"read":  {Def: readDef, Run: readFile},
 	}
 	return m
 }
@@ -125,9 +137,9 @@ func runBash(ctx context.Context, args string) (string, error) {
 	if strings.TrimSpace(input.Command) == "" {
 		return "", fmt.Errorf("command must not be empty")
 	}
-	timeout := 60 * time.Second
+	timeout := 120 * time.Second
 	if input.Timeout > 0 {
-		timeout = time.Duration(input.Timeout * float64(time.Second))
+		timeout = time.Duration(input.Timeout * float64(time.Millisecond))
 		if timeout > 300*time.Second {
 			timeout = 300 * time.Second
 		}
@@ -163,19 +175,23 @@ func runBash(ctx context.Context, args string) (string, error) {
 
 func readFile(ctx context.Context, args string) (string, error) {
 	input := struct {
-		Path   string  `json:"path"`
-		Offset float64 `json:"offset"`
-		Limit  float64 `json:"limit"`
+		Path     string  `json:"path"`
+		FilePath string  `json:"filePath"`
+		Offset   float64 `json:"offset"`
+		Limit    float64 `json:"limit"`
 	}{}
 	if err := json.Unmarshal([]byte(args), &input); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
 	}
-	p := strings.TrimSpace(input.Path)
+	p := strings.TrimSpace(input.FilePath)
 	if p == "" {
-		return "", fmt.Errorf("path must not be empty")
+		p = strings.TrimSpace(input.Path)
+	}
+	if p == "" {
+		return "", fmt.Errorf("filePath must not be empty")
 	}
 	if !filepath.IsAbs(p) {
-		return "", fmt.Errorf("path must be absolute")
+		return "", fmt.Errorf("filePath must be absolute")
 	}
 	clean := filepath.Clean(p)
 	// Block virtual filesystems: /proc/self/environ and friends would leak
@@ -190,7 +206,19 @@ func readFile(ctx context.Context, args string) (string, error) {
 		return "", fmt.Errorf("cannot stat %s: %w", p, err)
 	}
 	if st.IsDir() {
-		return "", fmt.Errorf("%s is a directory", p)
+		entries, err := os.ReadDir(clean)
+		if err != nil {
+			return "", fmt.Errorf("cannot list %s: %w", p, err)
+		}
+		var sb strings.Builder
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() {
+				name += "/"
+			}
+			sb.WriteString(name + "\n")
+		}
+		return sb.String(), nil
 	}
 	if !st.Mode().IsRegular() {
 		return "", fmt.Errorf("%s is not a regular file", p)
@@ -233,9 +261,17 @@ func readFile(ctx context.Context, args string) (string, error) {
 	if end > len(lines) {
 		end = len(lines)
 	}
-	out := strings.Join(lines[offset-1:end], "\n")
+	const maxLineChars = 2000
+	var sb strings.Builder
+	for i, ln := range lines[offset-1 : end] {
+		if len(ln) > maxLineChars {
+			ln = ln[:maxLineChars]
+		}
+		fmt.Fprintf(&sb, "%d: %s\n", offset+i, ln)
+	}
+	out := sb.String()
 	if truncated || end < len(lines) {
-		out += "\n[truncated]"
+		out += "[truncated]"
 	}
 	return out, nil
 }
