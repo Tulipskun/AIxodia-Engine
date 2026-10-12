@@ -28,13 +28,19 @@ type options struct {
 	TopP        *float64 `json:"top_p,omitempty"`
 }
 
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
 type request struct {
-	Model     string    `json:"model"`
-	Messages  []message `json:"messages"`
-	Stream    bool      `json:"stream,omitempty"`
-	Tools     []tool    `json:"tools,omitempty"`
-	MaxTokens int       `json:"max_tokens,omitempty"`
-	User      string    `json:"user,omitempty"`
+	Model         string         `json:"model"`
+	Messages      []message      `json:"messages"`
+	Stream        bool           `json:"stream,omitempty"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+	Tools         []tool         `json:"tools,omitempty"`
+	ToolChoice    any            `json:"tool_choice,omitempty"`
+	MaxTokens     int            `json:"max_tokens,omitempty"`
+	User          string         `json:"user,omitempty"`
 	options
 }
 
@@ -249,6 +255,9 @@ func buildRequest(req *provider.Request, stream bool) request {
 		User:      req.User,
 		options:   options{Temperature: req.Temperature, TopP: req.TopP},
 	}
+	if stream {
+		out.StreamOptions = &streamOptions{IncludeUsage: true}
+	}
 	for _, def := range req.Tools {
 		var t tool
 		t.Type = "function"
@@ -256,6 +265,9 @@ func buildRequest(req *provider.Request, stream bool) request {
 		t.Function.Description = def.Description
 		t.Function.Parameters = def.Parameters
 		out.Tools = append(out.Tools, t)
+	}
+	if len(out.Tools) > 0 {
+		out.ToolChoice = "auto"
 	}
 	return out
 }
