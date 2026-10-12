@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -507,6 +508,7 @@ func (g *Gateway) selectTools(names *[]string) ([]provider.ToolDef, error) {
 		for _, tool := range g.tools {
 			all = append(all, tool.Def)
 		}
+		sort.Slice(all, func(i, j int) bool { return all[i].Name < all[j].Name })
 		return all, nil
 	}
 
