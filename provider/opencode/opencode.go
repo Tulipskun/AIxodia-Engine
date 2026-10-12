@@ -90,15 +90,29 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 	// Attempt 3: non-streaming, no tools. Some models only serve plain
 	// (non-SSE) chat completions.
 	bare, err3 := a.inner.Complete(ctx, &stripped, prov, key)
-	if err3 != nil {
+	if err3 == nil {
+		if emit != nil {
+			if err := emit(bare.Content); err != nil {
+				return nil, err
+			}
+		}
+		return bare, nil
+	}
+	if !isToolProtocolError(err3) {
 		return nil, err3
 	}
+	// Attempt 4: OpenAI Responses API (/v1/responses). Some models only
+	// serve this protocol and reject chat completions outright.
+	via, err4 := a.inner.CompleteViaResponses(ctx, &stripped, prov, key)
+	if err4 != nil {
+		return nil, err4
+	}
 	if emit != nil {
-		if err := emit(bare.Content); err != nil {
+		if err := emit(via.Content); err != nil {
 			return nil, err
 		}
 	}
-	return bare, nil
+	return via, nil
 }
 
 // isToolProtocolError reports whether err looks like an upstream rejection of

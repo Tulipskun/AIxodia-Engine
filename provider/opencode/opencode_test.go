@@ -300,3 +300,39 @@ func TestRetryNonStreamingWhenBareStreamAlsoRejected(t *testing.T) {
 		t.Errorf("requests = %d, want 3 (tools+stream, bare stream, bare plain)", calls)
 	}
 }
+
+func TestRetryViaResponsesAPIWhenChatRejected(t *testing.T) {
+	calls := 0
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/responses") {
+			_, _ = io.WriteString(w, `{"id":"resp-1","model":"zen-model","object":"response","output":[{"type":"message","content":[{"type":"output_text","text":"via-responses"}]}],"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7}}`)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"message":"Model does not support this protocol."}`)
+	}))
+	t.Cleanup(server.Close)
+
+	adapter := New()
+	resp, err := adapter.Complete(context.Background(), &provider.Request{
+		Model:    "zen-model",
+		Messages: []provider.Message{{Role: "user", Content: "hi"}},
+		Tools:    []provider.ToolDef{{Name: "current_time", Description: "now"}},
+	}, providerFor(server), "key")
+	if err != nil {
+		t.Fatalf("responses fallback: %v", err)
+	}
+	if resp.Content != "via-responses" {
+		t.Errorf("content = %q, want via-responses", resp.Content)
+	}
+	if calls != 4 {
+		t.Errorf("requests = %d, want 4 (chat+tools, bare stream, bare plain, responses)", calls)
+	}
+	if got := paths[len(paths)-1]; !strings.HasSuffix(got, "/responses") {
+		t.Errorf("last request should hit /responses, got %s", got)
+	}
+}

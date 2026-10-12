@@ -315,6 +315,137 @@ func textContent(content any) string {
 	}
 }
 
+// responsesRequest is the OpenAI Responses API request shape
+// (POST {endpoint}/v1/responses), used for models that do not serve the
+// chat completions protocol.
+type responsesRequest struct {
+	Model           string `json:"model"`
+	Input           any    `json:"input"`
+	Stream          bool   `json:"stream,omitempty"`
+	MaxOutputTokens *int   `json:"max_output_tokens,omitempty"`
+	Tools           []tool `json:"tools,omitempty"`
+	ToolChoice      any    `json:"tool_choice,omitempty"`
+	User            string `json:"user,omitempty"`
+}
+
+type responsesResponse struct {
+	ID     string `json:"id"`
+	Model  string `json:"model"`
+	Output []struct {
+		Type    string `json:"type"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		CallID    string `json:"call_id"`
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"output"`
+	Usage *struct {
+		PromptTokens     int `json:"input_tokens"`
+		CompletionTokens int `json:"output_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
+}
+
+// CompleteViaResponses executes req against the /v1/responses endpoint
+// (non-streaming). It is a fallback for models that reject chat completions.
+func (a *Adapter) CompleteViaResponses(ctx context.Context, req *provider.Request, prov provider.Provider, key string) (*provider.Response, error) {
+	endpoint, err := provider.Endpoint(prov.Endpoint, "/v1/responses", "/responses")
+	if err != nil {
+		return nil, err
+	}
+	items := make([]any, 0, len(req.Messages))
+	for _, m := range req.Messages {
+		items = append(items, map[string]any{"role": m.Role, "content": textContent(m.Content)})
+	}
+	bodyReq := responsesRequest{Model: req.Model, Input: items}
+	if req.MaxTokens > 0 {
+		n := req.MaxTokens
+		bodyReq.MaxOutputTokens = &n
+	}
+	if req.User != "" {
+		bodyReq.User = req.User
+	}
+	for _, def := range req.Tools {
+		var t tool
+		t.Type = "function"
+		t.Function.Name = def.Name
+		t.Function.Description = def.Description
+		t.Function.Parameters = def.Parameters
+		bodyReq.Tools = append(bodyReq.Tools, t)
+	}
+	if len(bodyReq.Tools) > 0 {
+		bodyReq.ToolChoice = "auto"
+	}
+	body, err := json.Marshal(bodyReq)
+	if err != nil {
+		return nil, err
+	}
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpRequest.Header.Set("Authorization", "Bearer "+key)
+	httpRequest.Header.Set("Content-Type", "application/json")
+	httpRequest.Header.Set("Accept", "application/json")
+	httpRequest.Header.Set("User-Agent", provider.UserAgent)
+	if a.HeaderFunc != nil {
+		for k, v := range a.HeaderFunc() {
+			httpRequest.Header.Set(k, v)
+		}
+	}
+	resp, err := http.DefaultClient.Do(httpRequest)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &provider.APIError{StatusCode: resp.StatusCode, Message: provider.ErrorMessage(raw)}
+	}
+	var parsed responsesResponse
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, fmt.Errorf("openai: decode responses response: %w", err)
+	}
+	out := &provider.Response{ID: parsed.ID, Model: parsed.Model}
+	if parsed.Usage != nil {
+		out.Usage = provider.Usage{
+			PromptTokens:     parsed.Usage.PromptTokens,
+			CompletionTokens: parsed.Usage.CompletionTokens,
+			TotalTokens:      parsed.Usage.TotalTokens,
+		}
+	}
+	var sb strings.Builder
+	for _, item := range parsed.Output {
+		switch item.Type {
+		case "message":
+			for _, c := range item.Content {
+				if c.Type == "output_text" {
+					sb.WriteString(c.Text)
+				}
+			}
+		case "function_call":
+			id := item.CallID
+			if id == "" {
+				id = item.ID
+			}
+			out.ToolCalls = append(out.ToolCalls, provider.ToolCall{
+				ID: id, Name: item.Name, Arguments: item.Arguments,
+			})
+		}
+	}
+	out.Content = sb.String()
+	if out.Content == "" && len(out.ToolCalls) == 0 {
+		return nil, fmt.Errorf("openai: empty responses output")
+	}
+	return out, nil
+}
+
 func (a *Adapter) doRequest(ctx context.Context, prov provider.Provider, key string, body []byte) (*http.Response, error) {
 	endpoint, err := provider.Endpoint(prov.Endpoint, "/v1/chat/completions", "/chat/completions")
 	if err != nil {
