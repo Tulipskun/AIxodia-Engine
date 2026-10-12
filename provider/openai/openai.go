@@ -321,16 +321,17 @@ func textContent(content any) string {
 // (POST {endpoint}/v1/responses), used for models that do not serve the
 // chat completions protocol.
 type responsesRequest struct {
-	Model           string   `json:"model"`
-	Input           any      `json:"input"`
-	Stream          bool     `json:"stream,omitempty"`
-	MaxOutputTokens *int     `json:"max_output_tokens,omitempty"`
-	Tools           []tool   `json:"tools,omitempty"`
-	ToolChoice      any      `json:"tool_choice,omitempty"`
-	User            string   `json:"user,omitempty"`
-	Include         []string `json:"include,omitempty"`
-	Store           *bool    `json:"store,omitempty"`
-	PromptCacheKey  string   `json:"prompt_cache_key,omitempty"`
+	Model           string         `json:"model"`
+	Input           any            `json:"input"`
+	Stream          bool           `json:"stream,omitempty"`
+	StreamOptions   *streamOptions `json:"stream_options,omitempty"`
+	MaxOutputTokens *int           `json:"max_output_tokens,omitempty"`
+	Tools           []tool         `json:"tools,omitempty"`
+	ToolChoice      any            `json:"tool_choice,omitempty"`
+	User            string         `json:"user,omitempty"`
+	Include         []string       `json:"include,omitempty"`
+	Store           *bool          `json:"store,omitempty"`
+	PromptCacheKey  string         `json:"prompt_cache_key,omitempty"`
 }
 
 type responsesResponse struct {
@@ -363,6 +364,9 @@ func buildResponsesRequest(req *provider.Request, stream bool) responsesRequest 
 		items = append(items, map[string]any{"role": m.Role, "content": textContent(m.Content)})
 	}
 	bodyReq := responsesRequest{Model: req.Model, Input: items, Stream: stream}
+	if stream {
+		bodyReq.StreamOptions = &streamOptions{IncludeUsage: true}
+	}
 	if req.MaxTokens > 0 {
 		n := req.MaxTokens
 		bodyReq.MaxOutputTokens = &n
