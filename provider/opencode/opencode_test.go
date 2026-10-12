@@ -409,3 +409,62 @@ func TestResponsesFallbackKeepsFullTools(t *testing.T) {
 		t.Errorf("responses fallback should carry original tools, body: %s", last)
 	}
 }
+
+// TestSparkChainReachesResponsesTools simulates a responses-only free-tier
+// model: chat+tools -> 400 protocol, chat bare -> 403 gate, responses+tools
+// -> 200. The adapter must reach the responses attempt and return content.
+func TestSparkChainReachesResponsesTools(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		paths = append(paths, r.URL.Path+" tools="+hasTools(body))
+		hasT := strings.Contains(string(body), `"tools"`)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/chat/completions") && hasT:
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"message":"Model does not support this protocol."}`)
+		case strings.HasSuffix(r.URL.Path, "/chat/completions"):
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"message":"OpenCode's free tier can only be used from within OpenCode"}`)
+		case strings.HasSuffix(r.URL.Path, "/responses") && hasT:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, `data: {"type":"response.output_text.delta","delta":"SPARK-OK"}`+"\n\n")
+			_, _ = io.WriteString(w, `data: {"type":"response.completed","response":{"id":"resp_1","model":"m","output":[{"type":"message","content":[{"type":"output_text","text":"SPARK-OK"}]}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`+"\n\n")
+		default:
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"message":"OpenCode's free tier can only be used from within OpenCode"}`)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	adapter := New()
+	var got []string
+	resp, err := adapter.Stream(context.Background(), &provider.Request{
+		Model:    "muse-spark-1.3-contributor-free",
+		Messages: []provider.Message{{Role: "user", Content: "hi"}},
+		MaxTokens: 60,
+		Tools:    []provider.ToolDef{{Name: "bash", Description: "run"}, {Name: "read", Description: "read"}},
+	}, providerFor(server), "key", func(s string) error { got = append(got, s); return nil })
+	if err != nil {
+		t.Fatalf("stream: %v (paths=%v)", err, paths)
+	}
+	if resp.Content != "SPARK-OK" {
+		t.Errorf("content = %q, want SPARK-OK (paths=%v)", resp.Content, paths)
+	}
+	found := false
+	for _, p := range paths {
+		if strings.HasSuffix(p, "/responses tools=true") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("never tried responses-with-tools (paths=%v)", paths)
+	}
+}
+
+func hasTools(body []byte) string {
+	if strings.Contains(string(body), `"tools"`) {
+		return "true"
+	}
+	return "false"
+}
