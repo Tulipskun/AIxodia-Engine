@@ -3,7 +3,6 @@ package opencode
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -533,23 +532,30 @@ func TestCarriesImages(t *testing.T) {
 	}
 }
 
-// Retrying without pictures doubles the work, so it is only worth doing when the
-// pictures could plausibly be the reason.
-func TestLooksLikeImageRejectionIsNarrow(t *testing.T) {
+// Only a key or a balance failure is hopeless without the pictures. Everything
+// else is retried once, because a text-only model handed a picture tends to fall
+// over rather than explain itself: ling-3.1-flash-free answers normally without
+// one and returns 502 with one, and no amount of word-matching in the error
+// would have predicted that.
+func TestWorthRetryingWithoutImages(t *testing.T) {
 	cases := []struct {
+		name string
 		err  error
 		want bool
 	}{
-		{&provider.APIError{StatusCode: 400, Message: "Model does not support this protocol."}, true},
-		{&provider.APIError{StatusCode: 400, Message: "invalid_request: image too large"}, true},
-		{&provider.APIError{StatusCode: 401, Message: "bad key"}, false},
-		{&provider.APIError{StatusCode: 402, Message: "out of credit"}, false},
-		{&provider.APIError{StatusCode: 500, Message: "internal error"}, false},
-		{errors.New("connection reset by peer"), false},
+		{"a model that names the protocol", &provider.APIError{StatusCode: 400, Message: "Model does not support this protocol."}, true},
+		{"a payload rejection", &provider.APIError{StatusCode: 400, Message: "invalid_request: image too large"}, true},
+		{"an upstream crash on the picture", &provider.APIError{StatusCode: 502, Message: "error code: 502"}, true},
+		{"an upstream 500", &provider.APIError{StatusCode: 500, Message: "internal error"}, true},
+		{"a free-tier 403", &provider.APIError{StatusCode: 403, Message: "OpenCode's free tier can only be used from within OpenCode"}, true},
+		{"a bad key", &provider.APIError{StatusCode: 401, Message: "bad key"}, false},
+		{"no credit", &provider.APIError{StatusCode: 402, Message: "out of credit"}, false},
+		{"a 403 about the key", &provider.APIError{StatusCode: 403, Message: "invalid api key"}, false},
+		{"a 403 about the balance", &provider.APIError{StatusCode: 403, Message: "insufficient balance"}, false},
 	}
 	for _, c := range cases {
-		if got := looksLikeImageRejection(c.err); got != c.want {
-			t.Errorf("looksLikeImageRejection(%v) = %v, want %v", c.err, got, c.want)
+		if got := worthRetryingWithoutImages(c.err); got != c.want {
+			t.Errorf("%s: worthRetryingWithoutImages(%v) = %v, want %v", c.name, c.err, got, c.want)
 		}
 	}
 }

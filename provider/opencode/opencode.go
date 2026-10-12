@@ -86,7 +86,7 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 		return emit(s)
 	}
 	resp, err := a.ladder(ctx, req, prov, key, guard)
-	if err == nil || emitted || !carriesImages(req.Messages) || !looksLikeImageRejection(err) {
+	if err == nil || emitted || !carriesImages(req.Messages) || !worthRetryingWithoutImages(err) {
 		return resp, err
 	}
 	stripped := withoutImages(req)
@@ -131,27 +131,35 @@ func withoutImages(req *provider.Request) *provider.Request {
 	return &out
 }
 
-// looksLikeImageRejection is deliberately narrow. Retrying without pictures
-// doubles the work, so it is only worth doing when the failure could plausibly
-// be the pictures: an auth or credit error would fail exactly the same way the
-// second time.
-func looksLikeImageRejection(err error) bool {
+// worthRetryingWithoutImages decides whether asking again without the pictures
+// could plausibly succeed.
+//
+// The first cut looked for words like "protocol" or "image" in the failure. That
+// was too clever: a text-only model handed a picture does not politely say so, it
+// falls over — ling-3.1-flash-free answers normally without a picture and
+// returns 502 with one, and the word-based test read that as unrelated and gave
+// up. The only failures that genuinely cannot be helped by removing the pictures
+// are the ones about the key or the balance, so those are what is excluded and
+// everything else is retried once.
+func worthRetryingWithoutImages(err error) bool {
 	var api *provider.APIError
 	if errors.As(err, &api) {
-		if api.StatusCode == http.StatusUnauthorized || api.StatusCode == http.StatusPaymentRequired {
+		switch api.StatusCode {
+		case http.StatusUnauthorized, http.StatusPaymentRequired:
 			return false
-		}
-	}
-	msg := strings.ToLower(err.Error())
-	for _, hint := range []string{
-		"protocol", "unsupported", "not support", "does not support",
-		"invalid_request", "invalid request", "image", "vision", "modalit",
-	} {
-		if strings.Contains(msg, hint) {
+		case http.StatusForbidden:
+			// A 403 is also what a payload rejection looks like, so it is only
+			// skipped when the message is plainly about credentials.
+			msg := strings.ToLower(api.Message)
+			for _, hint := range []string{"key", "credit", "quota", "balance", "payment"} {
+				if strings.Contains(msg, hint) {
+					return false
+				}
+			}
 			return true
 		}
 	}
-	return false
+	return true
 }
 
 func (a *Adapter) ladder(ctx context.Context, req *provider.Request, prov provider.Provider, key string, guarded func(string) error) (*provider.Response, error) {
