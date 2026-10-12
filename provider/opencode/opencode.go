@@ -12,6 +12,7 @@ import (
 
 	"ai-engine/provider"
 	"ai-engine/provider/openai"
+	"ai-engine/tools"
 )
 
 const clientID = "opencode/1.18.35 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
@@ -220,17 +221,28 @@ func isToolProtocolError(err error) bool {
 	return hasToolWord && hasRejectWord
 }
 
-func contractTools(tools []provider.ToolDef) []provider.ToolDef {
-	present := make(map[string]bool, len(tools))
-	for _, def := range tools {
+func contractTools(given []provider.ToolDef) []provider.ToolDef {
+	present := make(map[string]bool, len(given))
+	for _, def := range given {
 		present[def.Name] = true
 	}
-	out := append([]provider.ToolDef(nil), tools...)
+	out := append([]provider.ToolDef(nil), given...)
+	// The free-tier gate only passes the full rich declarations (it rejects
+	// stub shells), so inject the real builtin defs — never minimal sketches.
+	real := tools.Builtin()
 	if !present[shellTool] && !present["bash"] {
-		out = append(out, placeholder(shellTool))
+		if t, ok := real[shellTool]; ok {
+			out = append(out, t.Def)
+		} else {
+			out = append(out, placeholder(shellTool))
+		}
 	}
 	if !present[readTool] {
-		out = append(out, placeholder(readTool))
+		if t, ok := real[readTool]; ok {
+			out = append(out, t.Def)
+		} else {
+			out = append(out, placeholder(readTool))
+		}
 	}
 	return out
 }
