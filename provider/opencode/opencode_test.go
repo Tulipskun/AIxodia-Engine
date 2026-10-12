@@ -259,3 +259,44 @@ func TestNoRetryOnUnrelatedErrors(t *testing.T) {
 		t.Errorf("requests = %d, want 1 (no retry on funds errors)", calls)
 	}
 }
+
+func TestRetryNonStreamingWhenBareStreamAlsoRejected(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		body, _ := io.ReadAll(r.Body)
+		var parsed struct {
+			Stream bool  `json:"stream"`
+			Tools  []any `json:"tools"`
+		}
+		_ = json.Unmarshal(body, &parsed)
+		if parsed.Stream {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"message":"Model does not support this protocol."}`)
+			return
+		}
+		if parsed.Tools != nil {
+			t.Errorf("non-stream retry should carry no tools, got %v", parsed.Tools)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"gen-9","model":"zen-model","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"plain ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`)
+	}))
+	t.Cleanup(server.Close)
+
+	adapter := New()
+	resp, err := adapter.Complete(context.Background(), &provider.Request{
+		Model:    "zen-model",
+		Messages: []provider.Message{{Role: "user", Content: "hi"}},
+		Tools:    []provider.ToolDef{{Name: "current_time", Description: "now"}},
+	}, providerFor(server), "key")
+	if err != nil {
+		t.Fatalf("non-stream fallback: %v", err)
+	}
+	if resp.Content != "plain ok" {
+		t.Errorf("content = %q, want plain ok", resp.Content)
+	}
+	if calls != 3 {
+		t.Errorf("requests = %d, want 3 (tools+stream, bare stream, bare plain)", calls)
+	}
+}

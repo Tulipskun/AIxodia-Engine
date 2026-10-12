@@ -59,17 +59,46 @@ func (a *Adapter) Complete(ctx context.Context, req *provider.Request, prov prov
 }
 
 func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provider.Provider, key string, emit func(string) error) (*provider.Response, error) {
+	emitted := false
+	guarded := func(s string) error {
+		emitted = true
+		if emit == nil {
+			return nil
+		}
+		return emit(s)
+	}
 	prepared := *req
 	prepared.Tools = contractTools(req.Tools)
-	resp, err := a.inner.Stream(ctx, &prepared, prov, key, emit)
-	if err != nil && len(prepared.Tools) > 0 && isToolProtocolError(err) {
-		// Some models do not accept function-calling payloads at all; retry
-		// once without any tools rather than failing the whole request.
-		stripped := *req
-		stripped.Tools = nil
-		return a.inner.Stream(ctx, &stripped, prov, key, emit)
+	resp, err := a.inner.Stream(ctx, &prepared, prov, key, guarded)
+	if err == nil {
+		return resp, nil
 	}
-	return resp, err
+	// Only retry while nothing has streamed yet: a mid-stream failure must
+	// surface as-is, otherwise the client would see duplicated content.
+	if emitted || !isToolProtocolError(err) {
+		return nil, err
+	}
+	// Attempt 2: same streaming mode, no tools. Some models reject any
+	// function-calling payload outright.
+	stripped := *req
+	stripped.Tools = nil
+	if resp2, err2 := a.inner.Stream(ctx, &stripped, prov, key, guarded); err2 == nil {
+		return resp2, nil
+	} else if emitted || !isToolProtocolError(err2) {
+		return nil, err2
+	}
+	// Attempt 3: non-streaming, no tools. Some models only serve plain
+	// (non-SSE) chat completions.
+	bare, err3 := a.inner.Complete(ctx, &stripped, prov, key)
+	if err3 != nil {
+		return nil, err3
+	}
+	if emit != nil {
+		if err := emit(bare.Content); err != nil {
+			return nil, err
+		}
+	}
+	return bare, nil
 }
 
 // isToolProtocolError reports whether err looks like an upstream rejection of
