@@ -547,6 +547,7 @@ func (a *Adapter) StreamViaResponses(ctx context.Context, req *provider.Request,
 	callNames := map[string]string{}
 	var completed *responsesResponse
 	finished := false
+	cutShort := false
 
 	serr := provider.ReadSSE(resp.Body, func(data string) error {
 		if data == "[DONE]" {
@@ -585,7 +586,15 @@ func (a *Adapter) StreamViaResponses(ctx context.Context, req *provider.Request,
 				completed = ev.Response
 			}
 			finished = true
-		case "response.failed", "response.incomplete", "error":
+		case "response.incomplete":
+			// Token-limit cutoff: keep the partial output instead of
+			// failing, mirroring finish_reason=length on chat paths.
+			if ev.Response != nil {
+				completed = ev.Response
+			}
+			cutShort = true
+			finished = true
+		case "response.failed", "error":
 			return fmt.Errorf("openai: responses stream failed: %s", data[:min(300, len(data))])
 		}
 		return nil
@@ -597,6 +606,9 @@ func (a *Adapter) StreamViaResponses(ctx context.Context, req *provider.Request,
 		content, calls, usage := parseResponsesOutput(*completed)
 		out.Content, out.ToolCalls, out.Usage = content, calls, usage
 		out.ID, out.Model = completed.ID, completed.Model
+		if cutShort {
+			out.FinishReason = "length"
+		}
 	} else {
 		out.Content = text.String()
 		for _, id := range callOrder {
