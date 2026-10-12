@@ -41,7 +41,7 @@ func main() {
 		log.Fatal("CF_TOKEN is invalid")
 	}
 
-	// A newer engine (started later) owns the `nodes` row. If one is already
+	// A newer engine (started later) owns the `tunnel` row. If one is already
 	// running, this older instance exits instead of fighting it.
 	if newer, err := newerDaemonRunning(startedAt); err != nil {
 		log.Printf("guard: %v", err)
