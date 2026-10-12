@@ -136,6 +136,7 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 	// full tool set — exactly what reference clients send. Some models only
 	// serve this shape and reject everything else outright.
 	fullStream := *req
+	fullStream.Tools = contractTools(req.Tools)
 	if resp4s, err4s := a.inner.StreamViaResponses(ctx, &fullStream, prov, key, guarded); err4s == nil {
 		return resp4s, nil
 	} else if emitted || !isToolProtocolError(err4s) {
@@ -146,6 +147,7 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 	}
 	// Attempt 5: Responses API with the full tool set, non-streaming.
 	full := *req
+	full.Tools = contractTools(req.Tools)
 	if resp4, err4 := a.inner.CompleteViaResponses(ctx, &full, prov, key); err4 == nil {
 		if emit != nil {
 			if err := emit(resp4.Content); err != nil {

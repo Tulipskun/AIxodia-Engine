@@ -468,3 +468,28 @@ func hasTools(body []byte) string {
 	}
 	return "false"
 }
+
+func TestContractToolsExpandsPartialSets(t *testing.T) {
+	bash := provider.ToolDef{Name: "bash"}
+	got := contractTools([]provider.ToolDef{bash})
+	names := map[string]bool{}
+	for _, d := range got {
+		names[d.Name] = true
+	}
+	if !names["bash"] || !names["read"] {
+		t.Errorf("contract([bash]) = %v, want bash+read", names)
+	}
+	for _, d := range got {
+		if d.Name == "read" && len(d.Description) < 100 {
+			t.Errorf("injected read def is a stub (%d chars), gate needs the rich def", len(d.Description))
+		}
+	}
+	got = contractTools(nil)
+	names = map[string]bool{}
+	for _, d := range got {
+		names[d.Name] = true
+	}
+	if !names["shell"] || !names["read"] {
+		t.Errorf("contract(nil) = %v, want shell+read", names)
+	}
+}
