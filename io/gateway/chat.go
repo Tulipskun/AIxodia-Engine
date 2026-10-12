@@ -35,6 +35,10 @@ type chatRequest struct {
 	// WebSocket sends one new message per turn; without this flag the history is
 	// matched against a single message, never matches, and is discarded.
 	Append bool `json:"append,omitempty"`
+	// Attachments are files the phone uploaded first. Pictures among them are
+	// sent to the model as pictures rather than described to it, so a question
+	// about a photograph can be answered by looking at it.
+	Attachments []chatAttachment `json:"attachments,omitempty"`
 }
 
 type route struct {
@@ -86,6 +90,16 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 			role = "user"
 		}
 		incoming = append(incoming, provider.Message{Role: role, Content: message.Content})
+	}
+	// Pictures ride on the message that asked about them. The text note the
+	// phone sends alongside still names every file, so a model that cannot take
+	// pictures, and every later turn that reads this back from the database, is
+	// no worse off than before.
+	if withImages, skipped := g.attachImages(incoming, body.Attachments); len(withImages) > 0 {
+		incoming = withImages
+		for _, reason := range skipped {
+			log.Printf("gateway: attachment not sent as a picture: %s", reason)
+		}
 	}
 
 	history, delta := incoming, incoming

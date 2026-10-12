@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -303,10 +304,57 @@ func toMessages(messages []provider.Message) []message {
 			}
 			out = append(out, converted)
 		default:
-			out = append(out, message{Role: incoming.Role, Content: incoming.Content})
+			out = append(out, message{Role: incoming.Role, Content: contentOf(incoming)})
 		}
 	}
 	return out
+}
+
+// contentOf is a plain string unless the message carries pictures, in which
+// case it becomes the array of parts an OpenAI-compatible endpoint expects. A
+// data URI is used rather than an upload because the picture arrived with the
+// message and has nowhere else to live.
+func contentOf(m provider.Message) any {
+	if len(m.Images) == 0 {
+		return m.Content
+	}
+	parts := make([]map[string]any, 0, len(m.Images)+1)
+	if m.Content != "" {
+		parts = append(parts, map[string]any{"type": "text", "text": m.Content})
+	}
+	for _, img := range m.Images {
+		parts = append(parts, map[string]any{
+			"type":      "image_url",
+			"image_url": map[string]any{"url": dataURI(img)},
+		})
+	}
+	return parts
+}
+
+// dataURI is the inline form both OpenAI shapes accept, and the only form that
+// works without a second request to upload the bytes somewhere first.
+func dataURI(img provider.Image) string {
+	media := img.MediaType
+	if media == "" {
+		media = "image/jpeg"
+	}
+	return "data:" + media + ";base64," + base64.StdEncoding.EncodeToString(img.Data)
+}
+
+// responsesContent is contentOf in the /v1/responses spelling: the same data
+// URI under a different part name.
+func responsesContent(m provider.Message) any {
+	if len(m.Images) == 0 {
+		return textContent(m.Content)
+	}
+	parts := make([]map[string]any, 0, len(m.Images)+1)
+	if text := textContent(m.Content); text != "" {
+		parts = append(parts, map[string]any{"type": "input_text", "text": text})
+	}
+	for _, img := range m.Images {
+		parts = append(parts, map[string]any{"type": "input_image", "image_url": dataURI(img)})
+	}
+	return parts
 }
 
 func textContent(content any) string {
@@ -394,7 +442,7 @@ func buildResponsesRequest(req *provider.Request, stream bool) responsesRequest 
 			}
 			continue
 		}
-		items = append(items, map[string]any{"role": m.Role, "content": textContent(m.Content)})
+		items = append(items, map[string]any{"role": m.Role, "content": responsesContent(m)})
 	}
 	bodyReq := responsesRequest{Model: req.Model, Input: items, Stream: stream}
 	if req.MaxTokens > 0 {

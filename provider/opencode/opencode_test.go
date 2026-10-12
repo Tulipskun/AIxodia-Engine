@@ -3,6 +3,7 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -491,5 +492,64 @@ func TestContractToolsExpandsPartialSets(t *testing.T) {
 	}
 	if !names["shell"] || !names["read"] {
 		t.Errorf("contract(nil) = %v, want shell+read", names)
+	}
+}
+
+// A model that cannot take pictures has to be asked again without them, and the
+// message has to be told they were dropped: an answer that reads as though the
+// picture was seen is worse than no answer.
+func TestWithoutImagesStripsAndSaysSo(t *testing.T) {
+	req := &provider.Request{Messages: []provider.Message{
+		{Role: "user", Content: "อันเก่า"},
+		{Role: "assistant", Content: "ตอบ"},
+		{Role: "user", Content: "รูปนี้ใช่คนเดียวกันมั้ย?", Images: []provider.Image{
+			{MediaType: "image/jpeg", Data: []byte{1, 2, 3}},
+		}},
+	}}
+	got := withoutImages(req)
+
+	if carriesImages(got.Messages) {
+		t.Fatal("no picture should survive")
+	}
+	if !strings.Contains(got.Messages[2].Content, "could not see") {
+		t.Errorf("the message must be told, got: %q", got.Messages[2].Content)
+	}
+	if !strings.HasPrefix(got.Messages[2].Content, "รูปนี้ใช่คนเดียวกันมั้ย?") {
+		t.Errorf("the original question must survive: %q", got.Messages[2].Content)
+	}
+	// The caller's request is the one that describes what was asked for, so it
+	// must not be modified in place.
+	if !carriesImages(req.Messages) {
+		t.Error("withoutImages must not mutate the request it was given")
+	}
+}
+
+func TestCarriesImages(t *testing.T) {
+	if carriesImages([]provider.Message{{Role: "user", Content: "text"}}) {
+		t.Error("a text-only conversation carries no pictures")
+	}
+	if !carriesImages([]provider.Message{{Role: "user", Images: []provider.Image{{Data: []byte{1}}}}}) {
+		t.Error("a message with an image should be reported")
+	}
+}
+
+// Retrying without pictures doubles the work, so it is only worth doing when the
+// pictures could plausibly be the reason.
+func TestLooksLikeImageRejectionIsNarrow(t *testing.T) {
+	cases := []struct {
+		err  error
+		want bool
+	}{
+		{&provider.APIError{StatusCode: 400, Message: "Model does not support this protocol."}, true},
+		{&provider.APIError{StatusCode: 400, Message: "invalid_request: image too large"}, true},
+		{&provider.APIError{StatusCode: 401, Message: "bad key"}, false},
+		{&provider.APIError{StatusCode: 402, Message: "out of credit"}, false},
+		{&provider.APIError{StatusCode: 500, Message: "internal error"}, false},
+		{errors.New("connection reset by peer"), false},
+	}
+	for _, c := range cases {
+		if got := looksLikeImageRejection(c.err); got != c.want {
+			t.Errorf("looksLikeImageRejection(%v) = %v, want %v", c.err, got, c.want)
+		}
 	}
 }

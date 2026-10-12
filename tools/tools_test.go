@@ -1,13 +1,20 @@
 package tools
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"ai-engine/imageprep"
 )
 
 func TestValidatePublicURLRejectsLocalTargets(t *testing.T) {
@@ -237,5 +244,94 @@ func TestBinaryKindNamesWhatItFound(t *testing.T) {
 		if bin != c.bin || got != c.want {
 			t.Errorf("binaryKind(%q) = %q,%v want %q,%v", c.path, got, bin, c.want, c.bin)
 		}
+	}
+}
+
+// base64 is the only way a picture can travel through a tool result, and it has
+// to arrive shrunk: the raw bytes of a screenshot encode to more characters than
+// a prompt can hold.
+func TestReadBase64ShrinksAPicture(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shot.jpg")
+
+	img := image.NewRGBA(image.Rect(0, 0, 2400, 1600))
+	for i := 0; i < 2400*1600; i++ {
+		img.Set(i%2400, i/2400, color.RGBA{uint8(i), uint8(i / 7), 90, 255})
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 95}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := readFile(context.Background(), `{"filePath":"`+path+`","base64":true}`)
+	if err != nil {
+		t.Fatalf("base64 read: %v", err)
+	}
+	if !strings.HasPrefix(got, path) {
+		t.Errorf("the result should name the file first:\n%.80s", got)
+	}
+	if !strings.Contains(got, "reduced from 2400x1600") {
+		t.Errorf("the result should say the picture was shrunk:\n%.160s", got)
+	}
+	if !strings.Contains(got, "data:image/jpeg;base64,") {
+		t.Errorf("the result should be a data URI a caller can use:\n%.160s", got)
+	}
+	if len(got) > base64Ceiling+400 {
+		t.Errorf("result is %d characters, over the ceiling", len(got))
+	}
+	// Decode it back with the standard library rather than trusting the prefix:
+	// a data URI that says image/jpeg but holds something else is worse than an
+	// obvious failure.
+	idx := strings.Index(got, "base64,")
+	payload, err := base64.StdEncoding.DecodeString(strings.TrimSpace(got[idx+len("base64,"):]))
+	if err != nil {
+		t.Fatalf("the returned base64 does not decode: %v", err)
+	}
+	decoded, err := jpeg.Decode(bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("the decoded bytes are not a JPEG: %v", err)
+	}
+	if b := decoded.Bounds(); b.Dx() > imageprep.MaxEdge || b.Dy() > imageprep.MaxEdge {
+		t.Errorf("decoded picture is %dx%d, over the %d limit", b.Dx(), b.Dy(), imageprep.MaxEdge)
+	}
+}
+
+// Without the flag the old refusal still stands, so a model that ignores the
+// parameter is told what happened rather than handed replacement characters.
+func TestReadWithoutBase64StillRefusesAPicture(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shot.jpg")
+	if err := os.WriteFile(path, []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readFile(context.Background(), `{"filePath":"`+path+`"}`); err == nil {
+		t.Error("a picture without base64:true should still be refused")
+	}
+}
+
+// A file too big to encode is reported as too big, not truncated: half a base64
+// string decodes to half a picture, which is worse than none.
+func TestReadBase64RefusesWhatItCannotCarry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blob.bin")
+	raw := make([]byte, 400*1024)
+	for i := range raw {
+		raw[i] = byte(i * 31)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readFile(context.Background(), `{"filePath":"`+path+`","base64":true}`)
+	if err != nil {
+		t.Fatalf("a large file should answer, not fail: %v", err)
+	}
+	if !strings.Contains(got, "too large to return") {
+		t.Errorf("expected a size refusal, got:\n%.200s", got)
+	}
+	if strings.Contains(got, ";base64,") {
+		t.Error("nothing should be encoded when it does not fit")
 	}
 }

@@ -15,7 +15,7 @@ import (
 	"testing"
 )
 
-func fakeChat(ctx context.Context, sessionID, text string, onDelta func(string), onTool func(ToolEvent)) (string, int, int, error) {
+func fakeChat(ctx context.Context, sessionID, text string, attachments []Attachment, onDelta func(string), onTool func(ToolEvent)) (string, int, int, error) {
 	onDelta("echo: ")
 	onDelta(text)
 	return "echo: " + text, 3, 4, nil

@@ -205,7 +205,14 @@ func startTunnel(ctx context.Context) (string, error) {
 // otherwise the agent default — without this every chat is answered with
 // the default even after the user pins another model mid-session.
 func chatViaGateway(h http.Handler, model string) mobile.ChatFunc {
-	return func(ctx context.Context, sessionID, text string, onDelta func(string), onTool func(mobile.ToolEvent)) (string, int, int, error) {
+	return func(ctx context.Context, sessionID, text string, attachments []mobile.Attachment, onDelta func(string), onTool func(mobile.ToolEvent)) (string, int, int, error) {
+		// The pictures among the attachments are named to the gateway, which
+		// loads them and sends them as pictures. It cannot do that from the text
+		// alone: the note lists paths, and a path is not a picture.
+		payload := []map[string]string(nil)
+		for _, a := range attachments {
+			payload = append(payload, map[string]string{"path": a.Path, "name": a.Name, "mime": a.Mime})
+		}
 		body, err := json.Marshal(map[string]any{
 			"session_id": sessionID,
 			"model":      sessionModel(h, sessionID, model),
@@ -213,8 +220,9 @@ func chatViaGateway(h http.Handler, model string) mobile.ChatFunc {
 			// This frame carries only the message just typed, not the
 			// transcript: the gateway appends it to the stored history instead
 			// of trying to match a prefix it cannot share.
-			"append":   true,
-			"messages": []map[string]string{{"role": "user", "content": text}},
+			"append":      true,
+			"messages":    []map[string]string{{"role": "user", "content": text}},
+			"attachments": payload,
 		})
 		if err != nil {
 			return "", 0, 0, err

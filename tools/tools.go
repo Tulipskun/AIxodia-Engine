@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"ai-engine/imageprep"
 	"ai-engine/provider"
 )
 
@@ -66,7 +68,8 @@ func Builtin() map[string]Tool {
 			"- To read later sections, call this tool again with a larger offset.\n" +
 			"- Contents are returned with each line prefixed by its line number as `<line>: <content>`.\n" +
 			"- For directories, entries are returned one per line (without line numbers) with a trailing `/` for subdirectories.\n" +
-			"- Any line longer than 2000 characters is truncated.",
+			"- Any line longer than 2000 characters is truncated.\n" +
+			"- Pictures cannot be read as text. Pass base64: true to get one as a data URI instead; it is shrunk first and the output is capped, because base64 in a prompt is charged by the character.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -81,6 +84,10 @@ func Builtin() map[string]Tool {
 				"limit": map[string]any{
 					"type":        "number",
 					"description": "The maximum number of lines to read (defaults to 2000).",
+				},
+				"base64": map[string]any{
+					"type":        "boolean",
+					"description": "Return the file as a base64 data URI instead of as text. Pictures are shrunk to a size a model can use before encoding.",
 				},
 			},
 			"required": []any{"filePath"},
@@ -181,6 +188,7 @@ func readFile(ctx context.Context, args string) (string, error) {
 		FilePath string  `json:"filePath"`
 		Offset   float64 `json:"offset"`
 		Limit    float64 `json:"limit"`
+		Base64   bool    `json:"base64"`
 	}{}
 	if err := json.Unmarshal([]byte(args), &input); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
@@ -224,6 +232,12 @@ func readFile(ctx context.Context, args string) (string, error) {
 	}
 	if !st.Mode().IsRegular() {
 		return "", fmt.Errorf("%s is not a regular file", p)
+	}
+	// The two paths want different amounts of the file, so they read it
+	// themselves rather than sharing a window. Text is shown a slice; a picture
+	// has to arrive whole, and a partial JPEG does not decode at all.
+	if input.Base64 {
+		return encodeBase64File(clean, st.Size())
 	}
 	const maxBytes = int64(256 * 1024)
 	if st.Size() > 4*1024*1024 {
@@ -464,4 +478,83 @@ func binaryKind(path string, raw []byte) (string, bool) {
 		return "binary", true
 	}
 	return "", false
+}
+
+// base64Ceiling caps what this returns as text. A prompt is charged by the
+// character and base64 is four characters for every three bytes, so a 1 MB
+// picture would arrive as 1.4 million characters — more than any context window
+// holds and more than the picture is worth. The ceiling is what fits, and the
+// header says so rather than truncating silently.
+const base64Ceiling = 192 * 1024
+
+// encodeBase64 returns a data URI for a file, shrinking a picture first.
+//
+// A picture is worth sending as base64 only after imageprep has made it small.
+// The raw bytes of a phone screenshot encode to something no request can carry,
+// and a model samples the same picture from far fewer pixels anyway.
+// encodeBase64File reads a whole file and encodes it. The ceiling is far above
+// the text window because a picture has to be complete to decode, and a modern
+// phone photo is routinely 8 MB.
+func encodeBase64File(path string, size int64) (string, error) {
+	const maxEncodeBytes = int64(32 * 1024 * 1024)
+	if size > maxEncodeBytes {
+		return "", fmt.Errorf("%s is too large to encode (%.1f MB, ceiling %.0f MB)",
+			path, float64(size)/1048576, float64(maxEncodeBytes)/1048576)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("cannot open %s: %w", path, err)
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, maxEncodeBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("cannot read %s: %w", path, err)
+	}
+	return encodeBase64(path, raw), nil
+}
+
+func encodeBase64(path string, raw []byte) string {
+	// The ceiling counts characters and the picture is measured in bytes, and
+	// base64 spends four characters on every three bytes, so the budget handed
+	// to the shrinker is the ceiling scaled back.
+	if pic, err := imageprep.PrepareWithin(raw, base64Ceiling*3/4); err == nil {
+		note := fmt.Sprintf("%dx%d", pic.Width, pic.Height)
+		if pic.Resized {
+			note = fmt.Sprintf("%dx%d, reduced from %dx%d", pic.Width, pic.Height, pic.OriginalWidth, pic.OriginalHeight)
+		}
+		return dataURIResult(path, note, pic.MediaType, pic.Data)
+	}
+	return dataURIResult(path, fmt.Sprintf("%d bytes", len(raw)), guessMediaType(path), raw)
+}
+
+func dataURIResult(path, note, mediaType string, raw []byte) string {
+	encoded := base64.StdEncoding.EncodeToString(raw)
+	header := fmt.Sprintf("%s — %s (%s)", path, mediaType, note)
+	if len(encoded) > base64Ceiling {
+		return fmt.Sprintf(
+			"%s\ntoo large to return: %d characters of base64, ceiling is %d. Use the bash tool to process it on the host instead.",
+			header, len(encoded), base64Ceiling,
+		)
+	}
+	return header + "\ndata:" + mediaType + ";base64," + encoded
+}
+
+// guessMediaType names a file by its extension, for the formats a chat sends.
+func guessMediaType(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".pdf":
+		return "application/pdf"
+	case ".png":
+		return "image/png"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".mp4":
+		return "video/mp4"
+	case ".txt", ".md", ".json", ".csv", ".log":
+		return "text/plain"
+	default:
+		return "application/octet-stream"
+	}
 }

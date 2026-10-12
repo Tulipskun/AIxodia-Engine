@@ -5,6 +5,7 @@ package anthropic
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,6 +35,15 @@ type wireBlock struct {
 	Input     json.RawMessage `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   string          `json:"content,omitempty"`
+	Source    *wireImage      `json:"source,omitempty"`
+}
+
+// wireImage is Anthropic's inline picture: base64 with its media type spelled
+// out, because the block carries no other hint about how to decode it.
+type wireImage struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
 }
 
 type wireMessage struct {
@@ -106,11 +116,28 @@ func buildRequest(req *provider.Request, stream bool) wireRequest {
 				out.Messages = append(out.Messages, wireMessage{Role: "user", Content: []wireBlock{block}})
 			}
 		default:
-			text := msg.Content
-			if strings.TrimSpace(text) == "" {
-				text = " "
+			blocks := make([]wireBlock, 0, len(msg.Images)+1)
+			if text := msg.Content; strings.TrimSpace(text) != "" {
+				blocks = append(blocks, wireBlock{Type: "text", Text: text})
 			}
-			out.Messages = append(out.Messages, wireMessage{Role: "user", Content: []wireBlock{{Type: "text", Text: text}}})
+			for _, img := range msg.Images {
+				media := img.MediaType
+				if media == "" {
+					media = "image/jpeg"
+				}
+				blocks = append(blocks, wireBlock{
+					Type: "image",
+					Source: &wireImage{
+						Type:      "base64",
+						MediaType: media,
+						Data:      base64.StdEncoding.EncodeToString(img.Data),
+					},
+				})
+			}
+			if len(blocks) == 0 {
+				blocks = []wireBlock{{Type: "text", Text: " "}}
+			}
+			out.Messages = append(out.Messages, wireMessage{Role: "user", Content: blocks})
 		}
 	}
 	out.System = strings.Join(system, "\n\n")

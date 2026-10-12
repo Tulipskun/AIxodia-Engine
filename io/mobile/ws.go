@@ -27,7 +27,18 @@ const maxFrame = 1 << 20
 // ChatFunc answers one user message in a session, calling onDelta for each
 // streamed piece and onTool for each live tool activity, and returns the
 // full reply plus token counts. It must stop when ctx is cancelled.
-type ChatFunc func(ctx context.Context, sessionID, text string, onDelta func(string), onTool func(ToolEvent)) (reply string, inTokens, outTokens int, err error)
+// ChatFunc answers one message. Attachments are the files the phone uploaded
+// before sending it: the pictures among them go to the model as pictures, and
+// every one of them is still named in the text for the model that cannot take
+// them or for a later turn that reads this back from the database.
+type ChatFunc func(ctx context.Context, sessionID, text string, attachments []Attachment, onDelta func(string), onTool func(ToolEvent)) (reply string, inTokens, outTokens int, err error)
+
+// Attachment is one uploaded file as the phone describes it.
+type Attachment struct {
+	Name string
+	Path string
+	Mime string
+}
 
 // ToolEvent is one live tool activity inside a turn.
 type ToolEvent struct {
@@ -303,6 +314,19 @@ func handle(p *peer, in inFrame, chat ChatFunc) {
 	}
 }
 
+// attachmentsOf carries the uploaded files from the socket frame into the
+// answer call, where the ones that are pictures can be sent to the model.
+func attachmentsOf(items []attachment) []Attachment {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]Attachment, 0, len(items))
+	for _, a := range items {
+		out = append(out, Attachment{Name: a.Name, Path: a.Path, Mime: a.Mime})
+	}
+	return out
+}
+
 // attachmentNote is the line appended to a message that carried files, so the
 // agent knows what was attached and where each file sits on disk.
 func attachmentNote(items []attachment) string {
@@ -360,7 +384,7 @@ func (p *peer) answer(ctx context.Context, cancel context.CancelFunc, key string
 		}
 		_ = p.send(frame)
 	}
-	reply, inTok, outTok, err := chat(ctx, in.SessionID, text, onDelta, onTool)
+	reply, inTok, outTok, err := chat(ctx, in.SessionID, text, attachmentsOf(in.Attachments), onDelta, onTool)
 	if ctx.Err() != nil {
 		_ = p.send(outFrame{Kind: "done", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID, Text: "cancelled"})
 		return

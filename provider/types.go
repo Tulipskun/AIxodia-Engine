@@ -15,9 +15,20 @@ const UserAgent = "ai-engine/1.0"
 
 var HTTP = &http.Client{}
 
+// Image is one picture carried by a message. Data is the encoded file and
+// MediaType is its MIME type ("image/jpeg"); both wire formats need the type to
+// decode the bytes, and neither accepts a bare blob.
+type Image struct {
+	MediaType string
+	Data      []byte
+}
+
 type Message struct {
-	Role       string
+	Role string
+	// Content is the text of the message. When Images is empty it is what the
+	// wire carries; otherwise the text becomes one part of a multi-part body.
 	Content    string
+	Images     []Image
 	ToolCalls  []ToolCall
 	ToolCallID string
 	ToolName   string

@@ -67,14 +67,99 @@ func (a *Adapter) Complete(ctx context.Context, req *provider.Request, prov prov
 	return resp, nil
 }
 
+// Stream answers a request, and knows one thing the ladder below does not: a
+// picture may be the reason the whole ladder failed.
+//
+// Whether a model takes pictures is a property of the model, not something this
+// code can read from the endpoint, so the request is sent with them and the
+// failure is handled here. A model that refuses them gets asked again without,
+// and the message is told the pictures were dropped — otherwise it would answer
+// as though it had looked at something it never received, which is the failure
+// this whole path exists to avoid.
 func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provider.Provider, key string, emit func(string) error) (*provider.Response, error) {
 	emitted := false
-	guarded := func(s string) error {
+	guard := func(s string) error {
 		emitted = true
 		if emit == nil {
 			return nil
 		}
 		return emit(s)
+	}
+	resp, err := a.ladder(ctx, req, prov, key, guard)
+	if err == nil || emitted || !carriesImages(req.Messages) || !looksLikeImageRejection(err) {
+		return resp, err
+	}
+	stripped := withoutImages(req)
+	retried, err2 := a.ladder(ctx, stripped, prov, key, guard)
+	if err2 != nil {
+		// Report the original failure: it is the one that describes what was
+		// actually asked for.
+		return nil, err
+	}
+	return retried, nil
+}
+
+// carriesImages reports whether any message would put a picture on the wire.
+func carriesImages(messages []provider.Message) bool {
+	for _, m := range messages {
+		if len(m.Images) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// withoutImages is the same conversation with the pictures taken out and the
+// last user message told why, so the answer can be honest about what it saw.
+func withoutImages(req *provider.Request) *provider.Request {
+	out := *req
+	out.Messages = make([]provider.Message, len(req.Messages))
+	copy(out.Messages, req.Messages)
+	last := -1
+	for i := len(out.Messages) - 1; i >= 0; i-- {
+		if len(out.Messages[i].Images) > 0 {
+			out.Messages[i].Images = nil
+			if last < 0 && out.Messages[i].Role == "user" {
+				last = i
+			}
+		}
+	}
+	if last >= 0 {
+		out.Messages[last].Content = strings.TrimRight(out.Messages[last].Content, "\n") +
+			"\n\n[the attached pictures were removed: this model does not accept images, so answer from the text alone and say that you could not see them]"
+	}
+	return &out
+}
+
+// looksLikeImageRejection is deliberately narrow. Retrying without pictures
+// doubles the work, so it is only worth doing when the failure could plausibly
+// be the pictures: an auth or credit error would fail exactly the same way the
+// second time.
+func looksLikeImageRejection(err error) bool {
+	var api *provider.APIError
+	if errors.As(err, &api) {
+		if api.StatusCode == http.StatusUnauthorized || api.StatusCode == http.StatusPaymentRequired {
+			return false
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	for _, hint := range []string{
+		"protocol", "unsupported", "not support", "does not support",
+		"invalid_request", "invalid request", "image", "vision", "modalit",
+	} {
+		if strings.Contains(msg, hint) {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *Adapter) ladder(ctx context.Context, req *provider.Request, prov provider.Provider, key string, guarded func(string) error) (*provider.Response, error) {
+	emitted := false
+	inner := guarded
+	guarded = func(s string) error {
+		emitted = true
+		return inner(s)
 	}
 	var trace []string
 	note := func(name string, err error) {
@@ -121,8 +206,8 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 	// (non-SSE) chat completions.
 	bare, err3 := a.inner.Complete(ctx, &stripped, prov, key)
 	if err3 == nil {
-		if emit != nil {
-			if err := emit(bare.Content); err != nil {
+		if guarded != nil {
+			if err := guarded(bare.Content); err != nil {
 				return nil, err
 			}
 		}
@@ -149,8 +234,8 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 	full := *req
 	full.Tools = contractTools(req.Tools)
 	if resp4, err4 := a.inner.CompleteViaResponses(ctx, &full, prov, key); err4 == nil {
-		if emit != nil {
-			if err := emit(resp4.Content); err != nil {
+		if guarded != nil {
+			if err := guarded(resp4.Content); err != nil {
 				return nil, err
 			}
 		}
@@ -167,8 +252,8 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 	if err5 != nil {
 		return nil, fail(err5)
 	}
-	if emit != nil {
-		if err := emit(via.Content); err != nil {
+	if guarded != nil {
+		if err := guarded(via.Content); err != nil {
 			return nil, err
 		}
 	}
