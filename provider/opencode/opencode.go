@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -74,16 +75,34 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 		}
 		return emit(s)
 	}
+	var trace []string
+	note := func(name string, err error) {
+		trace = append(trace, name+": "+describeErr(err))
+	}
+	fail := func(err error) error {
+		var api *provider.APIError
+		if errors.As(err, &api) {
+			return &provider.APIError{
+				StatusCode: api.StatusCode,
+				Message:    api.Message + " [attempts: " + strings.Join(trace, " | ") + "]",
+			}
+		}
+		if len(trace) > 0 {
+			return fmt.Errorf("%w [attempts: %s]", err, strings.Join(trace, " | "))
+		}
+		return err
+	}
 	prepared := *req
 	prepared.Tools = contractTools(req.Tools)
 	resp, err := a.inner.Stream(ctx, &prepared, prov, key, guarded)
 	if err == nil {
 		return resp, nil
 	}
+	note("chat-stream-tools", err)
 	// Only retry while nothing has streamed yet: a mid-stream failure must
 	// surface as-is, otherwise the client would see duplicated content.
 	if emitted || !isToolProtocolError(err) {
-		return nil, err
+		return nil, fail(err)
 	}
 	// Attempt 2: same streaming mode, no tools. Some models reject any
 	// function-calling payload outright.
@@ -92,7 +111,10 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 	if resp2, err2 := a.inner.Stream(ctx, &stripped, prov, key, guarded); err2 == nil {
 		return resp2, nil
 	} else if emitted || !isToolProtocolError(err2) {
-		return nil, err2
+		note("chat-stream-bare", err2)
+		return nil, fail(err2)
+	} else {
+		note("chat-stream-bare", err2)
 	}
 	// Attempt 3: non-streaming, no tools. Some models only serve plain
 	// (non-SSE) chat completions.
@@ -105,8 +127,9 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 		}
 		return bare, nil
 	}
+	note("chat-complete-bare", err3)
 	if !isToolProtocolError(err3) {
-		return nil, err3
+		return nil, fail(err3)
 	}
 	// Attempt 4: OpenAI Responses API (/v1/responses), STREAMING with the
 	// full tool set — exactly what reference clients send. Some models only
@@ -115,7 +138,10 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 	if resp4s, err4s := a.inner.StreamViaResponses(ctx, &fullStream, prov, key, guarded); err4s == nil {
 		return resp4s, nil
 	} else if emitted || !isToolProtocolError(err4s) {
-		return nil, err4s
+		note("responses-stream-tools", err4s)
+		return nil, fail(err4s)
+	} else {
+		note("responses-stream-tools", err4s)
 	}
 	// Attempt 5: Responses API with the full tool set, non-streaming.
 	full := *req
@@ -127,12 +153,16 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 		}
 		return resp4, nil
 	} else if emitted || !isToolProtocolError(err4) {
-		return nil, err4
+		note("responses-complete-tools", err4)
+		return nil, fail(err4)
+	} else {
+		note("responses-complete-tools", err4)
 	}
 	// Attempt 6: Responses API bare (no tools at all).
 	via, err5 := a.inner.CompleteViaResponses(ctx, &stripped, prov, key)
+	note("responses-complete-bare", err5)
 	if err5 != nil {
-		return nil, err5
+		return nil, fail(err5)
 	}
 	if emit != nil {
 		if err := emit(via.Content); err != nil {
@@ -140,6 +170,26 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 		}
 	}
 	return via, nil
+}
+
+// describeErr condenses an upstream error to "status: snippet" for traces.
+func describeErr(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	var api *provider.APIError
+	if errors.As(err, &api) {
+		msg := api.Message
+		if len(msg) > 140 {
+			msg = msg[:140] + "…"
+		}
+		return fmt.Sprintf("http%d %s", api.StatusCode, msg)
+	}
+	msg := err.Error()
+	if len(msg) > 140 {
+		msg = msg[:140] + "…"
+	}
+	return msg
 }
 
 // isToolProtocolError reports whether err looks like an upstream rejection of
