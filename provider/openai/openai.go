@@ -319,13 +319,15 @@ func textContent(content any) string {
 // (POST {endpoint}/v1/responses), used for models that do not serve the
 // chat completions protocol.
 type responsesRequest struct {
-	Model           string `json:"model"`
-	Input           any    `json:"input"`
-	Stream          bool   `json:"stream,omitempty"`
-	MaxOutputTokens *int   `json:"max_output_tokens,omitempty"`
-	Tools           []tool `json:"tools,omitempty"`
-	ToolChoice      any    `json:"tool_choice,omitempty"`
-	User            string `json:"user,omitempty"`
+	Model           string   `json:"model"`
+	Input           any      `json:"input"`
+	Stream          bool     `json:"stream,omitempty"`
+	MaxOutputTokens *int     `json:"max_output_tokens,omitempty"`
+	Tools           []tool   `json:"tools,omitempty"`
+	ToolChoice      any      `json:"tool_choice,omitempty"`
+	User            string   `json:"user,omitempty"`
+	Include         []string `json:"include,omitempty"`
+	Store           *bool    `json:"store,omitempty"`
 }
 
 type responsesResponse struct {
@@ -364,7 +366,15 @@ func (a *Adapter) CompleteViaResponses(ctx context.Context, req *provider.Reques
 	if req.MaxTokens > 0 {
 		n := req.MaxTokens
 		bodyReq.MaxOutputTokens = &n
+	} else {
+		n := 32000
+		bodyReq.MaxOutputTokens = &n
 	}
+	// Mirror what reference clients send: declare reasoning output interest
+	// explicitly and disable server-side persistence.
+	bodyReq.Include = []string{"reasoning.encrypted_content"}
+	storeFalse := false
+	bodyReq.Store = &storeFalse
 	if req.User != "" {
 		bodyReq.User = req.User
 	}
