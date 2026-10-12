@@ -51,6 +51,9 @@ type Gateway struct {
 	breakers  map[string]*breaker
 	probes    *probeCache
 	startedAt int64
+	// uiChanged is called with the new spec whenever it is saved, so the
+	// daemon can push it to every connected phone instead of the phone polling.
+	uiChanged func(json.RawMessage)
 }
 
 type modelCache struct {
@@ -72,6 +75,14 @@ func New(sessions SessionStore, reg *registry.Registry, toolset map[string]tools
 // SetStartedAt records when this engine process began, so /healthz can report
 // how long the daemon has been up.
 func (g *Gateway) SetStartedAt(unixSeconds int64) { g.startedAt = unixSeconds }
+
+// SetUIChanged registers a callback fired with the effective spec after a
+// successful save. The daemon uses it to push the spec to connected phones.
+func (g *Gateway) SetUIChanged(fn func(json.RawMessage)) { g.uiChanged = fn }
+
+// UISpecJSON is the effective server-driven UI spec, for a client that asks on
+// connect or caches it.
+func (g *Gateway) UISpecJSON() (json.RawMessage, error) { return g.uiSpec() }
 
 func (g *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()

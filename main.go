@@ -59,8 +59,18 @@ func main() {
 	if model == "" {
 		model = "Opencode/big-pickle"
 	}
+	// One hub for every phone socket: it pushes the UI spec on connect and
+	// again whenever it changes, so the app never polls for it.
+	hub := mobile.NewHub(func() json.RawMessage {
+		spec, err := g.UISpecJSON()
+		if err != nil {
+			return nil
+		}
+		return spec
+	})
+	g.SetUIChanged(hub.BroadcastUI)
 	mux := http.NewServeMux()
-	mux.Handle("/ws", mobile.Handler(token, chatViaGateway(gw, model)))
+	mux.Handle("/ws", hub.Handler(token, chatViaGateway(gw, model)))
 	mux.Handle("/", gateway.RequireToken(token, gw))
 	server := &http.Server{
 		Addr:    "127.0.0.1:8787",

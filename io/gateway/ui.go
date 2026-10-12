@@ -153,6 +153,12 @@ func (g *Gateway) apiPutUI(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
+	// Push the new spec to every connected phone. This is the whole update
+	// path: no client polls, and one that is open changes as soon as the save
+	// lands.
+	if g.uiChanged != nil {
+		g.uiChanged(effective)
+	}
 	writeRaw(w, effective)
 }
 
