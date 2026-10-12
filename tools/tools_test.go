@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -166,5 +167,75 @@ func TestReadFileDirectory(t *testing.T) {
 	}
 	if out != "a.txt\nsub/\n" {
 		t.Errorf("readFile dir = %q", out)
+	}
+}
+
+// Reading a picture used to return a screenful of replacement characters, which
+// the model read as a glitch: it tried four more tools and burned ninety
+// thousand prompt tokens still unable to see the image. The tool has to say what
+// the file is instead.
+func TestReadRefusesBinaryAndNamesIt(t *testing.T) {
+	dir := t.TempDir()
+
+	jpeg := filepath.Join(dir, "photo.jpg")
+	jpegBytes := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00, 0xFF}
+	if err := os.WriteFile(jpeg, jpegBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readFile(context.Background(), `{"filePath":"`+jpeg+`"}`)
+	if err == nil {
+		t.Fatal("reading a JPEG should fail, it is not text")
+	}
+	if !strings.Contains(err.Error(), "JPEG image") {
+		t.Errorf("the refusal should name the file: %v", err)
+	}
+	if !strings.Contains(err.Error(), "not text") {
+		t.Errorf("the refusal should say the tool only reads text: %v", err)
+	}
+
+	// A file that lies about its extension is caught on the bytes.
+	lying := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(lying, []byte{0x7F, 'E', 'L', 'F', 0x02, 0x01, 0x01, 0x00, 0xFF, 0xFE}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readFile(context.Background(), `{"filePath":"`+lying+`"}`); err == nil {
+		t.Error("a file with an NUL byte and broken UTF-8 should fail even named .txt")
+	}
+}
+
+func TestReadStillWorksForText(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ok.txt")
+	if err := os.WriteFile(path, []byte("hello\nworld\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readFile(context.Background(), `{"filePath":"`+path+`"}`)
+	if err != nil {
+		t.Fatalf("a text file should still read: %v", err)
+	}
+	if !strings.Contains(got, "hello") {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestBinaryKindNamesWhatItFound(t *testing.T) {
+	cases := []struct {
+		path string
+		raw  []byte
+		want string
+		bin  bool
+	}{
+		{"a.pdf", []byte("%PDF-1.7"), "PDF document", true},
+		{"a.PNG", []byte("anything"), "PNG image", true},
+		{"a.txt", []byte("plain text\n"), "", false},
+		{"a.txt", []byte{'a', 0x00, 'b'}, "binary", true},
+		{"a.txt", []byte{0xC3, 0x28}, "binary", true},
+		{"a.txt", []byte(""), "", false},
+	}
+	for _, c := range cases {
+		got, bin := binaryKind(c.path, c.raw)
+		if bin != c.bin || got != c.want {
+			t.Errorf("binaryKind(%q) = %q,%v want %q,%v", c.path, got, bin, c.want, c.bin)
+		}
 	}
 }

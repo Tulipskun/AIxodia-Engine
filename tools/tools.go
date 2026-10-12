@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"ai-engine/provider"
 )
@@ -236,6 +238,18 @@ func readFile(ctx context.Context, args string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot read %s: %w", p, err)
 	}
+	// A file that is not text has no lines and no valid UTF-8, so reading it
+	// returns a screenful of replacement characters. The model reads that as a
+	// glitch, tries the next tool, and after four rounds and ninety thousand
+	// prompt tokens it still cannot see the picture — it just runs out of turn.
+	// Saying what the file is, and that this tool only reads text, is the answer
+	// that lets the model tell the user instead of trying again.
+	if kind, binary := binaryKind(clean, raw); binary {
+		return "", fmt.Errorf(
+			"%s is a %s file, not text. The read tool only returns text, so the contents cannot be shown here.",
+			p, kind,
+		)
+	}
 	text := string(raw)
 	truncated := false
 	if int64(len(raw)) > maxBytes {
@@ -417,4 +431,37 @@ func isPublicIP(ip net.IP) bool {
 		}
 	}
 	return true
+}
+
+// binaryNames are the attachments a chat sends most often, named here so the
+// refusal can say what the file is rather than only that it is unreadable.
+var binaryNames = map[string]string{
+	".jpg": "JPEG image", ".jpeg": "JPEG image", ".png": "PNG image",
+	".gif": "GIF image", ".webp": "WebP image", ".bmp": "BMP image",
+	".heic": "HEIC image", ".tiff": "TIFF image",
+	".mp4": "MP4 video", ".mov": "QuickTime video", ".mkv": "Matroska video",
+	".mp3": "MP3 audio", ".wav": "WAV audio", ".m4a": "M4A audio",
+	".pdf": "PDF document", ".zip": "ZIP archive", ".gz": "gzip archive",
+	".apk": "Android package", ".so": "shared library",
+}
+
+// binaryKind reports whether a file cannot be read as text, and what it is.
+// The extension is checked first because it names the file exactly; the bytes
+// are the fallback, because an extension proves nothing and the one thing that
+// makes text unreadable — invalid UTF-8 or an embedded NUL — is in the bytes.
+func binaryKind(path string, raw []byte) (string, bool) {
+	if name, ok := binaryNames[strings.ToLower(filepath.Ext(path))]; ok {
+		return name, true
+	}
+	head := raw
+	if len(head) > 4096 {
+		head = head[:4096]
+	}
+	if len(head) == 0 {
+		return "", false
+	}
+	if bytes.IndexByte(head, 0) >= 0 || !utf8.Valid(head) {
+		return "binary", true
+	}
+	return "", false
 }
