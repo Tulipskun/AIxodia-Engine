@@ -307,11 +307,25 @@ func TestRetryViaResponsesAPIWhenChatRejected(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		paths = append(paths, r.URL.Path)
-		w.Header().Set("Content-Type", "application/json")
+		body, _ := io.ReadAll(r.Body)
 		if strings.HasSuffix(r.URL.Path, "/responses") {
+			var parsed struct {
+				Stream bool `json:"stream"`
+			}
+			_ = json.Unmarshal(body, &parsed)
+			if parsed.Stream {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "event: response.output_text.delta\n")
+				_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"via-resp-stream\"}\n\n")
+				_, _ = io.WriteString(w, "event: response.completed\n")
+				_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-s\",\"model\":\"zen-model\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"via-resp-stream\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"id":"resp-1","model":"zen-model","object":"response","output":[{"type":"message","content":[{"type":"output_text","text":"via-responses"}]}],"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7}}`)
 			return
 		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"message":"Model does not support this protocol."}`)
 	}))
@@ -326,11 +340,11 @@ func TestRetryViaResponsesAPIWhenChatRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("responses fallback: %v", err)
 	}
-	if resp.Content != "via-responses" {
-		t.Errorf("content = %q, want via-responses", resp.Content)
+	if resp.Content != "via-resp-stream" {
+		t.Errorf("content = %q, want via-resp-stream", resp.Content)
 	}
 	if calls != 4 {
-		t.Errorf("requests = %d, want 4 (chat+tools, bare stream, bare plain, responses)", calls)
+		t.Errorf("requests = %d, want 4 (chat+tools, bare stream, bare plain, responses-stream)", calls)
 	}
 	if got := paths[len(paths)-1]; !strings.HasSuffix(got, "/responses") {
 		t.Errorf("last request should hit /responses, got %s", got)
@@ -344,11 +358,22 @@ func TestResponsesFallbackKeepsFullTools(t *testing.T) {
 		paths = append(paths, r.URL.Path)
 		body, _ := io.ReadAll(r.Body)
 		bodies = append(bodies, body)
-		w.Header().Set("Content-Type", "application/json")
-		if strings.HasSuffix(r.URL.Path, "/responses") {
-			_, _ = io.WriteString(w, `{"id":"resp-2","model":"zen-model","object":"response","output":[{"type":"message","content":[{"type":"output_text","text":"via-resp-full"}]}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`)
+		var parsed struct {
+			Stream bool `json:"stream"`
+		}
+		_ = json.Unmarshal(body, &parsed)
+		if strings.HasSuffix(r.URL.Path, "/responses") && parsed.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "event: response.completed\n")
+			_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-2\",\"model\":\"zen-model\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"via-resp-full\"}]}]}}\n\n")
 			return
 		}
+		if strings.HasSuffix(r.URL.Path, "/responses") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"resp-2","model":"zen-model","object":"response","output":[{"type":"message","content":[{"type":"output_text","text":"via-resp-full"}]}]}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"message":"Model does not support this protocol."}`)
 	}))

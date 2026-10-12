@@ -57,7 +57,11 @@ func (a *Adapter) Complete(ctx context.Context, req *provider.Request, prov prov
 	if err != nil {
 		return nil, err
 	}
-	resp.Content = content.String()
+	// Prefer streamed deltas, but some paths (e.g. Responses API fallback
+	// resolved from a completed object) return full content without emitting.
+	if collected := content.String(); collected != "" {
+		resp.Content = collected
+	}
 	return resp, nil
 }
 
@@ -104,9 +108,16 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 	if !isToolProtocolError(err3) {
 		return nil, err3
 	}
-	// Attempt 4: OpenAI Responses API (/v1/responses) with the full tool
-	// set, mirroring what the reference CLI sends. Some models only serve
-	// this protocol and reject chat completions outright.
+	// Attempt 4: OpenAI Responses API (/v1/responses), STREAMING with the
+	// full tool set — exactly what reference clients send. Some models only
+	// serve this shape and reject everything else outright.
+	fullStream := *req
+	if resp4s, err4s := a.inner.StreamViaResponses(ctx, &fullStream, prov, key, guarded); err4s == nil {
+		return resp4s, nil
+	} else if emitted || !isToolProtocolError(err4s) {
+		return nil, err4s
+	}
+	// Attempt 5: Responses API with the full tool set, non-streaming.
 	full := *req
 	if resp4, err4 := a.inner.CompleteViaResponses(ctx, &full, prov, key); err4 == nil {
 		if emit != nil {
@@ -118,7 +129,7 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 	} else if emitted || !isToolProtocolError(err4) {
 		return nil, err4
 	}
-	// Attempt 5: Responses API bare (no tools at all).
+	// Attempt 6: Responses API bare (no tools at all).
 	via, err5 := a.inner.CompleteViaResponses(ctx, &stripped, prov, key)
 	if err5 != nil {
 		return nil, err5

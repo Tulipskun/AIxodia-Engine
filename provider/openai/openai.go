@@ -3,12 +3,14 @@ package openai
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"ai-engine/provider"
 )
@@ -328,6 +330,7 @@ type responsesRequest struct {
 	User            string   `json:"user,omitempty"`
 	Include         []string `json:"include,omitempty"`
 	Store           *bool    `json:"store,omitempty"`
+	PromptCacheKey  string   `json:"prompt_cache_key,omitempty"`
 }
 
 type responsesResponse struct {
@@ -351,18 +354,15 @@ type responsesResponse struct {
 	} `json:"usage"`
 }
 
-// CompleteViaResponses executes req against the /v1/responses endpoint
-// (non-streaming). It is a fallback for models that reject chat completions.
-func (a *Adapter) CompleteViaResponses(ctx context.Context, req *provider.Request, prov provider.Provider, key string) (*provider.Response, error) {
-	endpoint, err := provider.Endpoint(prov.Endpoint, "/v1/responses", "/responses")
-	if err != nil {
-		return nil, err
-	}
+// buildResponsesRequest mirrors what reference clients send to /v1/responses:
+// full tool definitions, streaming flags, reasoning interest declaration,
+// disabled persistence, and a prompt cache key for session affinity.
+func buildResponsesRequest(req *provider.Request, stream bool) responsesRequest {
 	items := make([]any, 0, len(req.Messages))
 	for _, m := range req.Messages {
 		items = append(items, map[string]any{"role": m.Role, "content": textContent(m.Content)})
 	}
-	bodyReq := responsesRequest{Model: req.Model, Input: items}
+	bodyReq := responsesRequest{Model: req.Model, Input: items, Stream: stream}
 	if req.MaxTokens > 0 {
 		n := req.MaxTokens
 		bodyReq.MaxOutputTokens = &n
@@ -370,11 +370,10 @@ func (a *Adapter) CompleteViaResponses(ctx context.Context, req *provider.Reques
 		n := 32000
 		bodyReq.MaxOutputTokens = &n
 	}
-	// Mirror what reference clients send: declare reasoning output interest
-	// explicitly and disable server-side persistence.
 	bodyReq.Include = []string{"reasoning.encrypted_content"}
 	storeFalse := false
 	bodyReq.Store = &storeFalse
+	bodyReq.PromptCacheKey = newCacheKey()
 	if req.User != "" {
 		bodyReq.User = req.User
 	}
@@ -389,6 +388,64 @@ func (a *Adapter) CompleteViaResponses(ctx context.Context, req *provider.Reques
 	if len(bodyReq.Tools) > 0 {
 		bodyReq.ToolChoice = "auto"
 	}
+	return bodyReq
+}
+
+func newCacheKey() string {
+	var raw [12]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return fmt.Sprintf("ai-engine-%d", time.Now().UnixNano())
+	}
+	const b62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	out := make([]byte, 16)
+	for i := range out {
+		out[i] = b62[int(raw[i%len(raw)])%len(b62)]
+	}
+	return "ai-engine-" + string(out)
+}
+
+// parseResponsesOutput folds a Responses API output array into text,
+// tool calls, and usage.
+func parseResponsesOutput(parsed responsesResponse) (string, []provider.ToolCall, provider.Usage) {
+	var sb strings.Builder
+	var calls []provider.ToolCall
+	var usage provider.Usage
+	if parsed.Usage != nil {
+		usage = provider.Usage{
+			PromptTokens:     parsed.Usage.PromptTokens,
+			CompletionTokens: parsed.Usage.CompletionTokens,
+			TotalTokens:      parsed.Usage.TotalTokens,
+		}
+	}
+	for _, item := range parsed.Output {
+		switch item.Type {
+		case "message":
+			for _, c := range item.Content {
+				if c.Type == "output_text" {
+					sb.WriteString(c.Text)
+				}
+			}
+		case "function_call":
+			id := item.CallID
+			if id == "" {
+				id = item.ID
+			}
+			calls = append(calls, provider.ToolCall{
+				ID: id, Name: item.Name, Arguments: item.Arguments,
+			})
+		}
+	}
+	return sb.String(), calls, usage
+}
+
+// CompleteViaResponses executes req against the /v1/responses endpoint
+// (non-streaming). It is a fallback for models that reject chat completions.
+func (a *Adapter) CompleteViaResponses(ctx context.Context, req *provider.Request, prov provider.Provider, key string) (*provider.Response, error) {
+	endpoint, err := provider.Endpoint(prov.Endpoint, "/v1/responses", "/responses")
+	if err != nil {
+		return nil, err
+	}
+	bodyReq := buildResponsesRequest(req, false)
 	body, err := json.Marshal(bodyReq)
 	if err != nil {
 		return nil, err
@@ -423,35 +480,125 @@ func (a *Adapter) CompleteViaResponses(ctx context.Context, req *provider.Reques
 		return nil, fmt.Errorf("openai: decode responses response: %w", err)
 	}
 	out := &provider.Response{ID: parsed.ID, Model: parsed.Model}
-	if parsed.Usage != nil {
-		out.Usage = provider.Usage{
-			PromptTokens:     parsed.Usage.PromptTokens,
-			CompletionTokens: parsed.Usage.CompletionTokens,
-			TotalTokens:      parsed.Usage.TotalTokens,
+	out.Content, out.ToolCalls, out.Usage = parseResponsesOutput(parsed)
+	if out.Content == "" && len(out.ToolCalls) == 0 {
+		return nil, fmt.Errorf("openai: empty responses output")
+	}
+	return out, nil
+}
+
+// responsesStreamEvent is a Responses API SSE event (only fields we use).
+type responsesStreamEvent struct {
+	Type     string             `json:"type"`
+	Delta    string             `json:"delta"`
+	ItemID   string             `json:"item_id"`
+	Response *responsesResponse `json:"response"`
+}
+
+// StreamViaResponses executes req against /v1/responses with streaming,
+// mirroring what reference clients send (full tools, prompt cache key).
+// Text deltas are emitted as they arrive; tool calls are assembled from
+// function_call_arguments deltas and finalized from response.completed.
+func (a *Adapter) StreamViaResponses(ctx context.Context, req *provider.Request, prov provider.Provider, key string, emit func(string) error) (*provider.Response, error) {
+	endpoint, err := provider.Endpoint(prov.Endpoint, "/v1/responses", "/responses")
+	if err != nil {
+		return nil, err
+	}
+	bodyReq := buildResponsesRequest(req, true)
+	body, err := json.Marshal(bodyReq)
+	if err != nil {
+		return nil, err
+	}
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpRequest.Header.Set("Authorization", "Bearer "+key)
+	httpRequest.Header.Set("Content-Type", "application/json")
+	httpRequest.Header.Set("Accept", "text/event-stream")
+	httpRequest.Header.Set("User-Agent", provider.UserAgent)
+	if a.HeaderFunc != nil {
+		for k, v := range a.HeaderFunc() {
+			httpRequest.Header.Set(k, v)
 		}
 	}
-	var sb strings.Builder
-	for _, item := range parsed.Output {
-		switch item.Type {
-		case "message":
-			for _, c := range item.Content {
-				if c.Type == "output_text" {
-					sb.WriteString(c.Text)
+	resp, err := http.DefaultClient.Do(httpRequest)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return nil, &provider.APIError{StatusCode: resp.StatusCode, Message: provider.ErrorMessage(raw)}
+	}
+
+	out := &provider.Response{}
+	var text strings.Builder
+	argBufs := map[string]*strings.Builder{}
+	callOrder := []string{}
+	callNames := map[string]string{}
+	var completed *responsesResponse
+	finished := false
+
+	serr := provider.ReadSSE(resp.Body, func(data string) error {
+		if data == "[DONE]" {
+			finished = true
+			return nil
+		}
+		var ev responsesStreamEvent
+		if err := json.Unmarshal([]byte(data), &ev); err != nil {
+			return nil
+		}
+		switch ev.Type {
+		case "response.output_text.delta":
+			text.WriteString(ev.Delta)
+			if emit != nil {
+				if err := emit(ev.Delta); err != nil {
+					return err
 				}
 			}
-		case "function_call":
-			id := item.CallID
+		case "response.function_call_arguments.delta":
+			id := ev.ItemID
 			if id == "" {
-				id = item.ID
+				id = "call_0"
 			}
+			buf := argBufs[id]
+			if buf == nil {
+				buf = &strings.Builder{}
+				argBufs[id] = buf
+				callOrder = append(callOrder, id)
+			}
+			buf.WriteString(ev.Delta)
+		case "response.output_item.added", "response.output_item.done":
+			// Item identity may arrive here before arguments finish streaming;
+			// names are reconciled again from the completed object below.
+		case "response.completed":
+			if ev.Response != nil {
+				completed = ev.Response
+			}
+			finished = true
+		case "response.failed", "response.incomplete", "error":
+			return fmt.Errorf("openai: responses stream failed: %s", data[:min(300, len(data))])
+		}
+		return nil
+	})
+	if serr != nil {
+		return nil, serr
+	}
+	if completed != nil {
+		content, calls, usage := parseResponsesOutput(*completed)
+		out.Content, out.ToolCalls, out.Usage = content, calls, usage
+		out.ID, out.Model = completed.ID, completed.Model
+	} else {
+		out.Content = text.String()
+		for _, id := range callOrder {
 			out.ToolCalls = append(out.ToolCalls, provider.ToolCall{
-				ID: id, Name: item.Name, Arguments: item.Arguments,
+				ID: id, Name: callNames[id], Arguments: argBufs[id].String(),
 			})
 		}
 	}
-	out.Content = sb.String()
-	if out.Content == "" && len(out.ToolCalls) == 0 {
-		return nil, fmt.Errorf("openai: empty responses output")
+	if out.Content == "" && len(out.ToolCalls) == 0 && !finished {
+		return nil, fmt.Errorf("openai: empty responses stream")
 	}
 	return out, nil
 }
