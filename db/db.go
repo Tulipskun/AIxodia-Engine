@@ -106,20 +106,35 @@ func getDatabaseLocation(cfToken string) (string, string, error) {
 	return "", "", fmt.Errorf("db: D1 database named aixodia was not found in any accessible account")
 }
 
-func SaveTunnel(url string) error {
+// SaveTunnel replaces the single tunnel row with this daemon's address, its
+// version (which carries the start time) and its first heartbeat. Everything a
+// client needs to find the daemon and read its uptime lives in this one row,
+// so there is no separate nodes table.
+func SaveTunnel(url, version string, heartbeat int64) error {
 	url = strings.TrimSpace(url)
 	if url == "" {
 		return fmt.Errorf("db: tunnel url is empty")
 	}
 
-	if _, err := Query("CREATE TABLE IF NOT EXISTS tunnel (url TEXT NOT NULL)"); err != nil {
+	if _, err := Query("CREATE TABLE IF NOT EXISTS tunnel (url TEXT NOT NULL, version TEXT NOT NULL DEFAULT '', heartbeat INTEGER NOT NULL DEFAULT 0)"); err != nil {
 		return err
 	}
+	// Older databases have a tunnel table with only `url`. Add the new columns
+	// once; a duplicate-column error means the column is already there.
+	_, _ = Query("ALTER TABLE tunnel ADD COLUMN version TEXT NOT NULL DEFAULT ''")
+	_, _ = Query("ALTER TABLE tunnel ADD COLUMN heartbeat INTEGER NOT NULL DEFAULT 0")
 	if err := Delete("tunnel"); err != nil {
 		return err
 	}
 
-	_, err := Insert("tunnel", map[string]any{"url": url})
+	_, err := Insert("tunnel", map[string]any{"url": url, "version": version, "heartbeat": heartbeat})
+	return err
+}
+
+// TouchTunnel refreshes the version and heartbeat of the single tunnel row.
+// The row is replaced on every daemon start, so there is always exactly one.
+func TouchTunnel(version string, heartbeat int64) error {
+	_, err := Query("UPDATE tunnel SET version = ?, heartbeat = ?", version, heartbeat)
 	return err
 }
 

@@ -52,7 +52,9 @@ func main() {
 
 	startConfigReloader(ctx)
 
-	gw := gateway.New(session.NewD1(), registry.New(), tools.Builtin()).Handler()
+	g := gateway.New(session.NewD1(), registry.New(), tools.Builtin())
+	g.SetStartedAt(startedAt)
+	gw := g.Handler()
 	model := strings.TrimSpace(os.Getenv("AIXODIA_MODEL"))
 	if model == "" {
 		model = "Opencode/big-pickle"
@@ -80,11 +82,11 @@ func main() {
 	if os.Getenv("AIXODIA_PUBLISH") == "0" {
 		log.Printf("local test mode: tunnel not published to D1")
 	} else {
-		if err := db.SaveTunnel(url); err != nil {
+		if err := db.SaveTunnel(url, versionString(), time.Now().Unix()); err != nil {
 			log.Fatalf("save tunnel: %v", err)
 		}
 		log.Print("tunnel url saved")
-		go startHeartbeat(ctx, stop, url)
+		go startHeartbeat(ctx, stop)
 	}
 
 	<-ctx.Done()
@@ -331,10 +333,11 @@ var startedAt = time.Now().Unix()
 
 const versionTag = "ai-engine/1.1"
 
-// startHeartbeat keeps the single `nodes` row ('ai') current so the app can
-// find this daemon. Before each write it checks whether a newer engine has
-// taken the row; if so it calls stop so this older instance shuts down.
-func startHeartbeat(ctx context.Context, stop context.CancelFunc, url string) {
+// startHeartbeat keeps the single `tunnel` row current so the app can find
+// this daemon and read its uptime. Before each write it checks whether a newer
+// engine has taken the row; if so it calls stop so this older instance shuts
+// down.
+func startHeartbeat(ctx context.Context, stop context.CancelFunc) {
 	beat := func() bool {
 		newer, err := newerDaemonRunning(startedAt)
 		if err != nil {
@@ -345,11 +348,7 @@ func startHeartbeat(ctx context.Context, stop context.CancelFunc, url string) {
 			stop()
 			return false
 		}
-		_, err = db.Query(
-			"INSERT INTO nodes (id, tunnel_url, version, heartbeat) VALUES ('ai', ?, ?, ?) "+
-				"ON CONFLICT(id) DO UPDATE SET tunnel_url = excluded.tunnel_url, version = excluded.version, heartbeat = excluded.heartbeat",
-			url, fmt.Sprintf("%s started=%d", versionTag, startedAt), time.Now().Unix())
-		if err != nil {
+		if err := db.TouchTunnel(versionString(), time.Now().Unix()); err != nil {
 			log.Printf("heartbeat: %v", err)
 		}
 		return true
@@ -371,10 +370,10 @@ func startHeartbeat(ctx context.Context, stop context.CancelFunc, url string) {
 	}
 }
 
-// newerDaemonRunning reports whether the `nodes` row was written recently by
-// an engine that started after `started`.
+// newerDaemonRunning reports whether the tunnel row was written recently by an
+// engine that started after `started`.
 func newerDaemonRunning(started int64) (bool, error) {
-	rows, err := db.Query("SELECT version, heartbeat FROM nodes WHERE id = 'ai'")
+	rows, err := db.Query("SELECT version, heartbeat FROM tunnel LIMIT 1")
 	if err != nil {
 		return false, err
 	}
@@ -386,6 +385,12 @@ func newerDaemonRunning(started int64) (bool, error) {
 	other := parseStarted(version)
 	fresh := float64(time.Now().Unix()-120) < beat
 	return fresh && other > started, nil
+}
+
+// versionString is the version column the daemon writes: the tag plus the
+// unix second this process started, which the phone parses for uptime.
+func versionString() string {
+	return fmt.Sprintf("%s started=%d", versionTag, startedAt)
 }
 
 // parseStarted reads "started=<unix>" from the version column (0 if absent).
