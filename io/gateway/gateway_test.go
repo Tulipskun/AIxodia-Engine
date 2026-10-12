@@ -526,3 +526,20 @@ func TestRejectsOversizedRequestBody(t *testing.T) {
 		t.Fatalf("body = %s, want request-size error", recorder.Body.String())
 	}
 }
+
+func TestIsRepeatOfTail(t *testing.T) {
+	user := func(text string) provider.Message { return provider.Message{Role: "user", Content: text} }
+	asst := func(text string) provider.Message { return provider.Message{Role: "assistant", Content: text} }
+	if !isRepeatOfTail([]provider.Message{user("hi")}, []provider.Message{user("hi")}) {
+		t.Error("identical trailing user turn should count as repeat")
+	}
+	if isRepeatOfTail([]provider.Message{user("hi")}, []provider.Message{user("other")}) {
+		t.Error("different text must not count as repeat")
+	}
+	if isRepeatOfTail([]provider.Message{user("hi"), asst("yo")}, []provider.Message{user("hi")}) {
+		t.Error("answered turn must not count as repeat")
+	}
+	if isRepeatOfTail(nil, []provider.Message{user("hi")}) {
+		t.Error("empty history must not count as repeat")
+	}
+}

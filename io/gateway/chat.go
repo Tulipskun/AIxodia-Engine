@@ -122,6 +122,7 @@ func (g *Gateway) chatOnce(w http.ResponseWriter, r *http.Request, stored *sessi
 	started := time.Now()
 	resp, err := g.complete(r.Context(), primary, fallback, history, options)
 	if err != nil {
+		g.persistUserDelta(stored, history, delta)
 		writeUpstreamError(w, err)
 		return
 	}
@@ -192,6 +193,7 @@ func (g *Gateway) chatStream(w http.ResponseWriter, r *http.Request, stored *ses
 	started := time.Now()
 	resp, err := g.complete(r.Context(), primary, fallback, history, options)
 	if err != nil {
+		g.persistUserDelta(stored, history, delta)
 		payload := map[string]any{"error": map[string]any{"message": err.Error(), "type": "upstream_error"}}
 		_ = writeSSE(w, flusher, payload)
 		writeSSEDone(w, flusher)
@@ -523,8 +525,53 @@ func (g *Gateway) selectTools(names *[]string) ([]provider.ToolDef, error) {
 	return selected, nil
 }
 
-func (g *Gateway) persist(stored *session.Session, delta []provider.Message, resp *provider.Response, options completionOptions, duration int64) {
-	if stored == nil {
+// persistUserDelta records the user's new turns when the upstream call failed,
+// so a failed send still leaves its question in history instead of vanishing.
+// A question already recorded by an earlier failed attempt is not stacked
+// again: repeats reuse the recorded row.
+func (g *Gateway) persistUserDelta(stored *session.Session, history, delta []provider.Message) {
+	if stored == nil || len(delta) == 0 {
+		return
+	}
+	recorded := history[:len(history)-len(delta)]
+	if isRepeatOfTail(recorded, delta) {
+		return
+	}
+	turns := make([]session.TurnInput, 0, len(delta))
+	for _, message := range delta {
+		if message.Role != "user" && message.Role != "assistant" {
+			continue
+		}
+		turns = append(turns, session.TurnInput{Role: message.Role, Text: message.Content})
+	}
+	if len(turns) == 0 {
+		return
+	}
+	if err := g.sessions.AppendTurns(stored.ID, turns); err != nil {
+		log.Printf("gateway: save failed delta: %v", err)
+	}
+}
+
+// isRepeatOfTail reports whether delta is a single user message identical to
+// the last visible recorded turn (which then necessarily has no answer yet).
+func isRepeatOfTail(recorded, delta []provider.Message) bool {
+	if len(delta) != 1 || delta[0].Role != "user" {
+		return false
+	}
+	want := strings.TrimSpace(delta[0].Content)
+	if want == "" {
+		return false
+	}
+	for i := len(recorded) - 1; i >= 0; i-- {
+		if session.IsToolMessage(recorded[i]) {
+			continue
+		}
+		return recorded[i].Role == "user" && strings.TrimSpace(recorded[i].Content) == want
+	}
+	return false
+}
+
+func (g *Gateway) persist(stored *session.Session, delta []provider.Message, resp *provider.Response, options completionOptions, duration int64) {	if stored == nil {
 		return
 	}
 
