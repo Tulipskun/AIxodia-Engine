@@ -200,17 +200,18 @@ func isToolProtocolError(err error) bool {
 	if !errors.As(err, &api) {
 		return false
 	}
+	msg := strings.ToLower(api.Message)
+	// The free-tier gate rejects shapes without the full tool declarations
+	// ("can only be used from within OpenCode"), usually as 403. A later
+	// attempt with the full tool set may still pass, so keep going instead
+	// of stopping here.
+	if strings.Contains(msg, "free tier") && strings.Contains(msg, "opencode") {
+		return true
+	}
 	if api.StatusCode != http.StatusBadRequest {
 		return false
 	}
-	msg := strings.ToLower(api.Message)
 	if strings.Contains(msg, "protocol") {
-		return true
-	}
-	// The free-tier gate rejects shapes without the full tool declarations
-	// ("can only be used from within OpenCode"). A later attempt with the
-	// full tool set may still pass, so keep going instead of stopping here.
-	if strings.Contains(msg, "free tier") && strings.Contains(msg, "opencode") {
 		return true
 	}
 	hasToolWord := strings.Contains(msg, "tool") || strings.Contains(msg, "function")
