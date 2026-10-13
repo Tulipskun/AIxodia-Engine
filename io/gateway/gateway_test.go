@@ -567,7 +567,7 @@ func TestToolHooksFireDuringRounds(t *testing.T) {
 			results = append(results, call.Name)
 		},
 	}
-	resp, err := gateway.complete(context.Background(), primary, nil,
+	resp, err := gateway.complete(context.Background(), primary, nil, "",
 		[]provider.Message{{Role: "user", Content: "what time is it"}}, options)
 	if err != nil {
 		t.Fatalf("complete: %v", err)
@@ -695,7 +695,7 @@ func TestFinalAnswerHoldsOnlyTheLastToolRound(t *testing.T) {
 	primary := route{adapter: impl, prov: toInternalProvider(config.Providers[0]), model: "test-model"}
 	defs := []provider.ToolDef{tools.Builtin()["current_time"].Def}
 
-	resp, err := gateway.complete(context.Background(), primary, nil,
+	resp, err := gateway.complete(context.Background(), primary, nil, "",
 		[]provider.Message{{Role: "user", Content: "เวลาเท่าไหร่"}},
 		completionOptions{maxTokens: 100, tools: defs})
 	if err != nil {

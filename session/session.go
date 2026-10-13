@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"time"
 
 	"ai-engine/db"
@@ -66,6 +68,12 @@ type TurnInput struct {
 	Model        string
 	InputTokens  int
 	OutputTokens int
+	// Cache and reasoning counts, and the flag that says whether InputTokens
+	// already contains the cache read.
+	CacheReadTokens    int
+	CacheWriteTokens   int
+	ReasoningTokens    int
+	InputIncludesCache bool
 	// DurationMS is the whole turn, from the question being sent to the answer
 	// being stored, which is the number a reader expects to see. GenerationMS is
 	// only the time the model spent writing, and it is what a rate is computed
@@ -214,16 +222,20 @@ func (d *D1) AppendTurns(id string, turns []TurnInput) error {
 		lastErr = nil
 		for _, turn := range turns {
 			_, err := db.Insert("turns", map[string]any{
-				"session_id":    id,
-				"seq":           seq,
-				"role":          turn.Role,
-				"text":          turn.Text,
-				"model":         turn.Model,
-				"input_tokens":  turn.InputTokens,
-				"output_tokens": turn.OutputTokens,
-				"duration_ms":   turn.DurationMS,
-				"generation_ms": turn.GenerationMS,
-				"created_at":    time.Now().Unix(),
+				"session_id":           id,
+				"seq":                  seq,
+				"role":                 turn.Role,
+				"text":                 turn.Text,
+				"model":                turn.Model,
+				"input_tokens":         turn.InputTokens,
+				"output_tokens":        turn.OutputTokens,
+				"cache_read_tokens":    turn.CacheReadTokens,
+				"cache_write_tokens":   turn.CacheWriteTokens,
+				"reasoning_tokens":     turn.ReasoningTokens,
+				"input_includes_cache": boolInt(turn.InputIncludesCache),
+				"duration_ms":          turn.DurationMS,
+				"generation_ms":        turn.GenerationMS,
+				"created_at":           time.Now().Unix(),
 			})
 			if err != nil {
 				lastErr = err
@@ -354,7 +366,65 @@ func boolField(row map[string]any, key string) bool {
 // cheap and idempotent, and doing it here means a database that predates the
 // generation clock keeps working instead of failing every insert.
 func EnsureTurns() {
-	if _, err := db.Query("ALTER TABLE turns ADD COLUMN generation_ms INTEGER NOT NULL DEFAULT 0"); err != nil {
-		log.Printf("session: turns already has generation_ms (%v)", err)
+	// A duplicate column is the expected answer on every boot after the first,
+	// so it is not worth a line in the log; anything else is.
+	if _, err := db.Query("ALTER TABLE turns ADD COLUMN generation_ms INTEGER NOT NULL DEFAULT 0"); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		log.Printf("session: cannot add generation_ms: %v", err)
 	}
+}
+
+// UnfinishedTurn is a question that was stored and never answered — which is
+// exactly what a turn interrupted by the session ending looks like. The phone's
+// message is written before the answer is asked for, so a restart leaves one of
+// these behind instead of losing the message.
+type UnfinishedTurn struct {
+	SessionID string `json:"session_id"`
+	Seq       int    `json:"seq"`
+	Text      string `json:"text"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+// Unfinished lists the questions with nothing after them, newest first. It is
+// what a new session reads to know what the old one was in the middle of.
+//
+// Only user and assistant rows are considered: a turn that ended mid tool call
+// has its question answered in the next round, so the tail of a healthy
+// conversation is an assistant row and not one of these.
+func (d *D1) Unfinished(limit int) ([]UnfinishedTurn, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := db.Query(
+		`SELECT t.session_id, t.seq, t.text, t.created_at
+		   FROM turns t
+		   JOIN (SELECT session_id, MAX(seq) AS seq FROM turns
+		          WHERE role IN ('user','assistant') GROUP BY session_id) last
+		     ON last.session_id = t.session_id AND last.seq = t.seq
+		  WHERE t.role = 'user'
+		  ORDER BY t.created_at DESC
+		  LIMIT ` + strconv.Itoa(limit),
+	)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]UnfinishedTurn, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, UnfinishedTurn{
+			SessionID: stringField(row, "session_id"),
+			Seq:       intField(row, "seq"),
+			Text:      truncate(stringField(row, "text"), 200),
+			CreatedAt: int64Field(row, "created_at"),
+		})
+	}
+	return out, nil
+}
+
+// truncate shortens a question for a handover record, which only has to be
+// recognisable, not complete.
+func truncate(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	return strings.TrimSpace(text[:limit]) + "…"
 }

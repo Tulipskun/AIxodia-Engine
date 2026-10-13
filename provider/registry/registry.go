@@ -8,6 +8,7 @@ import (
 	"ai-engine/provider/anthropic"
 	"ai-engine/provider/openai"
 	"ai-engine/provider/opencode"
+	"ai-engine/provider/opencodecli"
 )
 
 type Registry struct {
@@ -23,6 +24,10 @@ func New() *Registry {
 		"gemini":    adapter,
 		"anthropic": anthropic.New(),
 		"opencode":  opencode.New(),
+		// The free tier refuses every client but the real one, so this adapter
+		// runs that client instead of reimplementing its request. See the
+		// package comment for what was measured.
+		"opencode-cli": opencodecli.New(),
 	}}
 }
 

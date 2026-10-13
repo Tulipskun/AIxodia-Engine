@@ -113,6 +113,10 @@ func main() {
 			log.Fatalf("save tunnel: %v", err)
 		}
 		log.Print("tunnel url saved")
+		// The note is written after the tunnel row so it names a URL that is
+		// already reachable, and before the heartbeat so the record of this
+		// session exists even if the next line fails.
+		publishHandover(ctx, url)
 		go startHeartbeat(ctx, stop)
 	}
 

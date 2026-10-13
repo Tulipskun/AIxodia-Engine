@@ -47,8 +47,12 @@ type ToolDef struct {
 }
 
 type Request struct {
-	Model       string
-	Messages    []Message
+	Model    string
+	Messages []Message
+	// SessionID is this engine's session. An adapter that keeps its own
+	// conversation — the OpenCode client does — names it so the two stay in step
+	// without a mapping table.
+	SessionID   string
 	MaxTokens   int
 	Temperature *float64
 	TopP        *float64
@@ -79,6 +83,15 @@ type Usage struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
+	// The rest are reported by some providers and not others. They are kept so
+	// the footer can show what a prompt actually cost instead of only its size.
+	CacheReadTokens  int
+	CacheWriteTokens int
+	ReasoningTokens  int
+	// InputIncludesCache says whether PromptTokens already contains the cache
+	// read. Providers disagree, and guessing wrong doubles or halves the prompt
+	// in the footer, so it is recorded rather than assumed.
+	InputIncludesCache bool
 }
 
 type Provider struct {

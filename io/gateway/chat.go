@@ -147,7 +147,7 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 
 func (g *Gateway) chatOnce(w http.ResponseWriter, r *http.Request, stored *session.Session, primary route, fallback *route, history, delta []provider.Message, options completionOptions) {
 	started := time.Now()
-	resp, err := g.complete(r.Context(), primary, fallback, history, options)
+	resp, err := g.complete(r.Context(), primary, fallback, sessionIDOf(stored), history, options)
 	if err != nil {
 		g.persistUserDelta(stored, history, delta)
 		writeUpstreamError(w, err)
@@ -228,7 +228,7 @@ func (g *Gateway) chatStream(w http.ResponseWriter, r *http.Request, stored *ses
 			"text": truncate(text, 4096), "is_error": isError, "duration_ms": durationMs,
 		}})
 	}
-	resp, err := g.complete(r.Context(), primary, fallback, history, options)
+	resp, err := g.complete(r.Context(), primary, fallback, sessionIDOf(stored), history, options)
 	if err != nil {
 		payload := map[string]any{"error": map[string]any{"message": err.Error(), "type": "upstream_error"}}
 		_ = writeSSE(w, flusher, payload)
@@ -341,6 +341,15 @@ func (g *Gateway) resolveRoute(stored *session.Session, body chatRequest) (route
 	return route{}, fmt.Errorf("unknown model %q: prefix it with a provider, for example provider/%s (known: %s)", modelID, modelID, providerNames())
 }
 
+// sessionIDOf is the chat's id, or empty when the request named no session. An
+// adapter that keeps its own conversation names it so the two stay in step.
+func sessionIDOf(stored *session.Session) string {
+	if stored == nil {
+		return ""
+	}
+	return stored.ID
+}
+
 func (g *Gateway) fallbackRoute(stored *session.Session) *route {
 	if stored == nil || !stored.SubEnabled || stored.SubProvider == "" || stored.SubModel == "" {
 		return nil
@@ -356,7 +365,7 @@ func (g *Gateway) fallbackRoute(stored *session.Session) *route {
 	return &route{adapter: implementation, prov: toInternalProvider(cfg), model: stored.SubModel}
 }
 
-func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, history []provider.Message, options completionOptions) (*provider.Response, error) {
+func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, sessionID string, history []provider.Message, options completionOptions) (*provider.Response, error) {
 	conversation := append([]provider.Message(nil), history...)
 	current := primary
 	usedFallback := false
@@ -381,6 +390,7 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 	for round := 0; round < maxToolRounds; {
 		request := &provider.Request{
 			Model:       current.model,
+			SessionID:   sessionID,
 			Messages:    session.Trim(conversation, session.DefaultMaxTokens),
 			MaxTokens:   options.maxTokens,
 			Temperature: options.temperature,
@@ -457,6 +467,7 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 	if pending {
 		request := &provider.Request{
 			Model:       current.model,
+			SessionID:   sessionID,
 			Messages:    session.Trim(conversation, session.DefaultMaxTokens),
 			MaxTokens:   options.maxTokens,
 			Temperature: options.temperature,
@@ -656,13 +667,17 @@ func (g *Gateway) persist(stored *session.Session, delta []provider.Message, res
 		generation = duration
 	}
 	turns = append(turns, session.TurnInput{
-		Role:         "assistant",
-		Text:         resp.Content,
-		Model:        resp.Model,
-		InputTokens:  resp.Usage.PromptTokens,
-		OutputTokens: resp.Usage.CompletionTokens,
-		DurationMS:   duration,
-		GenerationMS: generation,
+		Role:               "assistant",
+		Text:               resp.Content,
+		Model:              resp.Model,
+		InputTokens:        resp.Usage.PromptTokens,
+		OutputTokens:       resp.Usage.CompletionTokens,
+		CacheReadTokens:    resp.Usage.CacheReadTokens,
+		CacheWriteTokens:   resp.Usage.CacheWriteTokens,
+		ReasoningTokens:    resp.Usage.ReasoningTokens,
+		InputIncludesCache: resp.Usage.InputIncludesCache,
+		DurationMS:         duration,
+		GenerationMS:       generation,
 	})
 
 	if err := g.sessions.AppendTurns(stored.ID, turns); err != nil {
