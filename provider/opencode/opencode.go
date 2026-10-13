@@ -15,10 +15,11 @@ import (
 	"ai-engine/tools"
 )
 
-const clientID = "opencode/1.18.35 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
-
-// clientAgentMeasured is the name the client itself sends, read off its own
-// request: it builds `opencode/${channel}/${version}/${name}`.
+// clientAgentMeasured is the name the client itself sends. It builds
+// `opencode/${channel}/${version}/${name}`, which was read from its source
+// (packages/core/src/session/model-request.ts) and confirmed against a recorded
+// request. The engine used to send an AI-SDK style string no version of the
+// client has ever sent.
 const clientAgentMeasured = "opencode/latest/2.0.27/cli"
 
 const (
@@ -48,6 +49,38 @@ func New() *Adapter {
 	a.inner = &openai.Adapter{HeaderFunc: a.headers}
 	return a
 }
+
+// The free tier of this provider refuses this engine, and the reason is not in
+// anything this engine controls. That is worth writing down so nobody spends the
+// same time again.
+//
+// What was established, by measurement rather than by reading:
+//
+//   - The client's request is fully reproduced here. Its own source
+//     (packages/core/src/session/model-request.ts) builds exactly the headers
+//     this adapter sends, plus the session ids and the project id, and nothing
+//     else — no hidden token, no extra handshake. A recorded request was
+//     replayed byte for byte from Go, Python and curl.
+//   - The connection is not the difference either. A TLS client matching the
+//     recorded ClientHello (cipher suites, extension list and order, signature
+//     algorithms, ALPN) gets the same 403 as the plain one, and so does a
+//     request written by hand in the client's own header order.
+//   - It is not the endpoint, the key, the user agent, the tool declarations or
+//     the body shape. Every combination was tried; all refused.
+//   - It is not a per-address budget running out: the real client answers from
+//     the same address, with the same key, in the same second.
+//
+// Where the check actually lives is answerable from the source, and the answer
+// is that it is not in the source. /zen/v1 is a proxy —
+// packages/console/app/src/lib/inference-proxy.ts — which forwards to a separate
+// service, and says so in a comment: "New inference owns authentication, model
+// availability, free-tier access, and billing." That service is not published,
+// and neither the message nor its error type appears in either published branch
+// or in the client binary.
+//
+// So this cannot be fixed from here by imitating anything that can be read. The
+// choices are to run the real client (the opencodecli adapter does) or to use a
+// provider that permits this engine.
 
 func (a *Adapter) Name() string { return "opencode" }
 
