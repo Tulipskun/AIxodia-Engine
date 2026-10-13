@@ -79,8 +79,11 @@ func TestFreeTierContractOnComplete(t *testing.T) {
 	}
 	got := (*seen)[0]
 
-	if ua := got.Header.Get("User-Agent"); !strings.HasPrefix(ua, "opencode/1.18.") {
-		t.Errorf("User-Agent = %q", ua)
+	// The name the client itself sends, read off its own request. The engine
+	// used to send an AI-SDK style string that no version of the client has
+	// ever sent.
+	if ua := got.Header.Get("User-Agent"); ua != clientAgentMeasured {
+		t.Errorf("User-Agent = %q, want %q", ua, clientAgentMeasured)
 	}
 	session := got.Header.Get("X-Opencode-Session")
 	if !regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`).MatchString(session) {

@@ -17,6 +17,10 @@ import (
 
 const clientID = "opencode/1.18.35 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
 
+// clientAgentMeasured is the name the client itself sends, read off its own
+// request: it builds `opencode/${channel}/${version}/${name}`.
+const clientAgentMeasured = "opencode/latest/2.0.27/cli"
+
 const (
 	shellTool = "shell"
 	readTool  = "read"
@@ -27,6 +31,16 @@ const b62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 type Adapter struct {
 	inner   *openai.Adapter
 	session string
+	// agent overrides the user agent; empty uses the measured one.
+	agent string
+}
+
+// userAgent is the name sent with each request.
+func (a *Adapter) userAgent() string {
+	if a.agent != "" {
+		return a.agent
+	}
+	return clientAgentMeasured
 }
 
 func New() *Adapter {
@@ -39,7 +53,7 @@ func (a *Adapter) Name() string { return "opencode" }
 
 func (a *Adapter) headers() map[string]string {
 	return map[string]string{
-		"User-Agent":            clientID,
+		"User-Agent":            a.userAgent(),
 		"x-opencode-client":     "cli",
 		"x-opencode-project":    "global",
 		"x-opencode-session":    a.session,

@@ -20,6 +20,18 @@ type Adapter struct {
 	// HeaderFunc is called once per HTTP request and its entries are merged
 	// into the outbound headers (used by the opencode client contract).
 	HeaderFunc func() map[string]string
+	// Client overrides the shared HTTP client. It exists for a provider whose
+	// endpoint decides who may call it by the shape of the connection rather
+	// than by the request; see the opencode adapter.
+	Client *http.Client
+}
+
+// client is the HTTP client to send with, shared unless one was given.
+func (a *Adapter) client() *http.Client {
+	if a.Client != nil {
+		return a.Client
+	}
+	return provider.HTTP
 }
 
 func New() *Adapter { return &Adapter{} }
@@ -715,5 +727,5 @@ func (a *Adapter) doRequest(ctx context.Context, prov provider.Provider, key str
 			httpRequest.Header.Set(name, value)
 		}
 	}
-	return provider.HTTP.Do(httpRequest)
+	return a.client().Do(httpRequest)
 }
