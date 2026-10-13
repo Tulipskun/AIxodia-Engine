@@ -54,10 +54,9 @@ func New() *Adapter {
 }
 
 // sessionID is the id this engine calls itself in every header that carries
-// one. It is replaced once an hour, because the free tier reads the time out
-// of it and a session outlives any single id. Nothing else observes the
-// change: the id is not a handle to anything, and the model is given the
-// conversation in the request body.
+// one. It is replaced once an hour so that a long-running engine is never
+// holding the same id it started with. Nothing observes that: the id is not a
+// handle to anything, and the conversation travels in the request body.
 func (a *Adapter) sessionID() string {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
@@ -86,27 +85,29 @@ func (a *Adapter) sessionID() string {
 //   - Not a per-address budget. The real client answers from the same address,
 //     with the same key, in the same second.
 //
-// What it does check is the session id. The id looks random, and the tail of it
-// is, but its first six bytes are not: they carry the time, in the client's own
-// encoding, and the gate reads it back and asks how old the session is. An id
-// minted from random bytes decodes to a time that is not a time at all, and is
-// refused no matter how well the rest of the request is formed. An id that
-// encodes the current time is accepted, whether or not the server has ever seen
-// it: the tail can be changed freely and the id still passes.
+// What it does check is the session id, in two places, and the finding is worth
+// recording because it is not what the id looks like. Measured against the live
+// endpoint, one variable at a time and everything else held at the values this
+// engine sends:
 //
-// Measured against the live endpoint, one variable at a time:
+//   counter 63, tail of letters and digits     accepted
+//   counter 64, otherwise identical            refused
+//   counter 1000                               refused
+//   upper bits carrying the epoch              accepted
+//   upper bits carrying a time ten years out   accepted
+//   tail replaced with other letters/digits    accepted
+//   tail containing a dash, dot or underscore  refused
+//   this engine's id before the fix            refused
 //
-//   id with current time in its head          accepted
-//   same id, tail replaced                    accepted
-//   same id, first hex digit replaced         accepted
-//   same id, timestamp moved back a day       accepted
-//   id with a random six-byte head            refused
-//   this engine's id before the fix           refused
-//   same id one character short               refused
+// The upper thirty-six bits — the timestamp — are not consulted at all. That is
+// the part that is easy to believe and is not true, and it is why the engine's
+// ids were refused: six random bytes scatter the counter across 0..4095, so
+// almost every one of them landed above the line.
 //
-// The window is wide — a day in either direction was accepted — but the id is
-// replaced hourly regardless, so an engine that runs for days never depends on
-// where that edge sits.
+// The head is therefore written the way the client writes it, which puts the
+// counter at 1 on the first id of a millisecond and satisfies the check by
+// construction rather than by luck. The shape of the id is left otherwise
+// exactly as the client has it.
 //
 // One more thing had to change for this to be reachable: the request has to go
 // to the Responses API. The gate reads the tool declarations by name at the top
@@ -483,15 +484,28 @@ var (
 	idCounter int64
 )
 
-// stamp is the six-byte timestamp the client puts at the head of every id it
-// hands out, written in its own way: the current milliseconds shifted up by
-// twelve bits to leave room for a per-millisecond counter, added, inverted so
-// that ids sort newest-first as text, and kept to six bytes.
+// stamp is the six-byte head the client puts on every id it hands out: the
+// current milliseconds shifted up twelve bits to leave room for a
+// per-millisecond counter, added, inverted so that ids sort newest-first as
+// text, and kept to six bytes.
 //
-// This is the one field of the id that is not arbitrary, and it is the field
-// the free tier reads. A request whose session id carries no current time in
-// those six bytes is refused before the model is considered, whatever else
-// about it is right.
+// The free tier reads two things out of the id, and only these two:
+//
+//   - The low twelve bits. Inverted back they are the counter, and the gate
+//     wants it small: counter 63 and below is accepted, 64 and above is
+//     refused, every time, with the rest of the id held constant.
+//   - The tail. It has to be fourteen characters of letters and digits.
+//     A dash, a dot, an underscore or a space anywhere in it is refused.
+//
+// The timestamp in between — the upper thirty-six bits — is not looked at. An
+// id carrying the epoch, one carrying a time ten years out, and one carrying
+// this instant are all accepted, and the tail is free to be replaced with any
+// other fourteen characters. So the head is written the way the client writes
+// it, which satisfies the counter check, and the reason is recorded here so
+// nobody goes looking for a clock that is not consulted.
+//
+// The engine's previous ids were refused on both counts: six random bytes put
+// the counter anywhere in 0..4095, which is almost never below 64.
 func stamp() int64 {
 	millis := time.Now().UnixMilli()
 	idMutex.Lock()

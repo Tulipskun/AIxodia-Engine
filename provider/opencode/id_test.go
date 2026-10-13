@@ -4,14 +4,13 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
-// The session id is the one part of the request the free tier actually reads,
-// and it reads it as a time. An id that does not carry a current one is refused
-// whatever else about the request is right, which is why this is asserted here
-// rather than left to the shape of the id to imply.
-func TestSessionIDCarriesTheCurrentTime(t *testing.T) {
+// The session id is the one part of the request the free tier reads, and what
+// it reads is the counter in the low twelve bits of the head: 63 and below is
+// accepted, 64 and above is refused. Random bytes scatter that counter, which is
+// how the engine spent a month being refused for ids that looked correct.
+func TestSessionIDCounterIsInsideTheAcceptedRange(t *testing.T) {
 	id := newID("ses_")
 	head := strings.TrimPrefix(id, "ses_")
 	if len(head) != 26 {
@@ -21,20 +20,26 @@ func TestSessionIDCarriesTheCurrentTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("id %q: head is not hex: %v", id, err)
 	}
-	// The client inverts the timestamp so ids sort newest-first, and only six
-	// bytes of it survive, so reading it back means subtracting from what is
-	// left of those six bytes and dropping the twelve the counter uses. Six
-	// bytes cannot hold the full millisecond count, so the time comes back
-	// wrapped into a period of about two years and has to be unwrapped against
-	// the clock.
-	const kept = uint64(1) << 48
-	const period = kept >> 12
-	back := (kept - encoded%kept) % kept
-	stamped := int64(back >> 12)
-	age := time.Duration((uint64(time.Now().UnixMilli())-uint64(stamped))%period) * time.Millisecond
-	if age > time.Hour {
-		t.Errorf("id %q encodes a time %v away; the gate would read it as stale", id, age)
+	// The head is stored inverted, so the counter is read back out of the low
+	// twelve bits the same way.
+	counter := 0xfff - int(encoded&0xfff)
+	if counter < 1 || counter > 63 {
+		t.Errorf("id %q carries counter %d; the gate refuses anything above 63", id, counter)
 	}
+	if tail := head[12:]; !isBase62(tail) {
+		t.Errorf("id %q: tail %q has a character the gate refuses", id, tail)
+	}
+}
+
+func isBase62(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Two ids minted in the same millisecond must not collide: the counter exists
