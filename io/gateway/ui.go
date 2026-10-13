@@ -86,38 +86,7 @@ func defaultUISpec() json.RawMessage {
     "show_attach": true,
     "show_attach_title": false
   },
-  "screens": {
-    "example": {
-      "title": "หน้าจอตัวอย่าง (มาจาก daemon)",
-      "subtitle": "ทั้งหน้านี้ประกอบจาก spec — แก้ที่ daemon แล้วเห็นผลทันที ไม่ต้องติดตั้งแอพใหม่",
-      "body": [
-        { "type": "section", "label": "ปุ่ม", "subtitle": "กดแล้วสั่งงานแอพได้เลย",
-          "children": [
-            { "type": "button", "label": "แชทใหม่", "action": "new_chat" },
-            { "type": "button", "label": "ดึงข้อมูลล่าสุด", "action": "refresh", "style": "outlined" }
-          ] },
-        { "type": "section", "label": "สวิตช์", "subtitle": "ค่าถูกเก็บไว้ในเครื่องและอ่านกลับมาแสดงได้",
-          "children": [
-            { "type": "toggle", "label": "โหมดตัวอย่าง", "key": "demo_flag", "checked": false, "action": "set_value" }
-          ] },
-        { "type": "section", "label": "ช่องกรอก",
-          "children": [
-            { "type": "field", "label": "ชื่อเล่น", "key": "nickname", "placeholder": "พิมพ์ที่นี่", "action": "set_value" }
-          ] },
-        { "type": "text", "value": "ค่าที่เก็บไว้: {nickname}", "style": "caption" },
-        { "type": "section", "label": "engine", "subtitle": "อัปเดตไบนารีจาก GitHub โดยไม่รีสตาร์ท session ของ Kaggle",
-          "children": [
-            { "type": "button", "label": "อัปเดต engine เดี๋ยวนี้", "style": "outlined",
-              "action": "api_post", "params": { "path": "/api/engine/update", "ok": "กำลังอัปเดต engine…" } }
-          ] },
-        { "type": "divider" },
-        { "type": "list", "items": [
-          { "title": "ตั้งค่าแอพ", "subtitle": "หน้าตั้งค่าเดิม", "action": "open_settings" },
-          { "title": "ผู้ให้บริการ", "action": "open_providers" }
-        ] }
-      ]
-    }
-  },
+  "screens": {},
   "drawer_items": [
     { "title": "ตัวอย่างหน้าจอ (จาก daemon)", "action": "open_screen", "params": { "screen": "example" } }
   ]
