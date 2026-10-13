@@ -209,6 +209,12 @@ func (d *D1) History(id string) ([]provider.Message, error) {
 	return MessagesFromTurns(turns), nil
 }
 
+// const maxTurnsPerStatement keeps each INSERT inside D1's per-statement
+// bound-parameter limit (100 parameters; 14 columns => 7 rows is the safe
+// whole number below the line), so Appending N turns costs O(N/7) HTTP
+// round-trips instead of N.
+const maxTurnsPerStatement = 7
+
 func (d *D1) AppendTurns(id string, turns []TurnInput) error {
 	if len(turns) == 0 {
 		return nil
@@ -219,33 +225,47 @@ func (d *D1) AppendTurns(id string, turns []TurnInput) error {
 		if err != nil {
 			return err
 		}
+
+		now := time.Now().Unix()
 		lastErr = nil
-		for _, turn := range turns {
-			_, err := db.Insert("turns", map[string]any{
-				"session_id":           id,
-				"seq":                  seq,
-				"role":                 turn.Role,
-				"text":                 turn.Text,
-				"model":                turn.Model,
-				"input_tokens":         turn.InputTokens,
-				"output_tokens":        turn.OutputTokens,
-				"cache_read_tokens":    turn.CacheReadTokens,
-				"cache_write_tokens":   turn.CacheWriteTokens,
-				"reasoning_tokens":     turn.ReasoningTokens,
-				"input_includes_cache": boolInt(turn.InputIncludesCache),
-				"duration_ms":          turn.DurationMS,
-				"generation_ms":        turn.GenerationMS,
-				"created_at":           time.Now().Unix(),
-			})
-			if err != nil {
+		for start := 0; start < len(turns); start += maxTurnsPerStatement {
+			end := start + maxTurnsPerStatement
+			if end > len(turns) {
+				end = len(turns)
+			}
+			chunk := turns[start:end]
+
+			placeholders := make([]string, 0, len(chunk))
+			values := make([]any, 0, len(chunk)*14)
+			for i, turn := range chunk {
+				placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+				values = append(values,
+					id,
+					seq+start+i,
+					turn.Role,
+					turn.Text,
+					turn.Model,
+					turn.InputTokens,
+					turn.OutputTokens,
+					turn.CacheReadTokens,
+					turn.CacheWriteTokens,
+					turn.ReasoningTokens,
+					boolInt(turn.InputIncludesCache),
+					turn.DurationMS,
+					turn.GenerationMS,
+					now,
+				)
+			}
+			sql := "INSERT INTO turns (session_id, seq, role, text, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, input_includes_cache, duration_ms, generation_ms, created_at) VALUES " + strings.Join(placeholders, ", ")
+			if _, err := db.Query(sql, values...); err != nil {
 				lastErr = err
 				break
 			}
-			seq++
 		}
-		if lastErr == nil {
-			return d.touch(id)
+		if lastErr != nil {
+			continue
 		}
+		return d.touch(id)
 	}
 	return lastErr
 }

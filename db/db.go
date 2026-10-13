@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"regexp"
 	"sort"
@@ -128,7 +129,19 @@ func SaveTunnel(url, version string, heartbeat int64) error {
 	}
 
 	_, err := Insert("tunnel", map[string]any{"url": url, "version": version, "heartbeat": heartbeat})
-	return err
+	if err != nil {
+		return err
+	}
+	// Keep reads fast as tables grow. Idempotent: safe to run on every daemon start.
+	for _, idx := range []string{
+		"CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at)",
+		"CREATE INDEX IF NOT EXISTS idx_turns_session_seq ON turns(session_id, seq)",
+	} {
+		if _, err := Query(idx); err != nil {
+			log.Printf("db index %s: %v", idx, err)
+		}
+	}
+	return nil
 }
 
 // TouchTunnel refreshes the version and heartbeat of the single tunnel row.
