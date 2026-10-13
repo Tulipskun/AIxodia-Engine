@@ -148,17 +148,71 @@ func TestConsumeSkipsLinesThatAreNotEvents(t *testing.T) {
 	}
 }
 
-func TestLastUserTextTakesTheQuestionNotTheHistory(t *testing.T) {
-	messages := []provider.Message{
-		{Role: "system", Content: "instructions"},
-		{Role: "user", Content: "first"},
-		{Role: "assistant", Content: "answer"},
-		{Role: "user", Content: "  the one being asked  "},
+// The whole conversation goes to the client every turn, because the client has
+// nowhere to keep it: its own store is in the container, and the container ends
+// when the session does. So what this renders is what the model gets, and the
+// question has to be distinguishable from the history around it.
+func TestRenderConversationKeepsTheQuestionApartFromTheHistory(t *testing.T) {
+	got := renderConversation([]provider.Message{
+		{Role: "system", Content: "you are a helpful agent"},
+		{Role: "user", Content: "ฉันชื่อสมชาย"},
+		{Role: "assistant", Content: "ยินดีที่รู้จักครับ"},
+		{Role: "user", Content: "  ฉันชื่ออะไร  "},
+	})
+
+	if !strings.Contains(got, "you are a helpful agent") {
+		t.Error("the system prompt has to survive: it is the only copy the model sees")
 	}
-	if got := lastUserText(messages); got != "the one being asked" {
+	if !strings.Contains(got, "<previous conversation>") || !strings.Contains(got, "</previous conversation>") {
+		t.Errorf("the history should be inside a marked block:\n%s", got)
+	}
+	if !strings.Contains(got, "user: ฉันชื่อสมชาย") {
+		t.Error("earlier turns are history and belong in the block")
+	}
+	if !strings.HasSuffix(got, "user: ฉันชื่ออะไร\n") {
+		t.Errorf("the question belongs outside the block, at the end:\n%s", got)
+	}
+	if strings.Count(got, "ฉันชื่ออะไร") != 1 {
+		t.Error("the question must not also appear in the history")
+	}
+}
+
+// A tool step is one line each: enough to follow what was already done without
+// turning the transcript into the tool's own output.
+func TestRenderConversationWritesToolStepsAsOneLineEach(t *testing.T) {
+	got := renderConversation([]provider.Message{
+		{Role: "user", Content: "รัน pwd"},
+		{Role: "assistant", Content: "กำลังรัน", ToolCalls: []provider.ToolCall{
+			{ID: "c1", Name: "shell", Arguments: `{"command":"pwd"}`},
+		}},
+		{Role: "tool", Content: "/kaggle/working\n\nsecond line", ToolCallID: "c1", ToolName: "shell"},
+		{Role: "assistant", Content: "เสร็จแล้ว"},
+		{Role: "user", Content: "อีกที"},
+	})
+
+	if !strings.Contains(got, `[tool shell] {"command":"pwd"}`) {
+		t.Errorf("the call should be one line:\n%s", got)
+	}
+	if !strings.Contains(got, "[result] /kaggle/working second line") {
+		t.Errorf("the result should be flattened to one line:\n%s", got)
+	}
+	if !strings.Contains(got, "assistant: กำลังรัน") || !strings.Contains(got, "assistant: เสร็จแล้ว") {
+		t.Errorf("the words before and after the call both belong in the history:\n%s", got)
+	}
+}
+
+func TestRenderConversationWithoutAQuestionSendsNothing(t *testing.T) {
+	if got := renderConversation([]provider.Message{{Role: "assistant", Content: "x"}}); got != "" {
+		t.Errorf("with no question there is nothing to send, got %q", got)
+	}
+}
+
+func TestOneLineFlattensAndCaps(t *testing.T) {
+	if got := oneLine("a\n\nb   c", 100); got != "a b c" {
 		t.Errorf("got %q", got)
 	}
-	if got := lastUserText([]provider.Message{{Role: "assistant", Content: "x"}}); got != "" {
-		t.Errorf("with no user message there is nothing to ask, got %q", got)
+	long := strings.Repeat("x", 50)
+	if got := oneLine(long, 10); got != strings.Repeat("x", 10)+"…" {
+		t.Errorf("got %q", got)
 	}
 }

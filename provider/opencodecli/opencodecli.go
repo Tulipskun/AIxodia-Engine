@@ -163,26 +163,30 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 	if err := a.Authenticate(key); err != nil {
 		return nil, err
 	}
-	prompt := lastUserText(req.Messages)
+	prompt := renderConversation(req.Messages)
 	if prompt == "" {
 		return nil, fmt.Errorf("opencode-cli needs a user message to send")
 	}
 
+	// No --session, on purpose.
+	//
+	// The client keeps a conversation of its own when given one, and that
+	// conversation lives in the container's filesystem — which Kaggle wipes when
+	// the session ends at twelve hours. This engine's transcript does not live
+	// there; it is in D1 and outlives the container. Two stores with different
+	// lifetimes cannot both be the conversation, and the one that survives a
+	// restart is the one that has to be, or the model answers the next question
+	// having forgotten everything before it.
+	//
+	// So each turn is the whole conversation, rendered from what this engine
+	// already trimmed, and the client is a stateless worker for one turn. The
+	// price is that the history is sent every time instead of only the delta,
+	// and that it goes as text rather than as native roles.
 	args := []string{"run", "--format", "json", "--model", req.Model}
-	if session := strings.TrimSpace(req.SessionID); session != "" {
-		// The client creates the session when the id is new and continues it
-		// afterwards, so this engine's session id is used unchanged and the two
-		// stay in step without a mapping table.
-		args = append(args, "--session", session)
-	}
-	if req.MaxTokens > 0 {
-		// The client reads its own limits from its config; passing this engine's
-		// would silently cap a model that was configured for more.
-		_ = req.MaxTokens
-	}
-	args = append(args, prompt)
+	_ = req.MaxTokens // the client takes its limits from its own config
 
 	command := exec.CommandContext(ctx, binary, args...)
+	command.Stdin = strings.NewReader(prompt)
 	command.Dir = workingDirectory()
 	stdout, err := command.StdoutPipe()
 	if err != nil {
@@ -307,18 +311,100 @@ func (a *Adapter) consume(stdout io.Reader, emit func(string) error) (*provider.
 	return resp, nil
 }
 
-// lastUserText is the message being asked. Everything before it is history the
-// client already has.
-func lastUserText(messages []provider.Message) string {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role != "user" {
-			continue
-		}
-		if text := strings.TrimSpace(messages[i].Content); text != "" {
-			return text
+// renderConversation writes the conversation the engine already holds as the
+// one message the client is given.
+//
+// The shape is deliberate: the earlier turns are inside a marked block and the
+// question being asked is outside it, so the model can tell what it is being
+// asked from what it is being reminded of. Tool steps are written as one line
+// each, which is enough for the model to follow what it already did without
+// pretending the result is part of the prose.
+func renderConversation(messages []provider.Message) string {
+	var system []string
+	var turns []string
+	question := ""
+	for i, message := range messages {
+		switch message.Role {
+		case "system":
+			if text := strings.TrimSpace(message.Content); text != "" {
+				system = append(system, text)
+			}
+		case "user":
+			// The last user message is the question; anything earlier is
+			// history. A tool result also arrives as a "tool" role, not here.
+			if i == lastUserIndex(messages) {
+				question = strings.TrimSpace(message.Content)
+				continue
+			}
+			turns = append(turns, "user: "+strings.TrimSpace(message.Content))
+		case "assistant":
+			text := strings.TrimSpace(message.Content)
+			for _, call := range message.ToolCalls {
+				// The words before a call belong to the call, the way this
+				// engine stores them.
+				line := "[tool " + call.Name + "] " + compactText(call.Arguments)
+				if text != "" {
+					turns = append(turns, "assistant: "+text)
+					text = ""
+				}
+				turns = append(turns, line)
+			}
+			if text != "" {
+				turns = append(turns, "assistant: "+text)
+			}
+		case "tool":
+			turns = append(turns, "[result] "+oneLine(message.Content, 2000))
 		}
 	}
-	return ""
+	if question == "" {
+		return ""
+	}
+	var out strings.Builder
+	for _, text := range system {
+		out.WriteString(text)
+		out.WriteString("\n\n")
+	}
+	if len(turns) > 0 {
+		out.WriteString("<previous conversation>\n")
+		out.WriteString(strings.Join(turns, "\n"))
+		out.WriteString("\n</previous conversation>\n\n")
+	}
+	out.WriteString("user: ")
+	out.WriteString(question)
+	out.WriteString("\n")
+	return out.String()
+}
+
+// lastUserIndex is the message being asked, or -1 when there is none.
+func lastUserIndex(messages []provider.Message) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" && strings.TrimSpace(messages[i].Content) != "" {
+			return i
+		}
+	}
+	return -1
+}
+
+// oneLine keeps a tool result on one line so the transcript stays readable.
+func oneLine(text string, limit int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) > limit {
+		text = strings.TrimSpace(text[:limit]) + "…"
+	}
+	return text
+}
+
+// compactText is a tool argument string as one line.
+func compactText(raw string) string {
+	var value any
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		return oneLine(raw, 300)
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return oneLine(raw, 300)
+	}
+	return oneLine(string(encoded), 300)
 }
 
 // compact is the tool arguments as one line, which is what the phone shows.
