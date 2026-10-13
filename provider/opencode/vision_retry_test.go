@@ -28,7 +28,7 @@ func fakeUpstream(t *testing.T, imageStatus int, imageBody string) (*httptest.Se
 			_, _ = w.Write([]byte(imageBody))
 			return
 		}
-		writeSSE(w, "ตอบจากข้อความล้วน")
+		writeSSE(w, r, "ตอบจากข้อความล้วน")
 	}))
 	t.Cleanup(server.Close)
 	return server, &calls
@@ -37,14 +37,30 @@ func fakeUpstream(t *testing.T, imageStatus int, imageBody string) (*httptest.Se
 // writeSSE answers the way the streaming endpoint does. The adapter's first
 // attempt is always a stream, so a plain JSON body would be read as an empty
 // successful answer and the retry would look like it produced nothing.
-func writeSSE(w http.ResponseWriter, content string) {
+func writeSSE(w http.ResponseWriter, r *http.Request, content string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
-	payload, _ := json.Marshal(map[string]any{
-		"id": "x", "model": "m",
-		"choices": []map[string]any{{"delta": map[string]any{"content": content}}},
-	})
-	_, _ = w.Write([]byte("data: " + string(payload) + "\n\ndata: [DONE]\n\n"))
+	var body string
+	if strings.HasSuffix(r.URL.Path, "/responses") {
+		// The Responses API answers in events of its own shape. Serving the
+		// chat shape here would be read as an empty answer and would make the
+		// fallback look broken.
+		delta, _ := json.Marshal(map[string]any{"type": "response.output_text.delta", "delta": content})
+		done, _ := json.Marshal(map[string]any{
+			"type": "response.completed",
+			"response": map[string]any{"id": "resp-1", "model": "m",
+				"output": []map[string]any{{"type": "message",
+					"content": []map[string]any{{"type": "output_text", "text": content}}}}},
+		})
+		body = "data: " + string(delta) + "\n\ndata: " + string(done) + "\n\n"
+	} else {
+		payload, _ := json.Marshal(map[string]any{
+			"id": "x", "model": "m",
+			"choices": []map[string]any{{"delta": map[string]any{"content": content}}},
+		})
+		body = "data: " + string(payload) + "\n\ndata: [DONE]\n\n"
+	}
+	_, _ = w.Write([]byte(body))
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
@@ -99,7 +115,7 @@ func TestStreamKeepsPicturesWhenTheModelTakesThem(t *testing.T) {
 		if strings.Contains(string(raw), "image_url") || strings.Contains(string(raw), "input_image") {
 			sawImage = true
 		}
-		writeSSE(w, "เห็นภาพแล้ว")
+		writeSSE(w, r, "เห็นภาพแล้ว")
 	}))
 	defer server.Close()
 	prov := provider.Provider{Name: "fake", Endpoint: server.URL, Keys: []string{"k"}}
@@ -131,7 +147,7 @@ func TestStreamTellsTheMessagePicturesWereDropped(t *testing.T) {
 			_, _ = w.Write([]byte("error code: 502"))
 			return
 		}
-		writeSSE(w, "ผมมองไม่เห็นรูปครับ")
+		writeSSE(w, r, "ผมมองไม่เห็นรูปครับ")
 	}))
 	defer server.Close()
 	prov := provider.Provider{Name: "fake", Endpoint: server.URL, Keys: []string{"k"}}

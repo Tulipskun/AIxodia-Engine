@@ -233,8 +233,31 @@ func (a *Adapter) ladder(ctx context.Context, req *provider.Request, prov provid
 		}
 		return err
 	}
+	// The Responses API is tried first, and that order is the whole fix for the
+	// free tier.
+	//
+	// The gate on this endpoint looks for the tool declarations by name at the
+	// top level — "shell" and "read" — which is how the Responses API spells
+	// them. Chat completions nests the same tools under "function", so a request
+	// sent that way declares no tool the gate recognises and is refused before
+	// the model is ever considered. Measured: the same body over the Responses
+	// API is accepted, and over chat completions it is refused.
+	//
+	// The chat path is kept below as the fallback, for any endpoint that serves
+	// it and does not serve this one.
 	prepared := *req
 	prepared.Tools = contractTools(req.Tools)
+	if viaResponses, err := a.inner.StreamViaResponses(ctx, &prepared, prov, key, guarded); err == nil {
+		return viaResponses, nil
+	} else {
+		note("responses-stream-tools", err)
+		// The same rule as every attempt below: a failure that is not about the
+		// shape of the request is not fixed by changing the shape, and retrying
+		// it only spends another round trip.
+		if emitted || !isToolProtocolError(err) {
+			return nil, fail(err)
+		}
+	}
 	resp, err := a.inner.Stream(ctx, &prepared, prov, key, guarded)
 	if err == nil {
 		return resp, nil

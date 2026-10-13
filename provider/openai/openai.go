@@ -694,6 +694,11 @@ func (a *Adapter) StreamViaResponses(ctx context.Context, req *provider.Request,
 		out.ID, out.Model = completed.ID, completed.Model
 		if cutShort {
 			out.FinishReason = "length"
+		} else {
+			// A completed response stopped on its own. The chat path reports
+			// this explicitly and this one did not, which left the finish
+			// reason empty for every answer that came through here.
+			out.FinishReason = "stop"
 		}
 	} else {
 		out.Content = text.String()

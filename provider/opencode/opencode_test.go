@@ -25,6 +25,15 @@ func fakeZen(t *testing.T) (*httptest.Server, *[]capturedRequest) {
 		body, _ := io.ReadAll(r.Body)
 		seen = append(seen, capturedRequest{Header: r.Header.Clone(), Body: body})
 		w.Header().Set("Content-Type", "text/event-stream")
+		if strings.HasSuffix(r.URL.Path, "/responses") {
+			// The Responses API reports the answer as events, then repeats it in
+			// the completed object. Both are served because the adapter must
+			// prefer the deltas and not double the text.
+			_, _ = io.WriteString(w, `data: {"type":"response.output_text.delta","delta":"Hello "}`+"\n\n")
+			_, _ = io.WriteString(w, `data: {"type":"response.output_text.delta","delta":"there"}`+"\n\n")
+			_, _ = io.WriteString(w, `data: {"type":"response.completed","response":{"id":"resp-1","model":"zen-model","output":[{"type":"message","content":[{"type":"output_text","text":"Hello there"}]}],"usage":{"input_tokens":11,"output_tokens":22,"total_tokens":33}}}`+"\n\n")
+			return
+		}
 		_, _ = io.WriteString(w, `data: {"id":"gen-1","model":"zen-model","choices":[{"index":0,"finish_reason":null,"delta":{"role":"assistant","content":"Hello "}}]}`+"\n\n")
 		_, _ = io.WriteString(w, `data: {"id":"gen-1","model":"zen-model","choices":[{"index":0,"finish_reason":"stop","delta":{"role":"assistant","content":"there"}}],"usage":{"prompt_tokens":11,"completion_tokens":22,"total_tokens":33}}`+"\n\n")
 		_, _ = io.WriteString(w, "data: [DONE]\n\n")
@@ -41,6 +50,7 @@ func toolNames(body []byte) []string {
 	var parsed struct {
 		Stream bool `json:"stream"`
 		Tools  []struct {
+			Name     string `json:"name"`
 			Function struct {
 				Name string `json:"name"`
 			} `json:"function"`
@@ -49,6 +59,10 @@ func toolNames(body []byte) []string {
 	_ = json.Unmarshal(body, &parsed)
 	names := make([]string, 0, len(parsed.Tools))
 	for _, entry := range parsed.Tools {
+		if entry.Name != "" {
+			names = append(names, entry.Name)
+			continue
+		}
 		names = append(names, entry.Function.Name)
 	}
 	return names
@@ -201,21 +215,14 @@ func TestRetryWithoutToolsOnProtocolRejection(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		body, _ := io.ReadAll(r.Body)
-		if calls == 1 {
+		if strings.Contains(string(body), `"tools"`) {
 			if !strings.Contains(string(body), `"shell"`) {
-				t.Errorf("first request should carry injected tools")
+				t.Errorf("a request carrying tools should carry the injected ones")
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = io.WriteString(w, `{"message":"Model does not support this protocol."}`)
 			return
-		}
-		var parsed struct {
-			Tools []any `json:"tools"`
-		}
-		_ = json.Unmarshal(body, &parsed)
-		if parsed.Tools != nil {
-			t.Errorf("retry should carry no tools, got %v", parsed.Tools)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}\n\n")
@@ -235,8 +242,9 @@ func TestRetryWithoutToolsOnProtocolRejection(t *testing.T) {
 	if resp.Content != "recovered" {
 		t.Errorf("content = %q, want recovered", resp.Content)
 	}
-	if calls != 2 {
-		t.Errorf("requests = %d, want 2 (initial + tools-less retry)", calls)
+	// responses+tools, chat+tools, then the tools-less chat retry
+	if calls != 3 {
+		t.Errorf("requests = %d, want 3 (two with tools, then one without)", calls)
 	}
 }
 
@@ -299,12 +307,17 @@ func TestRetryNonStreamingWhenBareStreamAlsoRejected(t *testing.T) {
 	if resp.Content != "plain ok" {
 		t.Errorf("content = %q, want plain ok", resp.Content)
 	}
-	if calls != 3 {
-		t.Errorf("requests = %d, want 3 (tools+stream, bare stream, bare plain)", calls)
+	// responses+tools, chat+tools, chat bare, then the non-streaming one
+	if calls != 4 {
+		t.Errorf("requests = %d, want 4 (three streaming, then plain)", calls)
 	}
 }
 
-func TestRetryViaResponsesAPIWhenChatRejected(t *testing.T) {
+// The Responses API is the first attempt, because the gate on this endpoint
+// reads the tool declarations by name at the top level and chat completions
+// nests them where it cannot see them. This is the order that makes a request
+// accepted rather than refused, so it is asserted rather than left to chance.
+func TestResponsesIsTriedFirst(t *testing.T) {
 	calls := 0
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -346,11 +359,11 @@ func TestRetryViaResponsesAPIWhenChatRejected(t *testing.T) {
 	if resp.Content != "via-resp-stream" {
 		t.Errorf("content = %q, want via-resp-stream", resp.Content)
 	}
-	if calls != 4 {
-		t.Errorf("requests = %d, want 4 (chat+tools, bare stream, bare plain, responses-stream)", calls)
+	if calls != 1 {
+		t.Errorf("requests = %d, want 1: the Responses API is tried first and it worked", calls)
 	}
-	if got := paths[len(paths)-1]; !strings.HasSuffix(got, "/responses") {
-		t.Errorf("last request should hit /responses, got %s", got)
+	if got := paths[0]; !strings.HasSuffix(got, "/responses") {
+		t.Errorf("first request should hit /responses, got %s", got)
 	}
 }
 
@@ -462,6 +475,9 @@ func TestSparkChainReachesResponsesTools(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("never tried responses-with-tools (paths=%v)", paths)
+	}
+	if len(paths) == 0 || !strings.HasSuffix(paths[0], "/responses tools=true") {
+		t.Errorf("responses-with-tools should be the first attempt, paths=%v", paths)
 	}
 }
 
