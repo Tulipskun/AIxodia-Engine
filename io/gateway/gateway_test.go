@@ -733,6 +733,7 @@ func TestTurnStoresBothTheWaitAndTheWrite(t *testing.T) {
 		GenerationMS: 4200,
 		Usage:        provider.Usage{PromptTokens: 10, CompletionTokens: 84},
 	}
+	g.persistUserBefore(&session.Session{ID: "s1"}, nil, []provider.Message{{Role: "user", Content: "ถาม"}})
 	g.persist(&session.Session{ID: "s1"}, []provider.Message{{Role: "user", Content: "ถาม"}}, resp, completionOptions{}, 9000)
 
 	if len(store.turns["s1"]) != 2 {
@@ -755,6 +756,7 @@ func TestGenerationFallsBackToTheTurn(t *testing.T) {
 	g := &Gateway{sessions: store}
 
 	resp := &provider.Response{Content: "ตอบแล้ว", GenerationMS: 60000, Usage: provider.Usage{CompletionTokens: 10}}
+	g.persistUserBefore(&session.Session{ID: "s2"}, nil, []provider.Message{{Role: "user", Content: "ถาม"}})
 	g.persist(&session.Session{ID: "s2"}, []provider.Message{{Role: "user", Content: "ถาม"}}, resp, completionOptions{}, 2500)
 
 	if got := store.turns["s2"][1].GenerationMS; got != 2500 {

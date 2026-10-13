@@ -147,9 +147,9 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 
 func (g *Gateway) chatOnce(w http.ResponseWriter, r *http.Request, stored *session.Session, primary route, fallback *route, history, delta []provider.Message, options completionOptions) {
 	started := time.Now()
+	g.persistUserBefore(stored, history, delta)
 	resp, err := g.complete(r.Context(), primary, fallback, history, options)
 	if err != nil {
-		g.persistUserDelta(stored, history, delta)
 		writeUpstreamError(w, err)
 		return
 	}
@@ -217,6 +217,7 @@ func (g *Gateway) chatStream(w http.ResponseWriter, r *http.Request, stored *ses
 	}
 
 	started := time.Now()
+	g.persistUserBefore(stored, history, delta)
 	options.onToolCall = func(call provider.ToolCall) {
 		_ = writeSSE(w, flusher, map[string]any{"tool_event": map[string]any{
 			"stage": "tool_call", "name": call.Name, "call_id": call.ID, "arguments": call.Arguments,
@@ -589,17 +590,22 @@ func (g *Gateway) selectTools(names *[]string) ([]provider.ToolDef, error) {
 // so a failed send still leaves its question in history instead of vanishing.
 // A question already recorded by an earlier failed attempt is not stacked
 // again: repeats reuse the recorded row.
-func (g *Gateway) persistUserDelta(stored *session.Session, history, delta []provider.Message) {
+func (g *Gateway) persistUserBefore(stored *session.Session, history, delta []provider.Message) {
 	if stored == nil || len(delta) == 0 {
 		return
 	}
-	recorded := history[:len(history)-len(delta)]
+	var recorded []provider.Message
+	if len(history) >= len(delta) {
+		recorded = history[:len(history)-len(delta)]
+	} else {
+		recorded = history
+	}
 	if isRepeatOfTail(recorded, delta) {
 		return
 	}
 	turns := make([]session.TurnInput, 0, len(delta))
 	for _, message := range delta {
-		if message.Role != "user" && message.Role != "assistant" {
+		if message.Role != "user" {
 			continue
 		}
 		turns = append(turns, session.TurnInput{Role: message.Role, Text: message.Content})
@@ -636,13 +642,12 @@ func (g *Gateway) persist(stored *session.Session, delta []provider.Message, res
 		return
 	}
 
-	turns := make([]session.TurnInput, 0, len(delta)+1)
+	// The incoming question has already been persisted before upstream was
+	// called, so here we only append the assistant reply (and the tool trail
+	// that belongs to it). Appending it again would duplicate it.
+	turns := make([]session.TurnInput, 0, 1+len(resp.Trail)) //+1
 	title := ""
 	for _, message := range delta {
-		if message.Role != "user" && message.Role != "system" && message.Role != "assistant" {
-			continue
-		}
-		turns = append(turns, session.TurnInput{Role: message.Role, Text: message.Content})
 		if title == "" && message.Role == "user" && strings.TrimSpace(message.Content) != "" {
 			title = truncate(strings.TrimSpace(message.Content), 60)
 		}
@@ -677,8 +682,12 @@ func (g *Gateway) persist(stored *session.Session, delta []provider.Message, res
 	if stored.Title == "" {
 		saved.Title = title
 	}
-	if err := g.sessions.SaveConfig(stored.ID, saved); err != nil {
-		log.Printf("gateway: save session config: %v", err)
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := g.sessions.SaveConfig(stored.ID, saved); err == nil {
+			break
+		} else if attempt == 2 {
+			log.Printf("gateway: save session config: %v", err)
+		}
 	}
 }
 
