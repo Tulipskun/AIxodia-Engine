@@ -109,15 +109,16 @@ func (m *memStore) AppendTurns(id string, turns []session.TurnInput) error {
 	defer m.mu.Unlock()
 	for _, turn := range turns {
 		m.turns[id] = append(m.turns[id], session.Turn{
-			SessionID:    id,
-			Seq:          len(m.turns[id]) + 1,
-			Role:         turn.Role,
-			Text:         turn.Text,
-			Model:        turn.Model,
-			InputTokens:  turn.InputTokens,
-			OutputTokens: turn.OutputTokens,
-			DurationMS:   turn.DurationMS,
-			GenerationMS: turn.GenerationMS,
+			SessionID:        id,
+			Seq:              len(m.turns[id]) + 1,
+			Role:             turn.Role,
+			Text:             turn.Text,
+			Model:            turn.Model,
+			InputTokens:      turn.InputTokens,
+			OutputTokens:     turn.OutputTokens,
+			DurationMS:       turn.DurationMS,
+			GenerationMS:     turn.GenerationMS,
+			ReasoningContent: turn.ReasoningContent,
 		})
 	}
 	return nil
@@ -853,6 +854,40 @@ func TestOutOfRoundsKeepsGoingAndEndsWithAResult(t *testing.T) {
 	}
 	if strings.Contains(last, `"tools"`) {
 		t.Error("the closing round must not offer tools any more")
+	}
+}
+
+// The reasoning a provider writes before its answer is stored with the turn and
+// replayed on the next request. Without it a provider that validates reasoning
+// models refuses every turn after the first with a missing-parameter 400.
+func TestReasoningIsStoredAndReplayedOnTheNextTurn(t *testing.T) {
+	var bodies []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(body))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"c","model":"test-model","choices":[{"index":0,"message":`+
+			`{"role":"assistant","content":"ตอบแล้ว","reasoning_content":"คิดก่อนตอบ"},"finish_reason":"stop"}],`+
+			`"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	defer upstream.Close()
+	config.Providers = []config.Provider{{
+		ID: "9", Name: "mock", APIURL: upstream.URL, Keys: []string{"test-key"}, Adapter: "openai",
+	}}
+	store := newMemStore()
+	gateway := New(store, registry.New(), tools.Builtin())
+
+	postJSON(t, gateway.Handler(), "/v1/sessions", `{"title":"t","model":"mock/test-model"}`)
+	postJSON(t, gateway.Handler(), "/v1/chat/completions",
+		`{"session_id":"s1","append":true,"messages":[{"role":"user","content":"ข้อความแรก"}]}`)
+	postJSON(t, gateway.Handler(), "/v1/chat/completions",
+		`{"session_id":"s1","append":true,"messages":[{"role":"user","content":"ข้อความที่สอง"}]}`)
+
+	if len(bodies) < 2 {
+		t.Fatalf("requests = %d, want two turns", len(bodies))
+	}
+	if !strings.Contains(bodies[1], `"reasoning_content":"คิดก่อนตอบ"`) {
+		t.Errorf("second turn does not replay the reasoning: %s", bodies[1])
 	}
 }
 

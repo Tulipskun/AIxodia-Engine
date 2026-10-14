@@ -17,6 +17,10 @@ type toolCallRow struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
 	Content   string `json:"content,omitempty"`
+	// Reasoning rides on the call row rather than on the narration row: what
+	// the next request has to send back is the assistant turn that made the
+	// call.
+	Reasoning string `json:"reasoning,omitempty"`
 }
 
 type toolResultRow struct {
@@ -42,6 +46,7 @@ func TrailTurns(trail []provider.Message) []TurnInput {
 					ID:        call.ID,
 					Name:      call.Name,
 					Arguments: call.Arguments,
+					Reasoning: msg.ReasoningContent,
 				})})
 			}
 		case msg.Role == "tool":
@@ -62,7 +67,11 @@ func MessagesFromTurns(turns []Turn) []provider.Message {
 	for _, turn := range turns {
 		switch turn.Role {
 		case "system", "user", "assistant":
-			messages = append(messages, provider.Message{Role: turn.Role, Content: turn.Text})
+			messages = append(messages, provider.Message{
+				Role:             turn.Role,
+				Content:          turn.Text,
+				ReasoningContent: turn.ReasoningContent,
+			})
 		case "tool_call":
 			var row toolCallRow
 			if json.Unmarshal([]byte(turn.Text), &row) != nil || row.ID == "" {
@@ -76,6 +85,7 @@ func MessagesFromTurns(turns []Turn) []provider.Message {
 					Name:      row.Name,
 					Arguments: row.Arguments,
 				}},
+				ReasoningContent: row.Reasoning,
 			})
 		case "tool_result":
 			var row toolResultRow

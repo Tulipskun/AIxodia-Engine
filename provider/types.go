@@ -32,6 +32,12 @@ type Message struct {
 	ToolCalls  []ToolCall
 	ToolCallID string
 	ToolName   string
+	// ReasoningContent is what a reasoning model wrote before the answer. It is
+	// never shown and not needed to read the answer, but providers that serve a
+	// reasoning model validate the next request against it: an assistant turn
+	// replayed without the field is refused with a missing-parameter 400, so it
+	// has to travel with the message.
+	ReasoningContent string
 }
 
 type ToolCall struct {
@@ -69,6 +75,10 @@ type Response struct {
 	ToolCalls    []ToolCall
 	Usage        Usage
 	FinishReason string
+	// ReasoningContent is the reasoning the model wrote before Content. It
+	// belongs in the assistant message the turn leaves behind, which is what
+	// the next request replays (see Message.ReasoningContent).
+	ReasoningContent string
 	// Trail holds the tool steps taken while producing Content, in order: an
 	// assistant message carrying ToolCalls, then one tool message per call.
 	Trail []Message

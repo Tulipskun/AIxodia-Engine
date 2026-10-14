@@ -52,6 +52,39 @@ func TestMessagesFromTurnsSkipsBrokenRows(t *testing.T) {
 	}
 }
 
+// The reasoning a model wrote has to come back with the assistant turn, or the
+// next request is refused for a missing reasoning_content.
+func TestReasoningSurvivesTheRoundTrip(t *testing.T) {
+	trail := []provider.Message{
+		{Role: "assistant", Content: "เดี๋ยวผมลอง", ReasoningContent: "คิดไปสามวินาที", ToolCalls: []provider.ToolCall{
+			{ID: "c1", Name: "bash", Arguments: `{"command":"ls"}`},
+		}},
+		{Role: "tool", ToolCallID: "c1", ToolName: "bash", Content: "a"},
+	}
+	turns := TrailTurns(trail)
+	turns = append(turns, TurnInput{Role: "assistant", Text: "เสร็จแล้ว", ReasoningContent: "คิดตอนจบ"})
+
+	messages := MessagesFromTurns(toTurns(turns))
+	if len(messages) != 4 {
+		t.Fatalf("rebuilt %d messages, want 4: %+v", len(messages), messages)
+	}
+	if messages[1].ReasoningContent != "คิดไปสามวินาที" {
+		t.Errorf("tool turn reasoning = %q, want the reasoning of the call that made it", messages[2].ReasoningContent)
+	}
+	if messages[3].ReasoningContent != "คิดตอนจบ" {
+		t.Errorf("answer reasoning = %q, want the reasoning stored with it", messages[3].ReasoningContent)
+	}
+}
+
+// toTurns is the read side of AppendTurns: the same rows the store hands back.
+func toTurns(in []TurnInput) []Turn {
+	out := make([]Turn, 0, len(in))
+	for _, t := range in {
+		out = append(out, Turn{Role: t.Role, Text: t.Text, ReasoningContent: t.ReasoningContent})
+	}
+	return out
+}
+
 func TestTrailTurnsKeepsNarrationOutOfToolRows(t *testing.T) {
 	// A model that says something before it calls a tool: those words are its
 	// own turn. Storing them inside the call row put the model's sentences

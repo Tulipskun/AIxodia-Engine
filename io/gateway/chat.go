@@ -466,6 +466,7 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 		// Accumulating them here ran every round together with no separator,
 		// so one stored answer read "กำลังเปิดอ่าน...ครับเปิดรูปไม่ขึ้น...ครับ".
 		final.Content = resp.Content
+		final.ReasoningContent = truncate(resp.ReasoningContent, 32*1024)
 		final.Usage.PromptTokens += resp.Usage.PromptTokens
 		final.Usage.CompletionTokens += resp.Usage.CompletionTokens
 		final.Usage.TotalTokens += resp.Usage.TotalTokens
@@ -477,9 +478,10 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 		}
 
 		assistant := provider.Message{
-			Role:      "assistant",
-			Content:   resp.Content,
-			ToolCalls: resp.ToolCalls,
+			Role:             "assistant",
+			Content:          resp.Content,
+			ToolCalls:        resp.ToolCalls,
+			ReasoningContent: final.ReasoningContent,
 		}
 		conversation = append(conversation, assistant)
 		final.Trail = append(final.Trail, assistant)
@@ -534,6 +536,7 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 			return nil, err
 		}
 		final.Content = resp.Content
+		final.ReasoningContent = truncate(resp.ReasoningContent, 32*1024)
 		final.Usage.PromptTokens += resp.Usage.PromptTokens
 		final.Usage.CompletionTokens += resp.Usage.CompletionTokens
 		final.Usage.TotalTokens += resp.Usage.TotalTokens
@@ -734,6 +737,7 @@ func (g *Gateway) persist(stored *session.Session, delta []provider.Message, res
 		Role:               "assistant",
 		Text:               resp.Content,
 		Model:              resp.Model,
+		ReasoningContent:   resp.ReasoningContent,
 		InputTokens:        resp.Usage.PromptTokens,
 		OutputTokens:       resp.Usage.CompletionTokens,
 		CacheReadTokens:    resp.Usage.CacheReadTokens,

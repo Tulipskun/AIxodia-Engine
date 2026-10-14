@@ -43,6 +43,7 @@ type Turn struct {
 	CacheReadTokens    int    `json:"cache_read_tokens,omitempty"`
 	CacheWriteTokens   int    `json:"cache_write_tokens,omitempty"`
 	ReasoningTokens    int    `json:"reasoning_tokens,omitempty"`
+	ReasoningContent   string `json:"reasoning_content,omitempty"`
 	InputIncludesCache bool   `json:"input_includes_cache,omitempty"`
 	DurationMS         int64  `json:"duration_ms,omitempty"`
 	GenerationMS       int64  `json:"generation_ms,omitempty"`
@@ -74,6 +75,10 @@ type TurnInput struct {
 	CacheWriteTokens   int
 	ReasoningTokens    int
 	InputIncludesCache bool
+	// ReasoningContent travels with an assistant turn so the next request can
+	// replay it; providers that serve a reasoning model refuse a history whose
+	// assistant message leaves it out.
+	ReasoningContent string
 	// DurationMS is the whole turn, from the question being sent to the answer
 	// being stored, which is the number a reader expects to see. GenerationMS is
 	// only the time the model spent writing, and it is what a rate is computed
@@ -192,6 +197,7 @@ func (d *D1) Turns(id string) ([]Turn, error) {
 			CacheReadTokens:    intField(row, "cache_read_tokens"),
 			CacheWriteTokens:   intField(row, "cache_write_tokens"),
 			ReasoningTokens:    intField(row, "reasoning_tokens"),
+			ReasoningContent:   stringField(row, "reasoning_content"),
 			InputIncludesCache: intField(row, "input_includes_cache") != 0,
 			DurationMS:         int64Field(row, "duration_ms"),
 			GenerationMS:       int64Field(row, "generation_ms"),
@@ -210,10 +216,10 @@ func (d *D1) History(id string) ([]provider.Message, error) {
 }
 
 // const maxTurnsPerStatement keeps each INSERT inside D1's per-statement
-// bound-parameter limit (100 parameters; 14 columns => 7 rows is the safe
-// whole number below the line), so Appending N turns costs O(N/7) HTTP
+// bound-parameter limit (100 parameters; 15 columns => 6 rows is the safe
+// whole number below the line), so Appending N turns costs O(N/6) HTTP
 // round-trips instead of N.
-const maxTurnsPerStatement = 7
+const maxTurnsPerStatement = 6
 
 func (d *D1) AppendTurns(id string, turns []TurnInput) error {
 	if len(turns) == 0 {
@@ -236,9 +242,9 @@ func (d *D1) AppendTurns(id string, turns []TurnInput) error {
 			chunk := turns[start:end]
 
 			placeholders := make([]string, 0, len(chunk))
-			values := make([]any, 0, len(chunk)*14)
+			values := make([]any, 0, len(chunk)*15)
 			for i, turn := range chunk {
-				placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+				placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 				values = append(values,
 					id,
 					seq+start+i,
@@ -250,13 +256,14 @@ func (d *D1) AppendTurns(id string, turns []TurnInput) error {
 					turn.CacheReadTokens,
 					turn.CacheWriteTokens,
 					turn.ReasoningTokens,
+					turn.ReasoningContent,
 					boolInt(turn.InputIncludesCache),
 					turn.DurationMS,
 					turn.GenerationMS,
 					now,
 				)
 			}
-			sql := "INSERT INTO turns (session_id, seq, role, text, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, input_includes_cache, duration_ms, generation_ms, created_at) VALUES " + strings.Join(placeholders, ", ")
+			sql := "INSERT INTO turns (session_id, seq, role, text, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, reasoning_content, input_includes_cache, duration_ms, generation_ms, created_at) VALUES " + strings.Join(placeholders, ", ")
 			if _, err := db.Query(sql, values...); err != nil {
 				lastErr = err
 				break
@@ -391,6 +398,14 @@ func EnsureTurns() {
 	if _, err := db.Query("ALTER TABLE turns ADD COLUMN generation_ms INTEGER NOT NULL DEFAULT 0"); err != nil &&
 		!strings.Contains(err.Error(), "duplicate column") {
 		log.Printf("session: cannot add generation_ms: %v", err)
+	}
+	// reasoning_content holds what a reasoning model wrote before its answer. It
+	// is what the next request replays on that assistant turn; without it a
+	// provider that serves one refuses the whole conversation with a
+	// missing-parameter 400.
+	if _, err := db.Query("ALTER TABLE turns ADD COLUMN reasoning_content TEXT NOT NULL DEFAULT ''"); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		log.Printf("session: cannot add reasoning_content: %v", err)
 	}
 }
 

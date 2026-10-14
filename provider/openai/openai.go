@@ -64,6 +64,11 @@ type message struct {
 	Content    any        `json:"content"`
 	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+	// ReasoningContent is a pointer so that it can be absent (the normal case)
+	// and present-but-empty at the same time, which is exactly the difference
+	// between a gateway that ignores the key and one that rejects the request
+	// for not finding it.
+	ReasoningContent *string `json:"reasoning_content,omitempty"`
 }
 
 type toolCall struct {
@@ -113,8 +118,9 @@ type chunk struct {
 	Model   string `json:"model"`
 	Choices []struct {
 		Delta struct {
-			Content   string `json:"content"`
-			ToolCalls []struct {
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+			ToolCalls        []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id"`
 				Type     string `json:"type"`
@@ -134,19 +140,19 @@ type chunk struct {
 }
 
 func (a *Adapter) Complete(ctx context.Context, req *provider.Request, prov provider.Provider, key string) (*provider.Response, error) {
-	body, err := json.Marshal(buildRequest(req, false))
-	if err != nil {
-		return nil, err
-	}
-	resp, err := a.doRequest(ctx, prov, key, body)
+	resp, refusal, err := a.send(ctx, prov, key, req, false)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return nil, err
+	raw := refusal
+	if raw == nil {
+		var err error
+		raw, err = io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		if err != nil {
+			return nil, err
+		}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, &provider.APIError{StatusCode: resp.StatusCode, Message: provider.ErrorMessage(raw)}
@@ -170,6 +176,9 @@ func (a *Adapter) Complete(ctx context.Context, req *provider.Request, prov prov
 		choice := parsed.Choices[0]
 		out.Content = textContent(choice.Message.Content)
 		out.FinishReason = choice.FinishReason
+		if choice.Message.ReasoningContent != nil {
+			out.ReasoningContent = *choice.Message.ReasoningContent
+		}
 		for _, call := range choice.Message.ToolCalls {
 			out.ToolCalls = append(out.ToolCalls, provider.ToolCall{
 				ID:        call.ID,
@@ -182,24 +191,24 @@ func (a *Adapter) Complete(ctx context.Context, req *provider.Request, prov prov
 }
 
 func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provider.Provider, key string, emit func(string) error) (*provider.Response, error) {
-	body, err := json.Marshal(buildRequest(req, true))
-	if err != nil {
-		return nil, err
-	}
-	resp, err := a.doRequest(ctx, prov, key, body)
+	resp, refusal, err := a.send(ctx, prov, key, req, true)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		raw := refusal
+		if raw == nil {
+			raw, _ = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		}
 		return nil, &provider.APIError{StatusCode: resp.StatusCode, Message: provider.ErrorMessage(raw)}
 	}
 
 	out := &provider.Response{}
 	calls := map[int]*provider.ToolCall{}
 	var text strings.Builder
+	var reasoning strings.Builder
 	finish := ""
 
 	err = provider.ReadSSE(resp.Body, func(data string) error {
@@ -230,6 +239,9 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 			if choice.Delta.Content != "" {
 				text.WriteString(choice.Delta.Content)
 			}
+			if choice.Delta.ReasoningContent != "" {
+				reasoning.WriteString(choice.Delta.ReasoningContent)
+			}
 			if choice.Delta.Content != "" && emit != nil {
 				if err := emit(choice.Delta.Content); err != nil {
 					return err
@@ -259,6 +271,7 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 	}
 
 	out.Content = text.String()
+	out.ReasoningContent = reasoning.String()
 	out.FinishReason = finish
 	indexes := make([]int, 0, len(calls))
 	for index := range calls {
@@ -294,6 +307,68 @@ func buildRequest(req *provider.Request, stream bool) request {
 	return out
 }
 
+// buildRequestWithReasoning is buildRequest with an empty reasoning_content on
+// every assistant turn. It is the second attempt described on send: a gateway
+// that validates the reasoning models' contract only has to find the key.
+func buildRequestWithReasoning(req *provider.Request, stream bool) request {
+	out := buildRequest(req, stream)
+	for i := range out.Messages {
+		if out.Messages[i].Role == "assistant" && out.Messages[i].ReasoningContent == nil {
+			empty := ""
+			out.Messages[i].ReasoningContent = &empty
+		}
+	}
+	return out
+}
+
+// send posts the request and repairs one refusal.
+//
+// Some OpenAI-compatible gateways validate a history that contains an assistant
+// turn against the contract their reasoning models are served under, and reject
+// the whole request when the key is absent:
+//
+//	400 Missing required parameter: 'messages[1].reasoning_content'
+//
+// This engine never asks for reasoning and used to drop it when it arrived, so
+// the key was missing on every turn after the first and such a provider could
+// not hold a conversation at all. One retry with the key present and empty
+// covers the gateways that check only for its presence; anything else is handed
+// back exactly as it came, body and all, so the caller reports it unchanged.
+func (a *Adapter) send(ctx context.Context, prov provider.Provider, key string, req *provider.Request, stream bool) (*http.Response, []byte, error) {
+	body, err := json.Marshal(buildRequest(req, stream))
+	if err != nil {
+		return nil, nil, err
+	}
+	resp, err := a.doRequest(ctx, prov, key, body)
+	if err != nil {
+		return nil, nil, err
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		return resp, nil, nil
+	}
+
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	resp.Body.Close()
+	if readErr != nil {
+		return nil, nil, readErr
+	}
+	if !strings.Contains(provider.ErrorMessage(raw), "reasoning_content") {
+		// Not the one refusal this can repair. The body is closed and the
+		// refusal travels back beside it, so the caller reports it unchanged.
+		return resp, raw, nil
+	}
+
+	body, err = json.Marshal(buildRequestWithReasoning(req, stream))
+	if err != nil {
+		return nil, nil, err
+	}
+	resp, err = a.doRequest(ctx, prov, key, body)
+	if err != nil {
+		return nil, nil, err
+	}
+	return resp, nil, nil
+}
+
 func toMessages(messages []provider.Message) []message {
 	out := make([]message, 0, len(messages))
 	for _, incoming := range messages {
@@ -306,6 +381,10 @@ func toMessages(messages []provider.Message) []message {
 			})
 		case "assistant":
 			converted := message{Role: "assistant", Content: incoming.Content}
+			if incoming.ReasoningContent != "" {
+				reasoning := incoming.ReasoningContent
+				converted.ReasoningContent = &reasoning
+			}
 			for _, call := range incoming.ToolCalls {
 				var tc toolCall
 				tc.ID = call.ID
