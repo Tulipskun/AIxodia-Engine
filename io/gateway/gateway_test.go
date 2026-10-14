@@ -763,3 +763,125 @@ func TestGenerationFallsBackToTheTurn(t *testing.T) {
 		t.Errorf("write = %dms, want the turn 2500ms rather than the impossible 60000ms", got)
 	}
 }
+
+// A tool that already ran has to be on record even when the turn then fails:
+// its steps used to be written only together with the final answer, so a shell
+// command that ran before an upstream error left no trace in history.
+func TestToolStepsSurviveAFailedTurn(t *testing.T) {
+	for _, stream := range []string{"false", "true"} {
+		t.Run("stream="+stream, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				if strings.Contains(string(body), `"tool_call_id"`) {
+					http.Error(w, `{"error":{"message":"rejected"}}`, http.StatusBadRequest)
+					return
+				}
+				if strings.Contains(string(body), `"stream":true`) {
+					streamFake(w, "", []string{"current_time"}, "tool_calls")
+					return
+				}
+				writeFake(w, "", []string{"current_time"}, "tool_calls")
+			}))
+			defer upstream.Close()
+			config.Providers = []config.Provider{{
+				ID: "9", Name: "mock", APIURL: upstream.URL, Keys: []string{"test-key"}, Adapter: "openai",
+			}}
+			store := newMemStore()
+			gateway := New(store, registry.New(), tools.Builtin())
+
+			created := postJSON(t, gateway.Handler(), "/v1/sessions", `{"title":"t","model":"mock/test-model"}`)
+			if created.Code != http.StatusCreated {
+				t.Fatalf("create status = %d, body = %s", created.Code, created.Body.String())
+			}
+			postJSON(t, gateway.Handler(), "/v1/chat/completions",
+				`{"session_id":"s1","stream":`+stream+`,"messages":[{"role":"user","content":"what time"}]}`)
+
+			turns, _ := store.Turns("s1")
+			var roles []string
+			for _, turn := range turns {
+				roles = append(roles, turn.Role)
+			}
+			want := []string{"user", "tool_call", "tool_result"}
+			if strings.Join(roles, ",") != strings.Join(want, ",") {
+				t.Fatalf("stored roles = %v, want %v", roles, want)
+			}
+			if !strings.Contains(turns[1].Text, "current_time") {
+				t.Errorf("tool call turn = %+v", turns[1])
+			}
+		})
+	}
+}
+
+// A task that needs more tool rounds than the old four-round cap was cut off in
+// the middle of the work: the loop stopped while the model was still asking for
+// tools, and the reply it stored was narration ("กำลังดู...อยู่"). Two things
+// are pinned here: the loop keeps going for the whole budget, and the request
+// that ends it says the budget is spent so the answer is a result.
+func TestOutOfRoundsKeepsGoingAndEndsWithAResult(t *testing.T) {
+	rounds := 0
+	last := ""
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		last = string(body)
+		if strings.Contains(string(body), `"tools"`) {
+			rounds++
+			writeFake(w, "กำลังดูอยู่", []string{"current_time"}, "tool_calls")
+			return
+		}
+		writeFake(w, "นี่คือสิ่งที่ทำได้แล้ว", nil, "stop")
+	}))
+	defer upstream.Close()
+	config.Providers = []config.Provider{{
+		ID: "9", Name: "mock", APIURL: upstream.URL, Keys: []string{"test-key"}, Adapter: "openai",
+	}}
+	gateway := New(newMemStore(), registry.New(), tools.Builtin())
+
+	recorder := postJSON(t, gateway.Handler(), "/v1/chat/completions",
+		`{"model":"mock/test-model","messages":[{"role":"user","content":"งานยาว"}]}`)
+
+	if rounds != maxToolRounds {
+		t.Errorf("tool rounds = %d, want the whole budget %d", rounds, maxToolRounds)
+	}
+	if rounds <= 4 {
+		t.Errorf("tool rounds = %d, want more than the old four-round cap", rounds)
+	}
+	if !strings.Contains(recorder.Body.String(), "นี่คือสิ่งที่ทำได้แล้ว") {
+		t.Errorf("reply = %s, want the result of the closing round", recorder.Body.String())
+	}
+	if !strings.Contains(last, "no tool calls left") {
+		t.Errorf("closing request does not say the budget is spent: %s", last)
+	}
+	if strings.Contains(last, `"tools"`) {
+		t.Error("the closing round must not offer tools any more")
+	}
+}
+
+// A request without the right bearer token is turned away; the right one gets
+// through. The comparison is constant-time, so this only pins the behaviour.
+func TestRequireTokenComparesTheWholeToken(t *testing.T) {
+	handler := RequireToken("secret", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for header, want := range map[string]int{
+		"Bearer secret":  http.StatusNoContent,
+		"Bearer secre":   http.StatusUnauthorized,
+		"Bearer secrets": http.StatusUnauthorized,
+		"Bearer ":        http.StatusUnauthorized,
+		"":               http.StatusUnauthorized,
+	} {
+		request := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+		if header != "" {
+			request.Header.Set("Authorization", header)
+		}
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != want {
+			t.Errorf("Authorization %q: status = %d, want %d", header, recorder.Code, want)
+		}
+	}
+	healthz := httptest.NewRecorder()
+	handler.ServeHTTP(healthz, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if healthz.Code != http.StatusNoContent {
+		t.Errorf("/healthz without a token: status = %d, want it open", healthz.Code)
+	}
+}

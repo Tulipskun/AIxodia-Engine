@@ -21,14 +21,14 @@
 - Chat: `POST /v1/chat/completions`, OpenAI-compatible, `"stream":true` for SSE.
 - **Model routing**: `model` must be `provider/model` (e.g. `NousResearch/inclusionai/ling-3.1-flash`), or give the `provider` field. A bare model name errors with 400 — there is no model→provider index anywhere.
 - **Sessions own history**: when `session_id` is set the engine loads turns from D1 and merges the incoming `messages` by common prefix, so clients may send either the full history or only the new turn. Reply, tokens, and duration are appended as turns; the session's `provider`, `model`, and first `title` are written on success.
-- Defaults: all builtin tools are offered unless the body has `"tools": []`; context is trimmed to `session.DefaultMaxTokens` (100k estimated tokens); at most 4 tool rounds; upstream calls get 3 attempts with 750ms/1.5s backoff on retryable errors, keys rotated round-robin per provider; `sub_provider`/`sub_model` is a one-shot fallback while nothing has been streamed yet.
+- Defaults: all builtin tools are offered unless the body has `"tools": []`; context is trimmed to `session.DefaultMaxTokens` (100k estimated tokens); at most 12 tool rounds, and the round that spends the last of them carries a closing instruction (`chat.go: outOfRounds`) so a turn that runs out ends with a result instead of narration; upstream calls get 3 attempts with 750ms/1.5s backoff on retryable errors, keys rotated round-robin per provider; `sub_provider`/`sub_model` is a one-shot fallback while nothing has been streamed yet.
 - Upstream failures return 502 `{"error":{"message","type":"upstream_error"}}`; mid-stream failures emit a `data: {"error":...}` event then `[DONE]`.
 
 ## Schema in use
 - `providers(index, provider, endpoint, keys, adapter, free)` — no `model` column, so the client always names the model.
   - `config.Provider` fields differ from columns; mapping is `config.providerFromRow` (`index`→`ID`, `provider`→`Name`, `endpoint`→`APIURL`). `keys` is a JSON array as text.
 - `sessions(...)` and `turns(id, session_id, seq, role, text, model, input_tokens, output_tokens, duration_ms, ...)` — other clients already write here (existing rows with Thai titles), so keep column names and `UNIQUE(session_id, seq)` in mind.
-  - Only `user`/`system`/`assistant` text is persisted. Tool calls are executed inside one request and **not** stored, so tool detail does not survive across turns (the turns table has no tool columns).
+  - Tool steps are stored as `tool_call` / `tool_result` turns (JSON in `text`, see `session/trail.go`) and replayed into the next request. They are written after each tool round, not at the end, so a turn that fails or is cut off still keeps the tools it ran.
 - `tunnel(url)`: `db.SaveTunnel` creates the table, deletes all rows, inserts one.
 
 ## db package rules

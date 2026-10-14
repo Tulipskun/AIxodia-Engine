@@ -217,7 +217,13 @@ func (h *Hub) serve(conn net.Conn, r *bufio.Reader, chat ChatFunc) {
 	p := &peer{conn: conn, cancels: map[string]context.CancelFunc{}}
 	h.add(p)
 	defer h.remove(p)
-	defer p.cancelAll()
+	// A socket that simply stops talking is a network event, not a decision by
+	// the phone: the tunnel drops, the screen locks, the phone changes network,
+	// and the turn running on it is cancelled with it — so the work stops and
+	// the question is left unanswered. The turn carries its own context and its
+	// answer is persisted either way, so it keeps going; on reconnect the phone
+	// pulls the newest turns and finds the answer there. Only a close frame is
+	// the phone saying it is finished, and that one cancels.
 	// A phone that just connected gets the current spec immediately; after that
 	// every change is pushed by BroadcastUI.
 	if h.spec != nil {
@@ -242,6 +248,7 @@ func (h *Hub) serve(conn net.Conn, r *bufio.Reader, chat ChatFunc) {
 			p.mu.Lock()
 			_ = writeFrame(conn, 0x8, []byte{})
 			p.mu.Unlock()
+			p.cancelAll()
 			return
 		case 0x9: // ping
 			p.mu.Lock()

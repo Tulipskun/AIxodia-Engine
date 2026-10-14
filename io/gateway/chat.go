@@ -60,6 +60,51 @@ type completionOptions struct {
 	// forward them so tool use is visible while it runs.
 	onToolCall   func(call provider.ToolCall)
 	onToolResult func(call provider.ToolCall, text string, durationMs int64, isError bool)
+	// onTrail is handed the whole trail so far after every tool round, and trail
+	// is where those steps get stored. Both are nil when nothing is persisted.
+	onTrail func(trail []provider.Message)
+	trail   *trailWriter
+}
+
+// trailWriter stores tool steps as each round finishes instead of once the
+// whole reply is done. A turn that fails or is cut off after a tool already
+// ran (a shell command, say) would otherwise leave no record of it: the trail
+// only exists in a response that never arrives.
+type trailWriter struct {
+	g     *Gateway
+	id    string
+	saved int
+}
+
+func (g *Gateway) newTrailWriter(stored *session.Session) *trailWriter {
+	if stored == nil {
+		return nil
+	}
+	return &trailWriter{g: g, id: stored.ID}
+}
+
+// flush stores the steps of trail that are not stored yet. A failed write
+// leaves them unmarked, so the next round, or persist at the end, retries.
+func (t *trailWriter) flush(trail []provider.Message) {
+	if t == nil || t.saved >= len(trail) {
+		return
+	}
+	turns := session.TrailTurns(trail[t.saved:])
+	if len(turns) > 0 {
+		if err := t.g.sessions.AppendTurns(t.id, turns); err != nil {
+			log.Printf("gateway: save tool steps: %v", err)
+			return
+		}
+	}
+	t.saved = len(trail)
+}
+
+// rest is the part of trail that flush has not stored.
+func (t *trailWriter) rest(trail []provider.Message) []provider.Message {
+	if t == nil || t.saved > len(trail) {
+		return trail
+	}
+	return trail[t.saved:]
 }
 
 func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
@@ -148,6 +193,8 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) chatOnce(w http.ResponseWriter, r *http.Request, stored *session.Session, primary route, fallback *route, history, delta []provider.Message, options completionOptions) {
 	started := time.Now()
 	g.persistUserBefore(stored, history, delta)
+	options.trail = g.newTrailWriter(stored)
+	options.onTrail = options.trail.flush
 	resp, err := g.complete(r.Context(), primary, fallback, history, options)
 	if err != nil {
 		writeUpstreamError(w, err)
@@ -218,6 +265,8 @@ func (g *Gateway) chatStream(w http.ResponseWriter, r *http.Request, stored *ses
 
 	started := time.Now()
 	g.persistUserBefore(stored, history, delta)
+	options.trail = g.newTrailWriter(stored)
+	options.onTrail = options.trail.flush
 	options.onToolCall = func(call provider.ToolCall) {
 		_ = writeSSE(w, flusher, map[string]any{"tool_event": map[string]any{
 			"stage": "tool_call", "name": call.Name, "call_id": call.ID, "arguments": call.Arguments,
@@ -452,10 +501,23 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 			conversation = append(conversation, result)
 			final.Trail = append(final.Trail, result)
 		}
+		if options.onTrail != nil {
+			options.onTrail(final.Trail)
+		}
 		final.FinishReason = "tool_calls"
 	}
 
 	if pending {
+		// The tool budget for this turn is spent. Taking the tools away alone
+		// is not enough: the model keeps narrating ("กำลังดู...อยู่") and that
+		// narration is stored as the answer, so the session stops in the middle
+		// of the work looking like it was about to continue. Saying the budget
+		// is spent, in the conversation it is answering, is what turns the last
+		// round into a result the reader can act on.
+		conversation = append(conversation, provider.Message{
+			Role:    "user",
+			Content: outOfRounds,
+		})
 		request := &provider.Request{
 			Model:       current.model,
 			Messages:    session.Trim(conversation, session.DefaultMaxTokens),
@@ -479,6 +541,14 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 	}
 	return final, nil
 }
+
+// outOfRounds is the last thing the model reads in a turn that ran out of tool
+// rounds. It is written for the model and never stored: it is added to the
+// request conversation only, so the trail on record is what really happened.
+const outOfRounds = "This turn has no tool calls left, so no further tool can run. " +
+	"Answer now in the language of the question: say what you actually did and found, " +
+	"and, if the task is not finished, list what is still left. " +
+	"Do not describe what you are about to look at, and do not ask for another tool."
 
 func (g *Gateway) call(ctx context.Context, target route, request *provider.Request, emit func(string) error, canRetry func() bool) (*provider.Response, error) {
 	if len(target.prov.Keys) == 0 {
@@ -652,7 +722,7 @@ func (g *Gateway) persist(stored *session.Session, delta []provider.Message, res
 			title = truncate(strings.TrimSpace(message.Content), 60)
 		}
 	}
-	turns = append(turns, session.TrailTurns(resp.Trail)...)
+	turns = append(turns, session.TrailTurns(options.trail.rest(resp.Trail))...)
 	generation := resp.GenerationMS
 	if generation <= 0 || generation > duration {
 		// Either the provider reported no time of its own, or it reported more

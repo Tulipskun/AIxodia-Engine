@@ -18,7 +18,12 @@ import (
 )
 
 const (
-	maxToolRounds  = 4
+	// maxToolRounds is how many model→tool→model rounds one turn may spend.
+	// Four was not enough for real work: a session asking for a change to a
+	// notebook used read, bash, read, bash and was cut off there, so the turn
+	// ended with the model still narrating what it was about to look at and
+	// nothing done (D1 turns for session smv6psjidc792, seq 15-26).
+	maxToolRounds  = 12
 	keyAttempts    = 3
 	upstreamWait   = 180 * time.Second
 	requestMaxBody = 8 << 20
@@ -26,7 +31,7 @@ const (
 
 // Version is the release tag, baked in at build time. Bump on every release
 // so a live service can be identified via GET /healthz.
-const Version = "v1.127"
+const Version = "v1.128"
 
 type SessionStore interface {
 	Create(params session.NewSession) (*session.Session, error)

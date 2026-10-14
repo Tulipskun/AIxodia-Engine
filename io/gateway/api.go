@@ -6,6 +6,7 @@ package gateway
 // reset when the daemon restarts.
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -113,7 +114,7 @@ func RequireToken(token string, next http.Handler) http.Handler {
 			return
 		}
 		auth := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-		if token == "" || auth != token {
+		if token == "" || subtle.ConstantTimeCompare([]byte(auth), []byte(token)) != 1 {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "token rejected")
 			return
 		}

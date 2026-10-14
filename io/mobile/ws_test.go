@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func fakeChat(ctx context.Context, sessionID, text string, attachments []Attachment, onDelta func(string), onTool func(ToolEvent)) (string, int, int, error) {
@@ -108,6 +109,93 @@ func TestMessageRoundTrip(t *testing.T) {
 	}
 	if msg.Text != "echo: hi" || msg.ClientMsgID != "c1" || msg.Role != "model" || msg.Source != "ai" {
 		t.Fatalf("bad message frame: %+v", msg)
+	}
+}
+
+// sendClose writes a masked close frame, the way the phone says it is finished.
+func sendClose(t *testing.T, conn net.Conn) {
+	t.Helper()
+	mask := []byte{9, 8, 7, 6}
+	frame := append([]byte{0x88, 0x80}, mask...)
+	if _, err := conn.Write(frame); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// parkedChat is a turn that waits to be released, so a test can decide when it
+// finishes and see whether it was cancelled instead.
+func parkedChat(started chan<- struct{}, release <-chan struct{}, finished chan<- error) ChatFunc {
+	return func(ctx context.Context, sessionID, text string, attachments []Attachment, onDelta func(string), onTool func(ToolEvent)) (string, int, int, error) {
+		close(started)
+		select {
+		case <-release:
+			finished <- nil
+			return "answered", 0, 0, nil
+		case <-ctx.Done():
+			finished <- ctx.Err()
+			return "", 0, 0, ctx.Err()
+		}
+	}
+}
+
+func startParkedTurn(t *testing.T, chat ChatFunc) (net.Conn, chan struct{}, chan struct{}, chan error) {
+	t.Helper()
+	srv := httptest.NewServer(Handler("good", chat))
+	t.Cleanup(srv.Close)
+	conn, _, code := dialWS(t, srv, "good")
+	if code != http.StatusSwitchingProtocols {
+		t.Fatalf("want 101, got %d", code)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan error, 1)
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn, started, release, finished
+}
+
+// A socket that dies on its own is the tunnel or the network, not the phone
+// cancelling. The turn keeps running so the work is not lost mid-way; the answer
+// is persisted and the phone picks it up when it reconnects.
+func TestDroppedSocketDoesNotCancelTheTurn(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan error, 1)
+	conn, _, _, _ := startParkedTurn(t, parkedChat(started, release, finished))
+
+	sendMasked(t, conn, []byte(`{"type":"message","session_id":"s1","client_msg_id":"c1","content":[{"type":"text","text":"hi"}]}`))
+	<-started
+	conn.Close()
+	time.Sleep(50 * time.Millisecond) // give serve time to notice the dead socket
+	close(release)
+
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatalf("turn was cancelled by the dropped socket: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the turn never finished")
+	}
+}
+
+// A close frame is the phone saying it is finished, and it stops the turn.
+func TestCloseFrameCancelsTheTurn(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan error, 1)
+	conn, _, _, _ := startParkedTurn(t, parkedChat(started, release, finished))
+
+	sendMasked(t, conn, []byte(`{"type":"message","session_id":"s1","client_msg_id":"c1","content":[{"type":"text","text":"hi"}]}`))
+	<-started
+	sendClose(t, conn)
+
+	select {
+	case err := <-finished:
+		if err == nil {
+			t.Fatal("a close frame must stop the turn")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the turn was not cancelled")
 	}
 }
 
