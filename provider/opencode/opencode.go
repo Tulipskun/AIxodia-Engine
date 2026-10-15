@@ -109,6 +109,38 @@ func (a *Adapter) sessionID() string {
 // construction rather than by luck. The shape of the id is left otherwise
 // exactly as the client has it.
 //
+// ---
+//
+// The id was not the last of it. On 2026-10-15 the same refusal came back after
+// that had been fixed, and it came back for a request that was *identical* to
+// one the real client had just sent and had accepted. Replaying the client's
+// own captured request byte for byte answered 200, and replaying the engine's
+// own captured request byte for byte answered 403, from the same address in the
+// same minute. The difference was one header:
+//
+//   x-opencode-request: msg_...      present in the engine's, absent in the
+//                                    client's
+//
+// Remove it and nothing else, and the engine's request is accepted. Put it back,
+// and it is refused — the whole request, including one that declares the tools
+// the gate is otherwise happy to see. Everything else that had been blamed was
+// re-measured while it was held: the key (both the oc_sk_ and the sk_ one, and
+// no key at all), the endpoint (/inference/v1, /inference/openai/v1, /zen/v1,
+// responses and chat completions), the project id (global and the real one),
+// b3 and traceparent, Accept and Accept-Encoding, the TLS profile, HTTP/1.1 and
+// HTTP/2 — none of them change the answer. Only the missing User-Agent and this
+// header do.
+//
+// So the engine sends no request header of its own. The message and session
+// headers already carry the ids, and a request that names its own request is a
+// request the client never sent.
+//
+// One more note on this path: the body needs tools or a system prompt to be
+// accepted, which is what the client always sends. A tools-less, instructions-less
+// body — the shape a plain chat client would build — is refused. The gateway's
+// tools cover that: the contract injection in the ladder below is what makes the
+// body recogniseable, so it must not be dropped from the request.
+//
 // One more thing had to change for this to be reachable: the request has to go
 // to the Responses API. The gate reads the tool declarations by name at the top
 // level, which is how that API spells them; chat completions nests the same
@@ -121,12 +153,17 @@ func (a *Adapter) Name() string { return "opencode" }
 
 func (a *Adapter) headers() map[string]string {
 	session := a.sessionID()
+	// Everything the request-id headers below carry is already in the message
+	// and session headers, so the engine sends none of its own: the gate reads
+	// an x-opencode-request header as a request that did not come from the
+	// client and refuses it. Measured against the live endpoint on 2026-10-15
+	// with the engine's own captured request held otherwise untouched: with
+	// that header 403 FreeTierError, with it removed 200 and a streamed answer.
 	return map[string]string{
 		"User-Agent":            a.userAgent(),
 		"x-opencode-client":     "cli",
 		"x-opencode-project":    "global",
 		"x-opencode-session":    session,
-		"x-opencode-request":    newID("msg_"),
 		"x-opencode-session-id": session,
 		"x-session-affinity":    session,
 		"x-session-id":          session,

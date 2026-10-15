@@ -103,8 +103,12 @@ func TestFreeTierContractOnComplete(t *testing.T) {
 	if !regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`).MatchString(session) {
 		t.Errorf("session = %q", session)
 	}
-	if request := got.Header.Get("X-Opencode-Request"); !strings.HasPrefix(request, "msg_") {
-		t.Errorf("request = %q", request)
+	// The engine must not name its own request. Measured against the live
+	// endpoint on 2026-10-15: the engine's captured request with this header is
+	// answered 403 FreeTierError, and removing only this header makes the same
+	// request 200. The real client never sends it.
+	if request := got.Header.Get("X-Opencode-Request"); request != "" {
+		t.Errorf("request header = %q, want none at all", request)
 	}
 	if client := got.Header.Get("X-Opencode-Client"); client != "cli" {
 		t.Errorf("client = %q", client)
@@ -159,7 +163,7 @@ func TestStreamKeepsGivenContractTools(t *testing.T) {
 	}
 }
 
-func TestSessionStableAndRequestRotates(t *testing.T) {
+func TestSessionStableAndRequestNeverSent(t *testing.T) {
 	server, seen := fakeZen(t)
 	adapter := New()
 	prov := providerFor(server)
@@ -176,8 +180,8 @@ func TestSessionStableAndRequestRotates(t *testing.T) {
 	if first.Get("X-Opencode-Session") != second.Get("X-Opencode-Session") {
 		t.Errorf("session rotated: %q vs %q", first.Get("X-Opencode-Session"), second.Get("X-Opencode-Session"))
 	}
-	if first.Get("X-Opencode-Request") == second.Get("X-Opencode-Request") {
-		t.Errorf("request id reused: %q", first.Get("X-Opencode-Request"))
+	if first.Get("X-Opencode-Request") != "" {
+		t.Errorf("request id sent: %q, want none at all", first.Get("X-Opencode-Request"))
 	}
 }
 
