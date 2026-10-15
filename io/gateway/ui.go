@@ -59,14 +59,15 @@ func defaultUISpec() json.RawMessage {
     "expand": "ขยาย",
     "working": "agent กำลังทำงาน",
     "empty_title": "เริ่มสนทนากับ agent",
-    "empty_hint": "พิมพ์งานด้านล่าง แล้ว agent จะทำต่อแม้ปิดแอป"
+    "empty_hint": "พิมพ์งานด้านล่าง แล้ว agent จะทำต่อแม้ปิดแอป",
+    "cmd": "cmd",
+    "clear_draft": "ล้างข้อความ"
   },
   "topbar": {
     "show_status_dot": true,
     "show_uptime": true,
     "uptime_format": "HH:mm:ss",
-    "show_refresh": true,
-    "show_model_chip": true
+    "show_refresh": true
   },
   "tool_block": {
     "collapsed_by_default": true,
@@ -84,7 +85,9 @@ func defaultUISpec() json.RawMessage {
     "max_lines": 5,
     "show_stop_button": true,
     "show_attach": true,
-    "show_attach_title": false
+    "show_attach_title": false,
+    "show_cmd_button": true,
+    "show_model_button": true
   },
   "screens": {},
   "drawer_items": [
