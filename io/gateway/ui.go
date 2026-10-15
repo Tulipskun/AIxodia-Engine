@@ -60,7 +60,7 @@ func defaultUISpec() json.RawMessage {
     "working": "agent กำลังทำงาน",
     "empty_title": "เริ่มสนทนากับ agent",
     "empty_hint": "พิมพ์งานด้านล่าง แล้ว agent จะทำต่อแม้ปิดแอป",
-    "cmd": "cmd",
+    "cmd": "CMD",
     "clear_draft": "ล้างข้อความ"
   },
   "topbar": {
