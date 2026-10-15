@@ -199,37 +199,6 @@ func TestCloseFrameCancelsTheTurn(t *testing.T) {
 	}
 }
 
-func TestHubBroadcastUIFrame(t *testing.T) {
-	hub := NewHub(nil)
-	c1, c2 := net.Pipe()
-	p := &peer{conn: c1, cancels: map[string]context.CancelFunc{}}
-	hub.add(p)
-	defer c2.Close()
-
-	go func() { hub.BroadcastUI(json.RawMessage(`{"version":7}`)) }()
-
-	op, payload, err := readFrame(bufio.NewReader(c2))
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if op != 0x1 {
-		t.Fatalf("op = %x, want text", op)
-	}
-	var f map[string]any
-	if err := json.Unmarshal(payload, &f); err != nil {
-		t.Fatalf("frame json: %v", err)
-	}
-	if f["kind"] != "ui" {
-		t.Errorf("kind = %v, want ui", f["kind"])
-	}
-	if _, ok := f["ui"].(map[string]any); !ok {
-		t.Errorf("ui missing or not an object: %v", f["ui"])
-	}
-	if f["source"] != "ai" {
-		t.Errorf("source = %v", f["source"])
-	}
-}
-
 func TestAttachmentNote(t *testing.T) {
 	if got := attachmentNote(nil); got != "" {
 		t.Errorf("empty attachments should add nothing, got %q", got)

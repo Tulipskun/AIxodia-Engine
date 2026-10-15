@@ -87,10 +87,6 @@ type outFrame struct {
 	Seq          int64           `json:"seq,omitempty"`
 	InputTokens  int             `json:"input_tokens,omitempty"`
 	OutputTokens int             `json:"output_tokens,omitempty"`
-	// UI carries the server-driven UI spec on a kind="ui" frame. It is sent
-	// when a phone connects and again whenever the spec changes, so the app
-	// never has to poll for it.
-	UI json.RawMessage `json:"ui,omitempty"`
 }
 
 type toolCallJSON struct {
@@ -107,19 +103,15 @@ type toolResultJSON struct {
 }
 
 // Hub tracks every connected phone so the daemon can push a frame to all of
-// them at once. This is how a change on the server (a new UI spec) reaches the
-// app with no polling and no second connection.
+// them at once, with no polling and no second connection per phone.
 type Hub struct {
 	mu    sync.Mutex
 	peers map[*peer]struct{}
-	// spec, when set, is sent to each phone as soon as it connects, so a client
-	// is current without asking.
-	spec func() json.RawMessage
 }
 
-// NewHub builds a hub. spec may be nil when there is nothing to push on connect.
-func NewHub(spec func() json.RawMessage) *Hub {
-	return &Hub{peers: map[*peer]struct{}{}, spec: spec}
+// NewHub builds a hub.
+func NewHub() *Hub {
+	return &Hub{peers: map[*peer]struct{}{}}
 }
 
 func (h *Hub) add(p *peer) {
@@ -132,26 +124,6 @@ func (h *Hub) remove(p *peer) {
 	h.mu.Lock()
 	delete(h.peers, p)
 	h.mu.Unlock()
-}
-
-// BroadcastUI sends the UI spec to every connected phone. A phone whose socket
-// has died is dropped here rather than left to fail on its next write.
-func (h *Hub) BroadcastUI(spec json.RawMessage) {
-	if len(spec) == 0 {
-		return
-	}
-	frame := outFrame{Kind: "ui", UI: spec}
-	h.mu.Lock()
-	peers := make([]*peer, 0, len(h.peers))
-	for p := range h.peers {
-		peers = append(peers, p)
-	}
-	h.mu.Unlock()
-	for _, p := range peers {
-		if err := p.send(frame); err != nil {
-			h.remove(p)
-		}
-	}
 }
 
 // Handler upgrades /ws to a WebSocket after checking the bearer token. It is a
@@ -190,9 +162,9 @@ func (h *Hub) Handler(token string, chat ChatFunc) http.Handler {
 	})
 }
 
-// Handler serves /ws with no push support. Kept for tests and simple callers.
+// Handler serves /ws. Kept for tests and simple callers.
 func Handler(token string, chat ChatFunc) http.Handler {
-	return NewHub(nil).Handler(token, chat)
+	return NewHub().Handler(token, chat)
 }
 
 type peer struct {
@@ -224,13 +196,6 @@ func (h *Hub) serve(conn net.Conn, r *bufio.Reader, chat ChatFunc) {
 	// answer is persisted either way, so it keeps going; on reconnect the phone
 	// pulls the newest turns and finds the answer there. Only a close frame is
 	// the phone saying it is finished, and that one cancels.
-	// A phone that just connected gets the current spec immediately; after that
-	// every change is pushed by BroadcastUI.
-	if h.spec != nil {
-		if spec := h.spec(); len(spec) > 0 {
-			_ = p.send(outFrame{Kind: "ui", UI: spec})
-		}
-	}
 	for {
 		op, payload, err := readFrame(r)
 		if err != nil {
