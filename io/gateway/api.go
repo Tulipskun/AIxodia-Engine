@@ -2,7 +2,7 @@ package gateway
 
 // The /api routes are what the AIxodia app's Settings screen and per-chat agent
 // settings call over the tunnel. Providers, keys and agent routes live in D1
-// (providers, sessions, state tables). The probe results are kept in memory and
+// (llm_providers, chat_sessions, system_state tables). The probe results are kept in memory and
 // reset when the daemon restarts.
 
 import (
@@ -343,12 +343,12 @@ func (g *Gateway) apiModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"providers": views})
 }
 
-const settingsStateKey = "settings"
+const settingsStateKey = "engine/settings"
 
 // savedMainModel returns the provider/model saved in settings, or ""/""
 // when nothing usable is stored.
 func (g *Gateway) savedMainModel() (string, string) {
-	rows, err := db.Select("state", db.Where{"key": settingsStateKey})
+	rows, err := db.Select("system_state", db.Where{"key": settingsStateKey})
 	if err != nil || len(rows) == 0 {
 		return "", ""
 	}
@@ -369,7 +369,7 @@ func defaultSettings() json.RawMessage {
 }
 
 func (g *Gateway) apiGetSettings(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Select("state", db.Where{"key": settingsStateKey})
+	rows, err := db.Select("system_state", db.Where{"key": settingsStateKey})
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "database_error", err.Error())
 		return
@@ -398,7 +398,7 @@ func (g *Gateway) apiPutSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := db.Query(
-		"INSERT INTO state (key, value, updated_at) VALUES (?, ?, unixepoch()) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+		"INSERT INTO system_state (key, value, updated_at) VALUES (?, ?, unixepoch()) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
 		settingsStateKey, string(raw),
 	); err != nil {
 		writeError(w, http.StatusBadGateway, "database_error", err.Error())
@@ -408,7 +408,7 @@ func (g *Gateway) apiPutSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) apiGetSessionAgent(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Select("sessions", db.Where{"id": r.PathValue("id")})
+	rows, err := db.Select("chat_sessions", db.Where{"id": r.PathValue("id")})
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "database_error", err.Error())
 		return
@@ -479,7 +479,7 @@ func (g *Gateway) apiPatchSessionAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	data := applySessionAgentPatch(body)
 	if len(data) > 0 {
-		if _, err := db.Update("sessions", data, db.Where{"id": id}); err != nil {
+		if _, err := db.Update("chat_sessions", data, db.Where{"id": id}); err != nil {
 			writeError(w, http.StatusBadGateway, "database_error", err.Error())
 			return
 		}

@@ -135,14 +135,14 @@ func (d *D1) Create(params NewSession) (*Session, error) {
 	if session.TopP != nil {
 		row["top_p"] = *session.TopP
 	}
-	if _, err := db.Insert("sessions", row); err != nil {
+	if _, err := db.Insert("chat_sessions", row); err != nil {
 		return nil, err
 	}
 	return &session, nil
 }
 
 func (d *D1) Get(id string) (*Session, error) {
-	rows, err := db.Select("sessions", db.Where{"id": id})
+	rows, err := db.Select("chat_sessions", db.Where{"id": id})
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +153,7 @@ func (d *D1) Get(id string) (*Session, error) {
 }
 
 func (d *D1) List() ([]Session, error) {
-	rows, err := db.Query("SELECT * FROM sessions ORDER BY updated_at DESC LIMIT 200")
+	rows, err := db.Query("SELECT * FROM chat_sessions ORDER BY updated_at DESC LIMIT 200")
 	if err != nil {
 		return nil, err
 	}
@@ -165,10 +165,10 @@ func (d *D1) List() ([]Session, error) {
 }
 
 func (d *D1) Delete(id string) error {
-	if err := db.Delete("turns", db.Where{"session_id": id}); err != nil {
+	if err := db.Delete("chat_turns", db.Where{"session_id": id}); err != nil {
 		return err
 	}
-	return db.Delete("sessions", db.Where{"id": id})
+	return db.Delete("chat_sessions", db.Where{"id": id})
 }
 
 func (d *D1) SaveConfig(id string, session Session) error {
@@ -180,12 +180,12 @@ func (d *D1) SaveConfig(id string, session Session) error {
 	if session.Title != "" {
 		data["title"] = session.Title
 	}
-	_, err := db.Update("sessions", data, db.Where{"id": id})
+	_, err := db.Update("chat_sessions", data, db.Where{"id": id})
 	return err
 }
 
 func (d *D1) Turns(id string) ([]Turn, error) {
-	rows, err := db.Query("SELECT * FROM turns WHERE session_id = ? ORDER BY seq ASC", id)
+	rows, err := db.Query("SELECT * FROM chat_turns WHERE session_id = ? ORDER BY seq ASC", id)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +291,7 @@ func (d *D1) AppendTurns(id string, turns []TurnInput) ([]Turn, error) {
 					now,
 				)
 			}
-			sql := "INSERT INTO turns (session_id, seq, role, text, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, reasoning_content, input_includes_cache, duration_ms, generation_ms, block, created_at) VALUES " + strings.Join(placeholders, ", ")
+			sql := "INSERT INTO chat_turns (session_id, seq, role, text, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, reasoning_content, input_includes_cache, duration_ms, generation_ms, block, created_at) VALUES " + strings.Join(placeholders, ", ")
 			if _, err := db.Query(sql, values...); err != nil {
 				lastErr = err
 				break
@@ -313,7 +313,7 @@ func (d *D1) AppendTurns(id string, turns []TurnInput) ([]Turn, error) {
 }
 
 func (d *D1) nextSeq(id string) (int, error) {
-	rows, err := db.Query("SELECT COALESCE(MAX(seq), 0) AS seq FROM turns WHERE session_id = ?", id)
+	rows, err := db.Query("SELECT COALESCE(MAX(seq), 0) AS seq FROM chat_turns WHERE session_id = ?", id)
 	if err != nil {
 		return 0, err
 	}
@@ -324,7 +324,7 @@ func (d *D1) nextSeq(id string) (int, error) {
 }
 
 func (d *D1) touch(id string) error {
-	_, err := db.Update("sessions", map[string]any{"updated_at": time.Now().Unix()}, db.Where{"id": id})
+	_, err := db.Update("chat_sessions", map[string]any{"updated_at": time.Now().Unix()}, db.Where{"id": id})
 	return err
 }
 
@@ -430,7 +430,7 @@ func boolField(row map[string]any, key string) bool {
 func EnsureTurns() {
 	// A duplicate column is the expected answer on every boot after the first,
 	// so it is not worth a line in the log; anything else is.
-	if _, err := db.Query("ALTER TABLE turns ADD COLUMN generation_ms INTEGER NOT NULL DEFAULT 0"); err != nil &&
+	if _, err := db.Query("ALTER TABLE chat_turns ADD COLUMN generation_ms INTEGER NOT NULL DEFAULT 0"); err != nil &&
 		!strings.Contains(err.Error(), "duplicate column") {
 		log.Printf("session: cannot add generation_ms: %v", err)
 	}
@@ -438,14 +438,14 @@ func EnsureTurns() {
 	// is what the next request replays on that assistant turn; without it a
 	// provider that serves one refuses the whole conversation with a
 	// missing-parameter 400.
-	if _, err := db.Query("ALTER TABLE turns ADD COLUMN reasoning_content TEXT NOT NULL DEFAULT ''"); err != nil &&
+	if _, err := db.Query("ALTER TABLE chat_turns ADD COLUMN reasoning_content TEXT NOT NULL DEFAULT ''"); err != nil &&
 		!strings.Contains(err.Error(), "duplicate column") {
 		log.Printf("session: cannot add reasoning_content: %v", err)
 	}
 	// block holds the row's display block as JSON: how the row draws, decided
 	// by the engine so new kinds of content need no app update. Old rows keep
 	// blank and the phone reads them through the role instead.
-	if _, err := db.Query("ALTER TABLE turns ADD COLUMN block TEXT NOT NULL DEFAULT ''"); err != nil &&
+	if _, err := db.Query("ALTER TABLE chat_turns ADD COLUMN block TEXT NOT NULL DEFAULT ''"); err != nil &&
 		!strings.Contains(err.Error(), "duplicate column") {
 		log.Printf("session: cannot add block: %v", err)
 	}
@@ -474,8 +474,8 @@ func (d *D1) Unfinished(limit int) ([]UnfinishedTurn, error) {
 	}
 	rows, err := db.Query(
 		`SELECT t.session_id, t.seq, t.text, t.created_at
-		   FROM turns t
-		   JOIN (SELECT session_id, MAX(seq) AS seq FROM turns
+		   FROM chat_turns t
+		   JOIN (SELECT session_id, MAX(seq) AS seq FROM chat_turns
 		          WHERE role IN ('user','assistant') GROUP BY session_id) last
 		     ON last.session_id = t.session_id AND last.seq = t.seq
 		  WHERE t.role = 'user'

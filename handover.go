@@ -15,7 +15,7 @@ import (
 
 // handoverStateKey is where a session leaves a note for the one that replaces
 // it. The key already existed; nothing wrote it, so it is defined here.
-const handoverStateKey = "handover/ready"
+const handoverStateKey = "daemon/ready"
 
 // Handover is what a new session records about itself and about the session it
 // replaced. A Kaggle kernel is killed at twelve hours whether or not it is in
@@ -63,7 +63,7 @@ func publishHandover(ctx context.Context, tunnelURL string) {
 		return
 	}
 	if _, err := db.Query(
-		"INSERT INTO state (key, value, updated_at) VALUES (?, ?, unixepoch()) "+
+		"INSERT INTO system_state (key, value, updated_at) VALUES (?, ?, unixepoch()) "+
 			"ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
 		handoverStateKey, string(payload),
 	); err != nil {
