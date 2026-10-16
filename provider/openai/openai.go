@@ -264,6 +264,11 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 			}
 			if choice.Delta.ReasoningContent != "" {
 				reasoning.WriteString(choice.Delta.ReasoningContent)
+				if req.OnReasoning != nil {
+					if err := req.OnReasoning(choice.Delta.ReasoningContent); err != nil {
+						return err
+					}
+				}
 			}
 			if choice.Delta.Content != "" && emit != nil {
 				if err := emit(choice.Delta.Content); err != nil {
@@ -512,6 +517,10 @@ type responsesResponse struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
+		Summary []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"summary"`
 		CallID    string `json:"call_id"`
 		ID        string `json:"id"`
 		Name      string `json:"name"`
@@ -697,6 +706,7 @@ func (a *Adapter) CompleteViaResponses(ctx context.Context, req *provider.Reques
 	}
 	out := &provider.Response{ID: parsed.ID, Model: parsed.Model}
 	out.Content, out.ToolCalls, out.Usage = parseResponsesOutput(parsed)
+	out.ReasoningContent = responsesReasoning(parsed)
 	if out.Content == "" && len(out.ToolCalls) == 0 {
 		return nil, fmt.Errorf("openai: empty responses output")
 	}
@@ -709,6 +719,27 @@ type responsesStreamEvent struct {
 	Delta    string             `json:"delta"`
 	ItemID   string             `json:"item_id"`
 	Response *responsesResponse `json:"response"`
+}
+
+// Only readable upstream text is displayable; encrypted reasoning is not text.
+func responsesReasoning(resp responsesResponse) string {
+	var text strings.Builder
+	for _, item := range resp.Output {
+		if item.Type != "reasoning" {
+			continue
+		}
+		for _, part := range item.Summary {
+			if part.Type == "summary_text" {
+				text.WriteString(part.Text)
+			}
+		}
+		for _, part := range item.Content {
+			if part.Type == "reasoning_text" {
+				text.WriteString(part.Text)
+			}
+		}
+	}
+	return text.String()
 }
 
 // StreamViaResponses executes req against /v1/responses with streaming,
@@ -750,6 +781,7 @@ func (a *Adapter) StreamViaResponses(ctx context.Context, req *provider.Request,
 
 	out := &provider.Response{}
 	var text strings.Builder
+	var reasoning strings.Builder
 	argBufs := map[string]*strings.Builder{}
 	callOrder := []string{}
 	callNames := map[string]string{}
@@ -767,6 +799,13 @@ func (a *Adapter) StreamViaResponses(ctx context.Context, req *provider.Request,
 			return nil
 		}
 		switch ev.Type {
+		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+			reasoning.WriteString(ev.Delta)
+			if req.OnReasoning != nil {
+				if err := req.OnReasoning(ev.Delta); err != nil {
+					return err
+				}
+			}
 		case "response.output_text.delta":
 			text.WriteString(ev.Delta)
 			if emit != nil {
@@ -832,6 +871,15 @@ func (a *Adapter) StreamViaResponses(ctx context.Context, req *provider.Request,
 	}
 	if out.Content == "" && len(out.ToolCalls) == 0 && !finished {
 		return nil, fmt.Errorf("openai: empty responses stream")
+	}
+	out.ReasoningContent = reasoning.String()
+	if out.ReasoningContent == "" && completed != nil {
+		out.ReasoningContent = responsesReasoning(*completed)
+		if out.ReasoningContent != "" && req.OnReasoning != nil {
+			if err := req.OnReasoning(out.ReasoningContent); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return out, nil
 }

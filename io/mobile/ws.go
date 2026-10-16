@@ -19,6 +19,8 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+
+	"ai-engine/session"
 )
 
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -26,12 +28,19 @@ const maxFrame = 1 << 20
 
 // ChatFunc answers one user message in a session, calling onDelta for each
 // streamed piece and onTool for each live tool activity, and returns the
-// full reply plus token counts. It must stop when ctx is cancelled.
-// ChatFunc answers one message. Attachments are the files the phone uploaded
+// committed turn data. It must stop when ctx is cancelled.
+// Attachments are the files the phone uploaded
 // before sending it: the pictures among them go to the model as pictures, and
 // every one of them is still named in the text for the model that cannot take
 // them or for a later turn that reads this back from the database.
-type ChatFunc func(ctx context.Context, sessionID, text string, attachments []Attachment, onDelta func(string), onTool func(ToolEvent)) (reply string, inTokens, outTokens int, err error)
+type ChatFunc func(ctx context.Context, sessionID, text string, attachments []Attachment, onDelta func(string), onTool func(ToolEvent)) (ChatResult, error)
+
+// ChatResult carries committed rows, not a socket-local sequence counter.
+type ChatResult struct {
+	Answer      session.Turn
+	Turns       []session.Turn
+	TurnsSynced bool
+}
 
 // Attachment is one uploaded file as the phone describes it.
 type Attachment struct {
@@ -73,20 +82,30 @@ type attachment struct {
 }
 
 type outFrame struct {
-	Source       string          `json:"source"`
-	SessionID    string          `json:"session_id"`
-	Kind         string          `json:"kind"`
-	Text         string          `json:"text,omitempty"`
-	Role         string          `json:"role,omitempty"`
-	Agent        string          `json:"agent,omitempty"`
-	ClientMsgID  string          `json:"client_msg_id,omitempty"`
-	Stage        string          `json:"stage,omitempty"`
-	ToolCall     *toolCallJSON   `json:"tool_call,omitempty"`
-	ToolResult   *toolResultJSON `json:"tool_result,omitempty"`
-	ToolDuration int64           `json:"tool_duration_ms,omitempty"`
-	Seq          int64           `json:"seq,omitempty"`
-	InputTokens  int             `json:"input_tokens,omitempty"`
-	OutputTokens int             `json:"output_tokens,omitempty"`
+	Source             string          `json:"source"`
+	SessionID          string          `json:"session_id"`
+	Kind               string          `json:"kind"`
+	Text               string          `json:"text,omitempty"`
+	Role               string          `json:"role,omitempty"`
+	Agent              string          `json:"agent,omitempty"`
+	ClientMsgID        string          `json:"client_msg_id,omitempty"`
+	Stage              string          `json:"stage,omitempty"`
+	ToolCall           *toolCallJSON   `json:"tool_call,omitempty"`
+	ToolResult         *toolResultJSON `json:"tool_result,omitempty"`
+	ToolDuration       int64           `json:"tool_duration_ms,omitempty"`
+	Seq                int64           `json:"seq,omitempty"`
+	InputTokens        int             `json:"input_tokens,omitempty"`
+	OutputTokens       int             `json:"output_tokens,omitempty"`
+	CacheReadTokens    int             `json:"cache_read_tokens"`
+	CacheWriteTokens   int             `json:"cache_write_tokens"`
+	ReasoningTokens    int             `json:"reasoning_tokens"`
+	ReasoningContent   string          `json:"reasoning_content,omitempty"`
+	InputIncludesCache bool            `json:"input_includes_cache"`
+	Model              string          `json:"model,omitempty"`
+	DurationMS         int64           `json:"duration_ms,omitempty"`
+	GenerationMS       int64           `json:"generation_ms,omitempty"`
+	Turns              []session.Turn  `json:"turns,omitempty"`
+	TurnsSynced        bool            `json:"turns_synced"`
 }
 
 type toolCallJSON struct {
@@ -170,7 +189,6 @@ func Handler(token string, chat ChatFunc) http.Handler {
 type peer struct {
 	conn    net.Conn
 	mu      sync.Mutex
-	seq     int64
 	cancels map[string]context.CancelFunc
 }
 
@@ -356,23 +374,25 @@ func (p *peer) answer(ctx context.Context, cancel context.CancelFunc, key string
 		}
 		_ = p.send(frame)
 	}
-	reply, inTok, outTok, err := chat(ctx, in.SessionID, text, attachmentsOf(in.Attachments), onDelta, onTool)
+	result, err := chat(ctx, in.SessionID, text, attachmentsOf(in.Attachments), onDelta, onTool)
 	if ctx.Err() != nil {
-		_ = p.send(outFrame{Kind: "done", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID, Text: "cancelled"})
+		_ = p.send(outFrame{Kind: "done", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID, Stage: "cancelled", Turns: result.Turns, TurnsSynced: result.TurnsSynced})
 		return
 	}
 	if err != nil {
 		log.Printf("mobile: chat: %v", err)
-		_ = p.send(outFrame{Kind: "error", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID, Text: err.Error()})
+		_ = p.send(outFrame{Kind: "error", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID, Text: err.Error(), Turns: result.Turns, TurnsSynced: result.TurnsSynced})
 		return
 	}
-	p.mu.Lock()
-	p.seq++
-	seq := p.seq
-	p.mu.Unlock()
+	answer := result.Answer
 	_ = p.send(outFrame{Kind: "message", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID,
-		Text: reply, Role: "model", Agent: "main", Seq: seq, InputTokens: inTok, OutputTokens: outTok})
-	_ = p.send(outFrame{Kind: "done", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID, Seq: seq})
+		Text: answer.Text, Role: "model", Agent: "main", Seq: int64(answer.Seq),
+		InputTokens: answer.InputTokens, OutputTokens: answer.OutputTokens,
+		CacheReadTokens: answer.CacheReadTokens, CacheWriteTokens: answer.CacheWriteTokens,
+		ReasoningTokens: answer.ReasoningTokens, ReasoningContent: answer.ReasoningContent,
+		InputIncludesCache: answer.InputIncludesCache, Model: answer.Model,
+		DurationMS: answer.DurationMS, GenerationMS: answer.GenerationMS})
+	_ = p.send(outFrame{Kind: "done", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID, Seq: int64(answer.Seq), Turns: result.Turns, TurnsSynced: result.TurnsSynced})
 }
 
 func readFrame(r *bufio.Reader) (byte, []byte, error) {

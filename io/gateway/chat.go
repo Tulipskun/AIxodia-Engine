@@ -66,8 +66,11 @@ type completionOptions struct {
 	onToolResult func(call provider.ToolCall, text string, durationMs int64, isError bool)
 	// onTrail is handed the whole trail so far after every tool round, and trail
 	// is where those steps get stored. Both are nil when nothing is persisted.
-	onTrail func(trail []provider.Message)
-	trail   *trailWriter
+	onTrail     func(trail []provider.Message)
+	trail       *trailWriter
+	onStored    func([]session.Turn, error)
+	onReasoning func(string) error
+	reusedUser  *session.Turn
 }
 
 // trailWriter stores tool steps as each round finishes instead of once the
@@ -75,9 +78,12 @@ type completionOptions struct {
 // ran (a shell command, say) would otherwise leave no record of it: the trail
 // only exists in a response that never arrives.
 type trailWriter struct {
-	g     *Gateway
-	id    string
-	saved int
+	g          *Gateway
+	id         string
+	saved      int
+	onStored   func([]session.Turn, error)
+	pending    []session.TurnInput
+	pendingEnd int
 }
 
 func (g *Gateway) newTrailWriter(stored *session.Session) *trailWriter {
@@ -93,14 +99,26 @@ func (t *trailWriter) flush(trail []provider.Message) {
 	if t == nil || t.saved >= len(trail) {
 		return
 	}
-	turns := session.TrailTurns(trail[t.saved:])
-	if len(turns) > 0 {
-		if err := t.g.sessions.AppendTurns(t.id, turns); err != nil {
+	if t.pending == nil {
+		t.pending = session.TrailTurns(trail[t.saved:])
+		t.pendingEnd = len(trail)
+	}
+	if len(t.pending) > 0 {
+		rows, err := t.g.sessions.AppendTurns(t.id, t.pending)
+		t.pending = t.pending[len(rows):]
+		if t.onStored != nil {
+			t.onStored(rows, err)
+		}
+		if err != nil {
 			log.Printf("gateway: save tool steps: %v", err)
 			return
 		}
 	}
-	t.saved = len(trail)
+	t.saved = t.pendingEnd
+	t.pending = nil
+	if t.saved < len(trail) {
+		t.flush(trail)
+	}
 }
 
 // rest is the part of trail that flush has not stored.
@@ -152,12 +170,15 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	history, delta := incoming, incoming
+	var savedTurns []session.Turn
 	if stored != nil {
-		saved, err := g.sessions.History(stored.ID)
+		var err error
+		savedTurns, err = g.sessions.Turns(stored.ID)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "database_error", err.Error())
 			return
 		}
+		saved := session.MessagesFromTurns(savedTurns)
 		if body.Append {
 			history, delta = appendDelta(saved, incoming)
 		} else {
@@ -186,6 +207,14 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 		user:        body.User,
 		sessionID:   sessionIDOf(stored),
 	}
+	if len(delta) == 0 && len(incoming) == 1 && incoming[0].Role == "user" {
+		for i := len(savedTurns) - 1; i >= 0; i-- {
+			if savedTurns[i].Role == "user" && savedTurns[i].Text == incoming[0].Content {
+				options.reusedUser = &savedTurns[i]
+				break
+			}
+		}
+	}
 	fallback := g.fallbackRoute(stored)
 
 	if body.Stream {
@@ -197,7 +226,7 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 
 func (g *Gateway) chatOnce(w http.ResponseWriter, r *http.Request, stored *session.Session, primary route, fallback *route, history, delta []provider.Message, options completionOptions) {
 	started := time.Now()
-	g.persistUserBefore(stored, history, delta)
+	g.persistUserBefore(stored, history, delta, nil)
 	options.trail = g.newTrailWriter(stored)
 	options.onTrail = options.trail.flush
 	resp, err := g.complete(r.Context(), primary, fallback, history, options)
@@ -269,12 +298,32 @@ func (g *Gateway) chatStream(w http.ResponseWriter, r *http.Request, stored *ses
 	}
 
 	started := time.Now()
-	g.persistUserBefore(stored, history, delta)
+	turnsSynced := stored != nil
+	options.onStored = func(rows []session.Turn, err error) {
+		if err != nil {
+			turnsSynced = false
+		}
+		if len(rows) > 0 {
+			_ = writeSSE(w, flusher, map[string]any{"turns": rows})
+		}
+	}
+	if options.reusedUser != nil {
+		options.onStored([]session.Turn{*options.reusedUser}, nil)
+	}
+	g.persistUserBefore(stored, history, delta, options.onStored)
 	options.trail = g.newTrailWriter(stored)
+	if options.trail != nil {
+		options.trail.onStored = options.onStored
+	}
 	options.onTrail = options.trail.flush
 	options.onToolCall = func(call provider.ToolCall) {
 		_ = writeSSE(w, flusher, map[string]any{"tool_event": map[string]any{
 			"stage": "tool_call", "name": call.Name, "call_id": call.ID, "arguments": call.Arguments,
+		}})
+	}
+	options.onReasoning = func(text string) error {
+		return writeSSE(w, flusher, map[string]any{"tool_event": map[string]any{
+			"stage": "reasoning", "text": text,
 		}})
 	}
 	options.onToolResult = func(call provider.ToolCall, text string, durationMs int64, isError bool) {
@@ -290,18 +339,20 @@ func (g *Gateway) chatStream(w http.ResponseWriter, r *http.Request, stored *ses
 		writeSSEDone(w, flusher)
 		return
 	}
-	g.persist(stored, delta, resp, options, time.Since(started).Milliseconds())
+	answer := g.persist(stored, delta, resp, options, time.Since(started).Milliseconds())
 
 	finish := resp.FinishReason
 	if finish == "" {
 		finish = "stop"
 	}
 	final := map[string]any{
-		"id":       id,
-		"object":   "chat.completion.chunk",
-		"created":  created,
-		"model":    resp.Model,
-		"provider": resp.Provider,
+		"turn":         answer,
+		"turns_synced": turnsSynced,
+		"id":           id,
+		"object":       "chat.completion.chunk",
+		"created":      created,
+		"model":        resp.Model,
+		"provider":     resp.Provider,
 		"choices": []map[string]any{
 			{
 				"index":         0,
@@ -310,9 +361,13 @@ func (g *Gateway) chatStream(w http.ResponseWriter, r *http.Request, stored *ses
 			},
 		},
 		"usage": map[string]any{
-			"prompt_tokens":     resp.Usage.PromptTokens,
-			"completion_tokens": resp.Usage.CompletionTokens,
-			"total_tokens":      resp.Usage.TotalTokens,
+			"prompt_tokens":        resp.Usage.PromptTokens,
+			"completion_tokens":    resp.Usage.CompletionTokens,
+			"total_tokens":         resp.Usage.TotalTokens,
+			"cache_read_tokens":    resp.Usage.CacheReadTokens,
+			"cache_write_tokens":   resp.Usage.CacheWriteTokens,
+			"reasoning_tokens":     resp.Usage.ReasoningTokens,
+			"input_includes_cache": resp.Usage.InputIncludesCache,
 		},
 	}
 	_ = writeSSE(w, flusher, final)
@@ -444,6 +499,7 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 			Tools:       options.tools,
 			User:        options.user,
 			SessionID:   options.sessionID,
+			OnReasoning: options.onReasoning,
 		}
 
 		callStarted := time.Now()
@@ -533,6 +589,7 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 			Stream:      options.stream,
 			User:        options.user,
 			SessionID:   options.sessionID,
+			OnReasoning: options.onReasoning,
 		}
 		callStarted := time.Now()
 		resp, err := g.call(ctx, current, request, emit, canRetry)
@@ -684,7 +741,7 @@ func (g *Gateway) selectTools(names *[]string) ([]provider.ToolDef, error) {
 // so a failed send still leaves its question in history instead of vanishing.
 // A question already recorded by an earlier failed attempt is not stacked
 // again: repeats reuse the recorded row.
-func (g *Gateway) persistUserBefore(stored *session.Session, history, delta []provider.Message) {
+func (g *Gateway) persistUserBefore(stored *session.Session, history, delta []provider.Message, onStored func([]session.Turn, error)) {
 	if stored == nil || len(delta) == 0 {
 		return
 	}
@@ -707,7 +764,11 @@ func (g *Gateway) persistUserBefore(stored *session.Session, history, delta []pr
 	if len(turns) == 0 {
 		return
 	}
-	if err := g.sessions.AppendTurns(stored.ID, turns); err != nil {
+	rows, err := g.sessions.AppendTurns(stored.ID, turns)
+	if onStored != nil {
+		onStored(rows, err)
+	}
+	if err != nil {
 		log.Printf("gateway: save failed delta: %v", err)
 	}
 }
@@ -731,11 +792,7 @@ func isRepeatOfTail(recorded, delta []provider.Message) bool {
 	return false
 }
 
-func (g *Gateway) persist(stored *session.Session, delta []provider.Message, resp *provider.Response, options completionOptions, duration int64) {
-	if stored == nil {
-		return
-	}
-
+func (g *Gateway) persist(stored *session.Session, delta []provider.Message, resp *provider.Response, options completionOptions, duration int64) session.Turn {
 	// The incoming question has already been persisted before upstream was
 	// called, so here we only append the assistant reply (and the tool trail
 	// that belongs to it). Appending it again would duplicate it.
@@ -747,6 +804,10 @@ func (g *Gateway) persist(stored *session.Session, delta []provider.Message, res
 		}
 	}
 	turns = append(turns, session.TrailTurns(options.trail.rest(resp.Trail))...)
+	if options.trail != nil && options.trail.pending != nil {
+		turns = append([]session.TurnInput(nil), options.trail.pending...)
+		turns = append(turns, session.TrailTurns(resp.Trail[options.trail.pendingEnd:])...)
+	}
 	generation := resp.GenerationMS
 	if generation <= 0 || generation > duration {
 		// Either the provider reported no time of its own, or it reported more
@@ -769,7 +830,18 @@ func (g *Gateway) persist(stored *session.Session, delta []provider.Message, res
 		GenerationMS:       generation,
 	})
 
-	if err := g.sessions.AppendTurns(stored.ID, turns); err != nil {
+	answer := session.StoredTurn(sessionIDOf(stored), 0, time.Now().Unix(), turns[len(turns)-1])
+	if stored == nil {
+		return answer
+	}
+	rows, err := g.sessions.AppendTurns(stored.ID, turns)
+	if options.onStored != nil {
+		options.onStored(rows, err)
+	}
+	if len(rows) == len(turns) {
+		answer = rows[len(rows)-1]
+	}
+	if err != nil {
 		log.Printf("gateway: save turns: %v", err)
 	}
 
@@ -784,6 +856,7 @@ func (g *Gateway) persist(stored *session.Session, delta []provider.Message, res
 			log.Printf("gateway: save session config: %v", err)
 		}
 	}
+	return answer
 }
 
 // mergeHistory matches the client's messages against the stored conversation.

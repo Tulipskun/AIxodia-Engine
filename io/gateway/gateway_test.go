@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -104,9 +105,10 @@ func (m *memStore) History(id string) ([]provider.Message, error) {
 	return session.MessagesFromTurns(turns), nil
 }
 
-func (m *memStore) AppendTurns(id string, turns []session.TurnInput) error {
+func (m *memStore) AppendTurns(id string, turns []session.TurnInput) ([]session.Turn, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	start := len(m.turns[id])
 	for _, turn := range turns {
 		m.turns[id] = append(m.turns[id], session.Turn{
 			SessionID:          id,
@@ -125,7 +127,7 @@ func (m *memStore) AppendTurns(id string, turns []session.TurnInput) error {
 			ReasoningContent:   turn.ReasoningContent,
 		})
 	}
-	return nil
+	return append([]session.Turn(nil), m.turns[id][start:]...), nil
 }
 
 func fakeUpstream(t *testing.T) *httptest.Server {
@@ -303,6 +305,118 @@ func TestChatCompletionStreams(t *testing.T) {
 	}
 	if strings.Count(body, "\n\n") < 3 {
 		t.Errorf("expected several SSE events:\n%s", body)
+	}
+}
+
+func TestStreamPushesAllCommittedTurnsWithAuthoritativeSeqs(t *testing.T) {
+	store := newMemStore()
+	g, _ := newTestGateway(t, store)
+	postJSON(t, g.Handler(), "/v1/sessions", `{"title":"t","model":"mock/test-model"}`)
+	rec := postJSON(t, g.Handler(), "/v1/chat/completions", `{"session_id":"s1","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	var pushed []session.Turn
+	var answer session.Turn
+	var synced bool
+	for _, event := range strings.Split(rec.Body.String(), "\n\n") {
+		var frame struct {
+			Turns  []session.Turn `json:"turns"`
+			Turn   session.Turn   `json:"turn"`
+			Synced bool           `json:"turns_synced"`
+		}
+		if json.Unmarshal([]byte(strings.TrimPrefix(event, "data: ")), &frame) != nil {
+			continue
+		}
+		pushed = append(pushed, frame.Turns...)
+		if frame.Turn.Seq > 0 {
+			answer, synced = frame.Turn, frame.Synced
+		}
+	}
+	stored, _ := store.Turns("s1")
+	if !synced || len(pushed) != len(stored) || len(stored) < 4 {
+		t.Fatalf("synced=%v pushed=%+v stored=%+v", synced, pushed, stored)
+	}
+	for i := range stored {
+		if pushed[i] != stored[i] {
+			t.Fatalf("row %d mismatch: %+v != %+v", i, pushed[i], stored[i])
+		}
+	}
+	if answer != stored[len(stored)-1] {
+		t.Fatalf("final answer differs from stored row: %+v", answer)
+	}
+}
+
+func TestStreamPushesCacheUsageAndActualReasoning(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "data: "+`{"choices":[{"delta":{"reasoning_content":"real thought"}}]}`+"\n\n")
+		fmt.Fprint(w, "data: "+`{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_tokens_details":{"cached_tokens":80},"completion_tokens_details":{"reasoning_tokens":2}}}`+"\n\n")
+	}))
+	defer upstream.Close()
+	config.Providers = []config.Provider{{Name: "mock", APIURL: upstream.URL, Keys: []string{"key"}, Adapter: "openai"}}
+	store := newMemStore()
+	g := New(store, registry.New(), tools.Builtin())
+	postJSON(t, g.Handler(), "/v1/sessions", `{"model":"mock/test-model"}`)
+	rec := postJSON(t, g.Handler(), "/v1/chat/completions", `{"session_id":"s1","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	if !strings.Contains(rec.Body.String(), `"stage":"reasoning"`) || !strings.Contains(rec.Body.String(), `"cache_read_tokens":80`) || !strings.Contains(rec.Body.String(), `"turns_synced":true`) {
+		t.Fatalf("missing live fields: %s", rec.Body.String())
+	}
+	turns, _ := store.Turns("s1")
+	last := turns[len(turns)-1]
+	if last.ReasoningContent != "real thought" || last.CacheReadTokens != 80 || last.ReasoningTokens != 2 || !last.InputIncludesCache {
+		t.Fatalf("bad stored footer: %+v", last)
+	}
+}
+
+func TestRetryStreamIncludesAlreadyRecordedUserWithoutReadingHistoryTwice(t *testing.T) {
+	store := newMemStore()
+	g, _ := newTestGateway(t, store)
+	postJSON(t, g.Handler(), "/v1/sessions", `{"model":"mock/test-model"}`)
+	store.AppendTurns("s1", []session.TurnInput{{Role: "user", Text: "hi"}})
+	rec := postJSON(t, g.Handler(), "/v1/chat/completions", `{"session_id":"s1","append":true,"messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	if !strings.Contains(rec.Body.String(), `"role":"user"`) || !strings.Contains(rec.Body.String(), `"seq":1`) {
+		t.Fatalf("retry did not push existing user: %s", rec.Body.String())
+	}
+	stored, _ := store.Turns("s1")
+	users := 0
+	for _, row := range stored {
+		if row.Role == "user" {
+			users++
+		}
+	}
+	if users != 1 {
+		t.Fatalf("retry duplicated user: %+v", stored)
+	}
+}
+
+type partialStore struct {
+	*memStore
+	failed bool
+}
+
+func (s *partialStore) AppendTurns(id string, turns []session.TurnInput) ([]session.Turn, error) {
+	if !s.failed && len(turns) > 1 {
+		s.failed = true
+		rows, _ := s.memStore.AppendTurns(id, turns[:1])
+		return rows, fmt.Errorf("later chunk failed")
+	}
+	return s.memStore.AppendTurns(id, turns)
+}
+
+func TestPartialToolWriteRetriesOnlyTheUnwrittenSuffix(t *testing.T) {
+	store := &partialStore{memStore: newMemStore()}
+	g := &Gateway{sessions: store}
+	writer := g.newTrailWriter(&session.Session{ID: "s1"})
+	trail := []provider.Message{
+		{Role: "assistant", Content: "narration", ToolCalls: []provider.ToolCall{{ID: "c1", Name: "read", Arguments: "{}"}, {ID: "c2", Name: "read", Arguments: "{}"}}},
+		{Role: "tool", ToolCallID: "c1", ToolName: "read", Content: "first"},
+		{Role: "tool", ToolCallID: "c2", ToolName: "read", Content: "second"},
+	}
+	writer.flush(trail)
+	if len(writer.pending) != 4 {
+		t.Fatalf("pending rows = %d, want 4", len(writer.pending))
+	}
+	g.persist(&session.Session{ID: "s1"}, nil, &provider.Response{Content: "answer", Trail: trail}, completionOptions{trail: writer}, 100)
+	rows, _ := store.Turns("s1")
+	if len(rows) != 6 || rows[0].Text != "narration" || rows[5].Text != "answer" {
+		t.Fatalf("partial retry duplicated/lost rows: %+v", rows)
 	}
 }
 
@@ -712,7 +826,7 @@ func TestTurnStoresBothTheWaitAndTheWrite(t *testing.T) {
 		GenerationMS: 4200,
 		Usage:        provider.Usage{PromptTokens: 10, CompletionTokens: 84},
 	}
-	g.persistUserBefore(&session.Session{ID: "s1"}, nil, []provider.Message{{Role: "user", Content: "ถาม"}})
+	g.persistUserBefore(&session.Session{ID: "s1"}, nil, []provider.Message{{Role: "user", Content: "ถาม"}}, nil)
 	g.persist(&session.Session{ID: "s1"}, []provider.Message{{Role: "user", Content: "ถาม"}}, resp, completionOptions{}, 9000)
 
 	if len(store.turns["s1"]) != 2 {
@@ -735,7 +849,7 @@ func TestGenerationFallsBackToTheTurn(t *testing.T) {
 	g := &Gateway{sessions: store}
 
 	resp := &provider.Response{Content: "ตอบแล้ว", GenerationMS: 60000, Usage: provider.Usage{CompletionTokens: 10}}
-	g.persistUserBefore(&session.Session{ID: "s2"}, nil, []provider.Message{{Role: "user", Content: "ถาม"}})
+	g.persistUserBefore(&session.Session{ID: "s2"}, nil, []provider.Message{{Role: "user", Content: "ถาม"}}, nil)
 	g.persist(&session.Session{ID: "s2"}, []provider.Message{{Role: "user", Content: "ถาม"}}, resp, completionOptions{}, 2500)
 
 	if got := store.turns["s2"][1].GenerationMS; got != 2500 {

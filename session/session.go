@@ -221,20 +221,36 @@ func (d *D1) History(id string) ([]provider.Message, error) {
 // round-trips instead of N.
 const maxTurnsPerStatement = 6
 
-func (d *D1) AppendTurns(id string, turns []TurnInput) error {
-	if len(turns) == 0 {
-		return nil
+// StoredTurn describes the exact row inserted, without another history query.
+func StoredTurn(id string, seq int, createdAt int64, input TurnInput) Turn {
+	return Turn{
+		SessionID: id, Seq: seq, CreatedAt: createdAt, Role: input.Role,
+		Text: input.Text, Model: input.Model, InputTokens: input.InputTokens,
+		OutputTokens: input.OutputTokens, CacheReadTokens: input.CacheReadTokens,
+		CacheWriteTokens: input.CacheWriteTokens, ReasoningTokens: input.ReasoningTokens,
+		ReasoningContent: input.ReasoningContent, InputIncludesCache: input.InputIncludesCache,
+		DurationMS: input.DurationMS, GenerationMS: input.GenerationMS,
 	}
+}
+
+func (d *D1) AppendTurns(id string, turns []TurnInput) ([]Turn, error) {
+	if len(turns) == 0 {
+		return nil, nil
+	}
+	var saved []Turn
 	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
+	// Retry only the unwritten suffix. Replaying a successful chunk used to
+	// duplicate it when a later INSERT failed.
+	for attempt := 0; attempt < 3 && len(saved) < len(turns); attempt++ {
 		seq, err := d.nextSeq(id)
 		if err != nil {
-			return err
+			return saved, err
 		}
 
 		now := time.Now().Unix()
+		base := len(saved)
 		lastErr = nil
-		for start := 0; start < len(turns); start += maxTurnsPerStatement {
+		for start := base; start < len(turns); start += maxTurnsPerStatement {
 			end := start + maxTurnsPerStatement
 			if end > len(turns) {
 				end = len(turns)
@@ -247,7 +263,7 @@ func (d *D1) AppendTurns(id string, turns []TurnInput) error {
 				placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 				values = append(values,
 					id,
-					seq+start+i,
+					seq+start-base+i,
 					turn.Role,
 					turn.Text,
 					turn.Model,
@@ -268,13 +284,20 @@ func (d *D1) AppendTurns(id string, turns []TurnInput) error {
 				lastErr = err
 				break
 			}
+			for i, turn := range chunk {
+				saved = append(saved, StoredTurn(id, seq+start-base+i, now, turn))
+			}
 		}
 		if lastErr != nil {
 			continue
 		}
-		return d.touch(id)
+		// The rows are committed even if updating the session timestamp fails.
+		if err := d.touch(id); err != nil {
+			log.Printf("session: touch after append: %v", err)
+		}
+		return saved, nil
 	}
-	return lastErr
+	return saved, lastErr
 }
 
 func (d *D1) nextSeq(id string) (int, error) {

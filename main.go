@@ -201,7 +201,8 @@ func startTunnel(ctx context.Context) (string, error) {
 // otherwise the agent default — without this every chat is answered with
 // the default even after the user pins another model mid-session.
 func chatViaGateway(h http.Handler, model string) mobile.ChatFunc {
-	return func(ctx context.Context, sessionID, text string, attachments []mobile.Attachment, onDelta func(string), onTool func(mobile.ToolEvent)) (string, int, int, error) {
+	return func(ctx context.Context, sessionID, text string, attachments []mobile.Attachment, onDelta func(string), onTool func(mobile.ToolEvent)) (mobile.ChatResult, error) {
+		var result mobile.ChatResult
 		// The pictures among the attachments are named to the gateway, which
 		// loads them and sends them as pictures. It cannot do that from the text
 		// alone: the note lists paths, and a path is not a picture.
@@ -221,7 +222,7 @@ func chatViaGateway(h http.Handler, model string) mobile.ChatFunc {
 			"attachments": payload,
 		})
 		if err != nil {
-			return "", 0, 0, err
+			return result, err
 		}
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body)).WithContext(ctx)
 		req.Header.Set("Content-Type", "application/json")
@@ -241,7 +242,10 @@ func chatViaGateway(h http.Handler, model string) mobile.ChatFunc {
 				return
 			}
 			var ev struct {
-				Choices []struct {
+				Turns       []session.Turn `json:"turns"`
+				Turn        *session.Turn  `json:"turn"`
+				TurnsSynced bool           `json:"turns_synced"`
+				Choices     []struct {
 					Delta struct {
 						Content string `json:"content"`
 					} `json:"delta"`
@@ -256,6 +260,11 @@ func chatViaGateway(h http.Handler, model string) mobile.ChatFunc {
 			}
 			if err := json.Unmarshal(data, &ev); err != nil {
 				return
+			}
+			result.Turns = append(result.Turns, ev.Turns...)
+			if ev.Turn != nil {
+				result.Answer = *ev.Turn
+				result.TurnsSynced = ev.TurnsSynced
 			}
 			if ev.Error != nil {
 				streamErr = ev.Error.Message
@@ -273,12 +282,16 @@ func chatViaGateway(h http.Handler, model string) mobile.ChatFunc {
 		}
 		h.ServeHTTP(sw, req)
 		if sw.status != http.StatusOK {
-			return "", 0, 0, fmt.Errorf("chat %d: %s", sw.status, strings.TrimSpace(sw.raw.String()))
+			return result, fmt.Errorf("chat %d: %s", sw.status, strings.TrimSpace(sw.raw.String()))
 		}
 		if streamErr != "" {
-			return "", 0, 0, fmt.Errorf("chat: %s", streamErr)
+			return result, fmt.Errorf("chat: %s", streamErr)
 		}
-		return full.String(), inTok, outTok, nil
+		if result.Answer.Text == "" && result.Answer.Seq == 0 {
+			result.Answer.Text = full.String()
+			result.Answer.InputTokens, result.Answer.OutputTokens = inTok, outTok
+		}
+		return result, nil
 	}
 }
 

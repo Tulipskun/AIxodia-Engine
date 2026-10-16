@@ -65,6 +65,8 @@ type Request struct {
 	Stream      bool
 	Tools       []ToolDef
 	User        string
+	// OnReasoning receives only reasoning text actually exposed by upstream.
+	OnReasoning func(string) error
 }
 
 type Response struct {

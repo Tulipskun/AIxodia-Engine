@@ -31,7 +31,7 @@ const (
 
 // Version is the release tag, baked in at build time. Bump on every release
 // so a live service can be identified via GET /healthz.
-const Version = "v1.131"
+const Version = "v1.132"
 
 type SessionStore interface {
 	Create(params session.NewSession) (*session.Session, error)
@@ -41,7 +41,7 @@ type SessionStore interface {
 	SaveConfig(id string, saved session.Session) error
 	Turns(id string) ([]session.Turn, error)
 	History(id string) ([]provider.Message, error)
-	AppendTurns(id string, turns []session.TurnInput) error
+	AppendTurns(id string, turns []session.TurnInput) ([]session.Turn, error)
 }
 
 type Gateway struct {

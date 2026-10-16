@@ -1,6 +1,7 @@
 package mobile
 
 import (
+	"ai-engine/session"
 	"bufio"
 	"context"
 	"crypto/rand"
@@ -16,10 +17,45 @@ import (
 	"time"
 )
 
-func fakeChat(ctx context.Context, sessionID, text string, attachments []Attachment, onDelta func(string), onTool func(ToolEvent)) (string, int, int, error) {
+func fakeChat(ctx context.Context, sessionID, text string, attachments []Attachment, onDelta func(string), onTool func(ToolEvent)) (ChatResult, error) {
 	onDelta("echo: ")
 	onDelta(text)
-	return "echo: " + text, 3, 4, nil
+	return ChatResult{Answer: session.Turn{Text: "echo: " + text, InputTokens: 3, OutputTokens: 4}}, nil
+}
+
+func TestClosingFramesCarryActualSeqAndFullTurnBatch(t *testing.T) {
+	answer := session.Turn{SessionID: "s1", Seq: 42, Role: "assistant", Text: "answer", Model: "big-pickle",
+		InputTokens: 100, OutputTokens: 5, CacheReadTokens: 80, CacheWriteTokens: 2,
+		ReasoningTokens: 3, ReasoningContent: "real reasoning", InputIncludesCache: true,
+		DurationMS: 9000, GenerationMS: 4000, CreatedAt: 123}
+	chat := func(ctx context.Context, sid, text string, a []Attachment, delta func(string), tool func(ToolEvent)) (ChatResult, error) {
+		return ChatResult{Answer: answer, Turns: []session.Turn{{SessionID: "s1", Seq: 40, Role: "user", Text: text}, answer}, TurnsSynced: true}, nil
+	}
+	srv := httptest.NewServer(Handler("good", chat))
+	defer srv.Close()
+	conn, r, _ := dialWS(t, srv, "good")
+	defer conn.Close()
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	sendMasked(t, conn, []byte(`{"type":"message","session_id":"s1","client_msg_id":"c1","content":[{"text":"hi"}]}`))
+	for {
+		_, payload, err := readFrame(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var f outFrame
+		if err := json.Unmarshal(payload, &f); err != nil {
+			t.Fatal(err)
+		}
+		if f.Kind == "message" && (f.Seq != 42 || f.CacheReadTokens != 80 || f.CacheWriteTokens != 2 || f.ReasoningTokens != 3 || !f.InputIncludesCache || f.ReasoningContent != "real reasoning" || f.DurationMS != 9000 || f.GenerationMS != 4000 || f.Model != "big-pickle") {
+			t.Fatalf("incomplete message: %+v", f)
+		}
+		if f.Kind == "done" {
+			if f.Seq != 42 || !f.TurnsSynced || len(f.Turns) != 2 || f.Turns[1] != answer {
+				t.Fatalf("bad done: %+v", f)
+			}
+			break
+		}
+	}
 }
 
 func dialWS(t *testing.T, srv *httptest.Server, token string) (net.Conn, *bufio.Reader, int) {
@@ -125,15 +161,15 @@ func sendClose(t *testing.T, conn net.Conn) {
 // parkedChat is a turn that waits to be released, so a test can decide when it
 // finishes and see whether it was cancelled instead.
 func parkedChat(started chan<- struct{}, release <-chan struct{}, finished chan<- error) ChatFunc {
-	return func(ctx context.Context, sessionID, text string, attachments []Attachment, onDelta func(string), onTool func(ToolEvent)) (string, int, int, error) {
+	return func(ctx context.Context, sessionID, text string, attachments []Attachment, onDelta func(string), onTool func(ToolEvent)) (ChatResult, error) {
 		close(started)
 		select {
 		case <-release:
 			finished <- nil
-			return "answered", 0, 0, nil
+			return ChatResult{Answer: session.Turn{Text: "answered"}}, nil
 		case <-ctx.Done():
 			finished <- ctx.Err()
-			return "", 0, 0, ctx.Err()
+			return ChatResult{}, ctx.Err()
 		}
 	}
 }
