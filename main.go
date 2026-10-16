@@ -41,7 +41,7 @@ func main() {
 		log.Fatal("CF_TOKEN is invalid")
 	}
 
-	// A newer engine (started later) owns the `tunnel` row. If one is already
+	// A newer engine (started later) owns the `daemon/*` keys. If one is already
 	// running, this older instance exits instead of fighting it.
 	if newer, err := newerDaemonRunning(startedAt); err != nil {
 		log.Printf("guard: %v", err)
@@ -101,11 +101,11 @@ func main() {
 	if os.Getenv("AIXODIA_PUBLISH") == "0" {
 		log.Printf("local test mode: tunnel not published to D1")
 	} else {
-		if err := db.SaveTunnel(url, versionString(), time.Now().Unix()); err != nil {
-			log.Fatalf("save tunnel: %v", err)
+		if err := db.SaveDaemon(url, versionString(), time.Now().Unix()); err != nil {
+			log.Fatalf("save daemon: %v", err)
 		}
-		log.Print("tunnel url saved")
-		// The note is written after the tunnel row so it names a URL that is
+		log.Print("daemon url saved")
+		// The note is written after the daemon keys so it names a URL that is
 		// already reachable, and before the heartbeat so the record of this
 		// session exists even if the next line fails.
 		publishHandover(ctx, url)
@@ -385,9 +385,9 @@ var startedAt = time.Now().Unix()
 
 const versionTag = "ai-engine/1.1"
 
-// startHeartbeat keeps the single `tunnel` row current so the app can find
+// startHeartbeat keeps the daemon keys current so the app can find
 // this daemon and read its uptime. Before each write it checks whether a newer
-// engine has taken the row; if so it calls stop so this older instance shuts
+// engine has taken them; if so it calls stop so this older instance shuts
 // down.
 func startHeartbeat(ctx context.Context, stop context.CancelFunc) {
 	beat := func() bool {
@@ -400,7 +400,7 @@ func startHeartbeat(ctx context.Context, stop context.CancelFunc) {
 			stop()
 			return false
 		}
-		if err := db.TouchTunnel(versionString(), time.Now().Unix()); err != nil {
+		if err := db.TouchDaemon(versionString(), time.Now().Unix()); err != nil {
 			log.Printf("heartbeat: %v", err)
 		}
 		return true
@@ -422,20 +422,27 @@ func startHeartbeat(ctx context.Context, stop context.CancelFunc) {
 	}
 }
 
-// newerDaemonRunning reports whether the tunnel row was written recently by an
+// newerDaemonRunning reports whether the daemon keys were written recently by an
 // engine that started after `started`.
 func newerDaemonRunning(started int64) (bool, error) {
-	rows, err := db.Query("SELECT version, heartbeat FROM tunnel LIMIT 1")
+	rows, err := db.Query("SELECT key, value FROM system_state WHERE key IN ('daemon/version','daemon/heartbeat')")
 	if err != nil {
 		return false, err
 	}
-	if len(rows) == 0 {
-		return false, nil
+	var version string
+	var beat int64
+	for _, row := range rows {
+		key, _ := row["key"].(string)
+		value, _ := row["value"].(string)
+		switch key {
+		case "daemon/version":
+			version = value
+		case "daemon/heartbeat":
+			beat, _ = strconv.ParseInt(value, 10, 64)
+		}
 	}
-	version, _ := rows[0]["version"].(string)
-	beat, _ := rows[0]["heartbeat"].(float64)
 	other := parseStarted(version)
-	fresh := float64(time.Now().Unix()-120) < beat
+	fresh := time.Now().Unix()-120 < beat
 	return fresh && other > started, nil
 }
 

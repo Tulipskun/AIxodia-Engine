@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -107,35 +108,35 @@ func getDatabaseLocation(cfToken string) (string, string, error) {
 	return "", "", fmt.Errorf("db: D1 database named aixodia was not found in any accessible account")
 }
 
-// SaveTunnel replaces the single tunnel row with this daemon's address, its
-// version (which carries the start time) and its first heartbeat. Everything a
-// client needs to find the daemon and read its uptime lives in this one row,
-// so there is no separate nodes table.
-func SaveTunnel(url, version string, heartbeat int64) error {
+// upsertState writes one system_state key, replacing any earlier value.
+func upsertState(key, value string) error {
+	_, err := Query("INSERT INTO system_state (key, value, updated_at) VALUES (?, ?, unixepoch()) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", key, value)
+	return err
+}
+
+// SaveDaemon writes this daemon's address, version (which carries the start
+// time) and its first heartbeat into the system_state keys. Everything a
+// client needs to find the daemon and read its uptime lives in these keys,
+// so there is no separate tunnel table.
+func SaveDaemon(url, version string, heartbeat int64) error {
 	url = strings.TrimSpace(url)
 	if url == "" {
-		return fmt.Errorf("db: tunnel url is empty")
+		return fmt.Errorf("db: daemon url is empty")
 	}
 
-	if _, err := Query("CREATE TABLE IF NOT EXISTS tunnel (url TEXT NOT NULL, version TEXT NOT NULL DEFAULT '', heartbeat INTEGER NOT NULL DEFAULT 0)"); err != nil {
-		return err
-	}
-	// Older databases have a tunnel table with only `url`. Add the new columns
-	// once; a duplicate-column error means the column is already there.
-	_, _ = Query("ALTER TABLE tunnel ADD COLUMN version TEXT NOT NULL DEFAULT ''")
-	_, _ = Query("ALTER TABLE tunnel ADD COLUMN heartbeat INTEGER NOT NULL DEFAULT 0")
-	if err := Delete("tunnel"); err != nil {
-		return err
-	}
-
-	_, err := Insert("tunnel", map[string]any{"url": url, "version": version, "heartbeat": heartbeat})
-	if err != nil {
-		return err
+	for _, kv := range [][2]string{
+		{"daemon/url", url},
+		{"daemon/version", version},
+		{"daemon/heartbeat", strconv.FormatInt(heartbeat, 10)},
+	} {
+		if err := upsertState(kv[0], kv[1]); err != nil {
+			return err
+		}
 	}
 	// Keep reads fast as tables grow. Idempotent: safe to run on every daemon start.
 	for _, idx := range []string{
-		"CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at)",
-		"CREATE INDEX IF NOT EXISTS idx_turns_session_seq ON turns(session_id, seq)",
+		"CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated ON chat_sessions(updated_at)",
+		"CREATE INDEX IF NOT EXISTS idx_chat_turns_session_seq ON chat_turns(session_id, seq)",
 	} {
 		if _, err := Query(idx); err != nil {
 			log.Printf("db index %s: %v", idx, err)
@@ -144,11 +145,17 @@ func SaveTunnel(url, version string, heartbeat int64) error {
 	return nil
 }
 
-// TouchTunnel refreshes the version and heartbeat of the single tunnel row.
-// The row is replaced on every daemon start, so there is always exactly one.
-func TouchTunnel(version string, heartbeat int64) error {
-	_, err := Query("UPDATE tunnel SET version = ?, heartbeat = ?", version, heartbeat)
-	return err
+// TouchDaemon refreshes the daemon version and heartbeat keys.
+func TouchDaemon(version string, heartbeat int64) error {
+	for _, kv := range [][2]string{
+		{"daemon/version", version},
+		{"daemon/heartbeat", strconv.FormatInt(heartbeat, 10)},
+	} {
+		if err := upsertState(kv[0], kv[1]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func Insert(table string, data map[string]any) (int64, error) {
