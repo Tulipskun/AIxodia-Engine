@@ -470,6 +470,24 @@ func TestChatWithSessionPersistsTurns(t *testing.T) {
 	}
 }
 
+// A tool's duration has to reach the stored tool_result row: the phone shows it
+// while the step runs, but the stored thread replaces the live one when the turn
+// closes, and a figure that lived only in the live frame would vanish there.
+func TestAttachToolDurationsStampsResultRows(t *testing.T) {
+	rows := []session.TurnInput{
+		{Role: "tool_call", Text: `{"id":"c1","name":"bash","arguments":"{}"}`},
+		{Role: "tool_result", Text: `{"tool_call_id":"c1","name":"bash","content":"ok"}`},
+		{Role: "tool_result", Text: `{"tool_call_id":"c2","name":"bash","content":"ok"}`},
+	}
+	attachToolDurations(rows, map[string]int64{"c1": 2500})
+	if rows[1].DurationMS != 2500 {
+		t.Errorf("c1 duration = %d, want 2500", rows[1].DurationMS)
+	}
+	if rows[2].DurationMS != 0 {
+		t.Errorf("c2 duration = %d, want 0 for a call with no recorded time", rows[2].DurationMS)
+	}
+}
+
 func TestMergeHistoryAppendsOnlyNewMessages(t *testing.T) {
 	stored := []provider.Message{
 		{Role: "user", Content: "one"},

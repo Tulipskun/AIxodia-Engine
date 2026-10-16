@@ -84,13 +84,53 @@ type trailWriter struct {
 	onStored   func([]session.Turn, error)
 	pending    []session.TurnInput
 	pendingEnd int
+	// durations is how long each tool call ran, keyed by call id. The trail has
+	// no room for it — a tool result is a string — so it is stamped onto the
+	// stored row here, where the phone can still read it after the turn closes.
+	durations map[string]int64
 }
 
 func (g *Gateway) newTrailWriter(stored *session.Session) *trailWriter {
 	if stored == nil {
 		return nil
 	}
-	return &trailWriter{g: g, id: stored.ID}
+	return &trailWriter{g: g, id: stored.ID, durations: map[string]int64{}}
+}
+
+// recordDuration remembers how long a call ran so the next flush can stamp it
+// on the tool_result row it stores.
+func (t *trailWriter) recordDuration(callID string, ms int64) {
+	if t == nil || callID == "" {
+		return
+	}
+	if t.durations == nil {
+		t.durations = map[string]int64{}
+	}
+	t.durations[callID] = ms
+}
+
+// attachToolDurations writes each stored tool_result row the figure of the call
+// it answers. Without it the time is a live-only flicker: the phone shows it
+// while the tool runs and loses it the moment the stored rows replace the live
+// thread.
+func attachToolDurations(rows []session.TurnInput, durations map[string]int64) {
+	if len(durations) == 0 {
+		return
+	}
+	for i := range rows {
+		if rows[i].Role != "tool_result" {
+			continue
+		}
+		var row struct {
+			ToolCallID string `json:"tool_call_id"`
+		}
+		if json.Unmarshal([]byte(rows[i].Text), &row) != nil {
+			continue
+		}
+		if ms, ok := durations[row.ToolCallID]; ok {
+			rows[i].DurationMS = ms
+		}
+	}
 }
 
 // flush stores the steps of trail that are not stored yet. A failed write
@@ -102,6 +142,7 @@ func (t *trailWriter) flush(trail []provider.Message) {
 	if t.pending == nil {
 		t.pending = session.TrailTurns(trail[t.saved:])
 		t.pendingEnd = len(trail)
+		attachToolDurations(t.pending, t.durations)
 	}
 	if len(t.pending) > 0 {
 		rows, err := t.g.sessions.AppendTurns(t.id, t.pending)
@@ -327,6 +368,7 @@ func (g *Gateway) chatStream(w http.ResponseWriter, r *http.Request, stored *ses
 		}})
 	}
 	options.onToolResult = func(call provider.ToolCall, text string, durationMs int64, isError bool) {
+		options.trail.recordDuration(call.ID, durationMs)
 		_ = writeSSE(w, flusher, map[string]any{"tool_event": map[string]any{
 			"stage": "tool_result", "name": call.Name, "call_id": call.ID,
 			"text": truncate(text, 4096), "is_error": isError, "duration_ms": durationMs,
