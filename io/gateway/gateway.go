@@ -31,7 +31,7 @@ const (
 
 // Version is the release tag, baked in at build time. Bump on every release
 // so a live service can be identified via GET /healthz.
-const Version = "v1.133"
+const Version = "v1.134"
 
 type SessionStore interface {
 	Create(params session.NewSession) (*session.Session, error)

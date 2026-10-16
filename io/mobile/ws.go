@@ -186,10 +186,17 @@ func Handler(token string, chat ChatFunc) http.Handler {
 	return NewHub().Handler(token, chat)
 }
 
+// activeTurn is one turn this peer is running, kept so a cancel frame can name
+// the chat to stop instead of stopping every chat on the socket.
+type activeTurn struct {
+	sessionID string
+	cancel    context.CancelFunc
+}
+
 type peer struct {
 	conn    net.Conn
 	mu      sync.Mutex
-	cancels map[string]context.CancelFunc
+	cancels map[string]activeTurn
 }
 
 func (p *peer) send(f outFrame) error {
@@ -204,7 +211,7 @@ func (p *peer) send(f outFrame) error {
 }
 
 func (h *Hub) serve(conn net.Conn, r *bufio.Reader, chat ChatFunc) {
-	p := &peer{conn: conn, cancels: map[string]context.CancelFunc{}}
+	p := &peer{conn: conn, cancels: map[string]activeTurn{}}
 	h.add(p)
 	defer h.remove(p)
 	// A socket that simply stops talking is a network event, not a decision by
@@ -231,7 +238,7 @@ func (h *Hub) serve(conn net.Conn, r *bufio.Reader, chat ChatFunc) {
 			p.mu.Lock()
 			_ = writeFrame(conn, 0x8, []byte{})
 			p.mu.Unlock()
-			p.cancelAll()
+			p.cancelSession("")
 			return
 		case 0x9: // ping
 			p.mu.Lock()
@@ -241,10 +248,10 @@ func (h *Hub) serve(conn net.Conn, r *bufio.Reader, chat ChatFunc) {
 	}
 }
 
-func (p *peer) register(id string, cancel context.CancelFunc) {
+func (p *peer) register(id, sessionID string, cancel context.CancelFunc) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.cancels[id] = cancel
+	p.cancels[id] = activeTurn{sessionID: sessionID, cancel: cancel}
 }
 
 func (p *peer) unregister(id string) {
@@ -253,13 +260,23 @@ func (p *peer) unregister(id string) {
 	delete(p.cancels, id)
 }
 
-func (p *peer) cancelAll() {
+// cancelSession stops the turns running for sessionID and returns how many it
+// stopped. An empty sessionID stops every turn on the peer, which is what a
+// dropped socket does. A turn whose own session is unknown is stopped too: it
+// is better to stop a turn the phone asked to stop than to leave it running.
+func (p *peer) cancelSession(sessionID string) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for id, cancel := range p.cancels {
-		cancel()
+	stopped := 0
+	for id, turn := range p.cancels {
+		if sessionID != "" && turn.sessionID != "" && turn.sessionID != sessionID {
+			continue
+		}
+		turn.cancel()
 		delete(p.cancels, id)
+		stopped++
 	}
+	return stopped
 }
 
 // handle answers hello and cancel inline; a message runs in its own goroutine
@@ -269,7 +286,14 @@ func handle(p *peer, in inFrame, chat ChatFunc) {
 	case "hello":
 		_ = p.send(outFrame{Kind: "ack", SessionID: in.SessionID})
 	case "cancel":
-		p.cancelAll()
+		// Nothing may be running for this chat — the turn already ended, or the
+		// phone is holding a screen the daemon finished with. The running turn
+		// answers for itself (see answer), but when there is none, answer here
+		// anyway: a stop that gets no reply leaves the screen stuck showing a
+		// turn that is not happening.
+		if p.cancelSession(in.SessionID) == 0 {
+			_ = p.send(outFrame{Kind: "done", SessionID: in.SessionID, Stage: "already_done"})
+		}
 	case "message", "":
 		var parts []string
 		for _, c := range in.Content {
@@ -299,7 +323,7 @@ func handle(p *peer, in inFrame, chat ChatFunc) {
 		if key == "" {
 			key = in.SessionID
 		}
-		p.register(key, cancel)
+		p.register(key, in.SessionID, cancel)
 		go p.answer(ctx, cancel, key, in, text, chat)
 	}
 }

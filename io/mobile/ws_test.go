@@ -214,6 +214,59 @@ func TestDroppedSocketDoesNotCancelTheTurn(t *testing.T) {
 	}
 }
 
+// A stop with no turn running must still be answered: the phone is showing a
+// turn the daemon has already finished with, and with no reply the screen stays
+// stuck on it forever.
+func TestCancelWithNothingRunningAnswersAlreadyDone(t *testing.T) {
+	srv := httptest.NewServer(Handler("good", fakeChat))
+	defer srv.Close()
+	conn, r, _ := dialWS(t, srv, "good")
+	defer conn.Close()
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	sendMasked(t, conn, []byte(`{"type":"cancel","session_id":"s1"}`))
+	for {
+		_, payload, err := readFrame(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var f outFrame
+		if err := json.Unmarshal(payload, &f); err != nil {
+			t.Fatal(err)
+		}
+		if f.Kind != "done" {
+			continue
+		}
+		if f.Stage != "already_done" || f.SessionID != "s1" {
+			t.Fatalf("done = %+v, want already_done for s1", f)
+		}
+		return
+	}
+}
+
+// A stop names one chat. A turn running for another chat on the same socket
+// must keep running, or a stop in one thread would kill another's work.
+func TestCancelForAnotherChatDoesNotStopTheRunningOne(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan error, 1)
+	conn, _, _, _ := startParkedTurn(t, parkedChat(started, release, finished))
+
+	sendMasked(t, conn, []byte(`{"type":"message","session_id":"s1","client_msg_id":"c1","content":[{"type":"text","text":"hi"}]}`))
+	<-started
+	sendMasked(t, conn, []byte(`{"type":"cancel","session_id":"s2"}`))
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatalf("a cancel for another chat stopped this turn: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the turn never finished")
+	}
+}
+
 // A close frame is the phone saying it is finished, and it stops the turn.
 func TestCloseFrameCancelsTheTurn(t *testing.T) {
 	started := make(chan struct{})
