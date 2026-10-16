@@ -64,6 +64,11 @@ type completionOptions struct {
 	// forward them so tool use is visible while it runs.
 	onToolCall   func(call provider.ToolCall)
 	onToolResult func(call provider.ToolCall, text string, durationMs int64, isError bool)
+	// onRequest announces one provider request round: waiting when the round
+	// starts, done when it ends. The phone used to invent these blocks from
+	// send timing, which is why every request wore a "Sending…" it never got;
+	// the loop that actually spends the rounds owns them now.
+	onRequest func(round int, state string)
 	// onTrail is handed the whole trail so far after every tool round, and trail
 	// is where those steps get stored. Both are nil when nothing is persisted.
 	onTrail     func(trail []provider.Message)
@@ -129,6 +134,12 @@ func attachToolDurations(rows []session.TurnInput, durations map[string]int64) {
 		}
 		if ms, ok := durations[row.ToolCallID]; ok {
 			rows[i].DurationMS = ms
+			// The stored tool block carries the same figure, so the row
+			// draws settled even where the reader never sees the columns.
+			if b, ok := session.ParseBlock(rows[i].Block); ok && b.Type == session.BlockTool {
+				b.DurationMs = ms
+				rows[i].Block = b.JSON()
+			}
 		}
 	}
 }
@@ -357,14 +368,30 @@ func (g *Gateway) chatStream(w http.ResponseWriter, r *http.Request, stored *ses
 		options.trail.onStored = options.onStored
 	}
 	options.onTrail = options.trail.flush
+	// openRound is the round the loop is spending now. Reasoning and tool
+	// events carry no round of their own — they fire inside the provider call
+	// — so the handler stamps the round that is open when each one arrives.
+	// Order on the stream is the guarantee: a request/waiting always opens
+	// the round before its reasoning and calls follow.
+	openRound := 0
+	options.onRequest = func(round int, state string) {
+		openRound = round
+		_ = writeSSE(w, flusher, map[string]any{"tool_event": map[string]any{
+			"stage": "request", "round": round, "state": state,
+			"block": session.RequestBlock(round, state),
+		}})
+	}
 	options.onToolCall = func(call provider.ToolCall) {
 		_ = writeSSE(w, flusher, map[string]any{"tool_event": map[string]any{
 			"stage": "tool_call", "name": call.Name, "call_id": call.ID, "arguments": call.Arguments,
+			"round": openRound,
+			"block": session.ToolBlock(call.ID, call.Name, call.Arguments, "", false, 0),
 		}})
 	}
 	options.onReasoning = func(text string) error {
 		return writeSSE(w, flusher, map[string]any{"tool_event": map[string]any{
-			"stage": "reasoning", "text": text,
+			"stage": "reasoning", "round": openRound, "text": text,
+			"block": session.ReasoningBlock(openRound, text),
 		}})
 	}
 	options.onToolResult = func(call provider.ToolCall, text string, durationMs int64, isError bool) {
@@ -372,6 +399,8 @@ func (g *Gateway) chatStream(w http.ResponseWriter, r *http.Request, stored *ses
 		_ = writeSSE(w, flusher, map[string]any{"tool_event": map[string]any{
 			"stage": "tool_result", "name": call.Name, "call_id": call.ID,
 			"text": truncate(text, 4096), "is_error": isError, "duration_ms": durationMs,
+			"round": openRound,
+			"block": session.ToolBlock(call.ID, call.Name, call.Arguments, truncate(text, 4096), isError, durationMs),
 		}})
 	}
 	resp, err := g.complete(r.Context(), primary, fallback, history, options)
@@ -531,6 +560,9 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 	pending := false
 
 	for round := 0; round < maxToolRounds; {
+		if options.onRequest != nil {
+			options.onRequest(round+1, session.StateWaiting)
+		}
 		request := &provider.Request{
 			Model:       current.model,
 			Messages:    session.Trim(conversation, session.DefaultMaxTokens),
@@ -555,6 +587,9 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 				usedFallback = true
 				continue
 			}
+			if options.onRequest != nil {
+				options.onRequest(round+1, session.StateDone)
+			}
 			return nil, err
 		}
 		round++
@@ -576,6 +611,9 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 
 		pending = len(resp.ToolCalls) > 0
 		if !pending {
+			if options.onRequest != nil {
+				options.onRequest(round, session.StateDone)
+			}
 			break
 		}
 
@@ -620,6 +658,9 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 		if options.onTrail != nil {
 			options.onTrail(final.Trail)
 		}
+		if options.onRequest != nil {
+			options.onRequest(round, session.StateDone)
+		}
 		final.FinishReason = "tool_calls"
 	}
 
@@ -634,6 +675,13 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 			Role:    "user",
 			Content: outOfRounds,
 		})
+		// The loop above spent all maxToolRounds rounds, so this closing call
+		// without tools is the next one. `round` is out of scope here; the
+		// count is exact because pending is only true past the last round.
+		const extraRound = maxToolRounds + 1
+		if options.onRequest != nil {
+			options.onRequest(extraRound, session.StateWaiting)
+		}
 		request := &provider.Request{
 			Model:       current.model,
 			Messages:    session.Trim(conversation, session.DefaultMaxTokens),
@@ -649,12 +697,18 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 		resp, err := g.call(ctx, current, request, emit, canRetry)
 		final.GenerationMS += time.Since(callStarted).Milliseconds()
 		if err != nil {
+			if options.onRequest != nil {
+				options.onRequest(extraRound, session.StateDone)
+			}
 			return nil, err
 		}
 		final.Content = resp.Content
 		final.ReasoningContent = truncate(resp.ReasoningContent, 32*1024)
 		addUsage(&final.Usage, resp.Usage)
 		final.FinishReason = resp.FinishReason
+		if options.onRequest != nil {
+			options.onRequest(extraRound, session.StateDone)
+		}
 	}
 	return final, nil
 }
@@ -831,6 +885,16 @@ func (g *Gateway) persistUserBefore(stored *session.Session, history, delta []pr
 	}
 }
 
+// answerBlock is the closing answer as a display block. Blank when the turn
+// answered with tools alone: an empty text block would draw nothing, and the
+// row stays on the role-based path where the empty-answer filter removes it.
+func answerBlock(content string) string {
+	if strings.TrimSpace(content) == "" {
+		return ""
+	}
+	return session.TextBlock("answer", content).JSON()
+}
+
 // isRepeatOfTail reports whether delta is a single user message identical to
 // the last visible recorded turn (which then necessarily has no answer yet).
 func isRepeatOfTail(recorded, delta []provider.Message) bool {
@@ -876,6 +940,7 @@ func (g *Gateway) persist(stored *session.Session, delta []provider.Message, res
 	turns = append(turns, session.TurnInput{
 		Role:               "assistant",
 		Text:               resp.Content,
+		Block:              answerBlock(resp.Content),
 		Model:              resp.Model,
 		ReasoningContent:   resp.ReasoningContent,
 		InputTokens:        resp.Usage.PromptTokens,

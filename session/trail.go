@@ -32,6 +32,7 @@ type toolResultRow struct {
 // TrailTurns converts the tool steps of one reply into storable turns.
 func TrailTurns(trail []provider.Message) []TurnInput {
 	var out []TurnInput
+	narration := 0
 	for _, msg := range trail {
 		switch {
 		case msg.Role == "assistant" && len(msg.ToolCalls) > 0:
@@ -39,7 +40,13 @@ func TrailTurns(trail []provider.Message) []TurnInput {
 			// of the call. Hiding them inside the call row put sentences the
 			// user wrote to the model inside a tool block.
 			if text := strings.TrimSpace(msg.Content); text != "" {
-				out = append(out, TurnInput{Role: "assistant", Text: text})
+				narration++
+				// Stored blocks render in order, so the id only has to be
+				// unique inside the turn, not linked to a live request.
+				out = append(out, TurnInput{
+					Role: "assistant", Text: text,
+					Block: TextBlock("n"+itoa(narration), text).JSON(),
+				})
 			}
 			for _, call := range msg.ToolCalls {
 				out = append(out, TurnInput{Role: "tool_call", Text: mustJSON(toolCallRow{
@@ -47,17 +54,41 @@ func TrailTurns(trail []provider.Message) []TurnInput {
 					Name:      call.Name,
 					Arguments: call.Arguments,
 					Reasoning: msg.ReasoningContent,
-				})})
+				}), Block: ToolBlock(call.ID, call.Name, call.Arguments, "", false, 0).JSON()})
 			}
 		case msg.Role == "tool":
+			content := msg.Content
 			out = append(out, TurnInput{Role: "tool_result", Text: mustJSON(toolResultRow{
 				ToolCallID: msg.ToolCallID,
 				Name:       msg.ToolName,
-				Content:    msg.Content,
-			})})
+				Content:    content,
+			}), Block: ToolBlock(msg.ToolCallID, msg.ToolName, "", content, isErrorOutput(content), 0).JSON()})
 		}
 	}
 	return out
+}
+
+// isErrorOutput mirrors gateway.isToolError: a failed execution is a
+// {"error":...} envelope, not genuine command output. Kept here so the stored
+// tool block carries the settled state without a second pass.
+func isErrorOutput(output string) bool {
+	trimmed := strings.TrimSpace(output)
+	return strings.HasPrefix(trimmed, `{"error":`) || strings.HasPrefix(trimmed, `{"error" :`)
+}
+
+// itoa is fmt.Sprint without pulling fmt into every small file.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b [8]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(b[i:])
 }
 
 // MessagesFromTurns rebuilds the conversation a model needs from stored turns.

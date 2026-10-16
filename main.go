@@ -307,6 +307,8 @@ func parseToolEvent(data []byte) (mobile.ToolEvent, bool) {
 			Text       string `json:"text"`
 			IsError    bool   `json:"is_error"`
 			DurationMs int64  `json:"duration_ms"`
+			Round      int    `json:"round"`
+			State      string `json:"state"`
 		} `json:"tool_event"`
 	}
 	if err := json.Unmarshal(data, &wrapped); err != nil || wrapped.ToolEvent == nil {
@@ -317,6 +319,7 @@ func parseToolEvent(data []byte) (mobile.ToolEvent, bool) {
 		Stage: te.Stage, Name: te.Name, CallID: te.CallID,
 		Arguments: te.Arguments, Text: te.Text,
 		IsError: te.IsError, DurationMs: te.DurationMs,
+		Round: te.Round, State: te.State,
 	}, true
 }
 

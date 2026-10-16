@@ -125,6 +125,7 @@ func (m *memStore) AppendTurns(id string, turns []session.TurnInput) ([]session.
 			DurationMS:         turn.DurationMS,
 			GenerationMS:       turn.GenerationMS,
 			ReasoningContent:   turn.ReasoningContent,
+			Block:              turn.Block,
 		})
 	}
 	return append([]session.Turn(nil), m.turns[id][start:]...), nil
@@ -1093,5 +1094,80 @@ func TestCacheReadFromUsageDetailsReachesTheStoredTurn(t *testing.T) {
 	}
 	if !last.InputIncludesCache {
 		t.Error("input_includes_cache must be set: prompt_tokens already contains the cached part")
+	}
+}
+
+// Every provider request round announces itself — waiting when it starts,
+// done when it ends — and every displayable unit rides the stream as a
+// block the phone renders generically. A turn that runs one tool therefore
+// opens exactly two request blocks, and its stored rows carry the same
+// blocks the live thread showed.
+func TestRequestRoundsAndBlocksRideTheStream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), `"tool_call_id"`) {
+			streamFake(w, "เสร็จแล้ว", nil, "stop")
+			return
+		}
+		streamFake(w, "", []string{"current_time"}, "tool_calls")
+	}))
+	defer upstream.Close()
+	config.Providers = []config.Provider{{
+		ID: "9", Name: "mock", APIURL: upstream.URL, Keys: []string{"test-key"}, Adapter: "openai",
+	}}
+	store := newMemStore()
+	gateway := New(store, registry.New(), tools.Builtin())
+	postJSON(t, gateway.Handler(), "/v1/sessions", `{"title":"t","model":"mock/test-model"}`)
+
+	recorder := postJSON(t, gateway.Handler(), "/v1/chat/completions",
+		`{"session_id":"s1","model":"mock/test-model","messages":[{"role":"user","content":"กี่โมง"}],"stream":true}`)
+	body := recorder.Body.String()
+	for _, want := range []string{
+		`"stage":"request"`,
+		`"round":1`,
+		`"round":2`,
+		`"type":"request"`,
+		`"type":"tool"`,
+		`"stage":"tool_call"`,
+		`"stage":"tool_result"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("stream misses %s:\n%s", want, body)
+		}
+	}
+	// Two rounds, each announced once waiting and once done. The state rides
+	// both the event and its block, so the round count is what is pinned.
+	if n := strings.Count(body, `"type":"request"`); n != 4 {
+		t.Errorf("request blocks = %d, want 4 (waiting+done for each of 2 rounds)", n)
+	}
+
+	turns, _ := store.Turns("s1")
+	blocks := map[string]string{}
+	for _, turn := range turns {
+		// The question draws as a bubble and needs no block; everything the
+		// engine says back does.
+		if turn.Role == "user" {
+			continue
+		}
+		if turn.Block == "" {
+			t.Errorf("stored %s row has no block: %+v", turn.Role, turn)
+			continue
+		}
+		b, ok := session.ParseBlock(turn.Block)
+		if !ok {
+			t.Errorf("stored block does not parse: %q", turn.Block)
+			continue
+		}
+		blocks[turn.Role+" "+b.Type] = turn.Block
+	}
+	if _, ok := blocks["tool_call tool"]; !ok {
+		t.Errorf("no tool block on tool_call rows: %v", blocks)
+	}
+	if _, ok := blocks["tool_result tool"]; !ok {
+		t.Errorf("no tool block on tool_result rows: %v", blocks)
+	}
+	last := turns[len(turns)-1]
+	if b, ok := session.ParseBlock(last.Block); !ok || b.Type != "text" {
+		t.Errorf("closing answer block = %q, want a text block", last.Block)
 	}
 }

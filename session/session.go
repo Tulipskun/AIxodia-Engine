@@ -47,7 +47,11 @@ type Turn struct {
 	InputIncludesCache bool   `json:"input_includes_cache,omitempty"`
 	DurationMS         int64  `json:"duration_ms,omitempty"`
 	GenerationMS       int64  `json:"generation_ms,omitempty"`
-	CreatedAt          int64  `json:"created_at"`
+	// Block is how this row draws: the engine's display vocabulary, so a new
+	// kind of content needs no app update. Empty on rows that predate blocks,
+	// which the phone reads through the role instead.
+	Block     string `json:"block,omitempty"`
+	CreatedAt int64  `json:"created_at"`
 }
 
 type NewSession struct {
@@ -85,6 +89,9 @@ type TurnInput struct {
 	// from: the two answer different questions.
 	DurationMS   int64
 	GenerationMS int64
+	// Block is the row's display block as JSON. Replay ignores it — the role
+	// and text still carry the conversation — so it only ever changes looks.
+	Block string
 }
 
 type D1 struct{}
@@ -201,7 +208,10 @@ func (d *D1) Turns(id string) ([]Turn, error) {
 			InputIncludesCache: intField(row, "input_includes_cache") != 0,
 			DurationMS:         int64Field(row, "duration_ms"),
 			GenerationMS:       int64Field(row, "generation_ms"),
-			CreatedAt:          int64Field(row, "created_at"),
+			// A database that predates the block column has no such key, which
+			// reads as blank — the same as a row that predates blocks.
+			Block:     stringField(row, "block"),
+			CreatedAt: int64Field(row, "created_at"),
 		})
 	}
 	return turns, nil
@@ -216,7 +226,7 @@ func (d *D1) History(id string) ([]provider.Message, error) {
 }
 
 // const maxTurnsPerStatement keeps each INSERT inside D1's per-statement
-// bound-parameter limit (100 parameters; 15 columns => 6 rows is the safe
+// bound-parameter limit (100 parameters; 16 columns => 6 rows is 96, the safe
 // whole number below the line), so Appending N turns costs O(N/6) HTTP
 // round-trips instead of N.
 const maxTurnsPerStatement = 6
@@ -230,6 +240,7 @@ func StoredTurn(id string, seq int, createdAt int64, input TurnInput) Turn {
 		CacheWriteTokens: input.CacheWriteTokens, ReasoningTokens: input.ReasoningTokens,
 		ReasoningContent: input.ReasoningContent, InputIncludesCache: input.InputIncludesCache,
 		DurationMS: input.DurationMS, GenerationMS: input.GenerationMS,
+		Block: input.Block,
 	}
 }
 
@@ -258,9 +269,9 @@ func (d *D1) AppendTurns(id string, turns []TurnInput) ([]Turn, error) {
 			chunk := turns[start:end]
 
 			placeholders := make([]string, 0, len(chunk))
-			values := make([]any, 0, len(chunk)*15)
+			values := make([]any, 0, len(chunk)*16)
 			for i, turn := range chunk {
-				placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+				placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 				values = append(values,
 					id,
 					seq+start-base+i,
@@ -276,10 +287,11 @@ func (d *D1) AppendTurns(id string, turns []TurnInput) ([]Turn, error) {
 					boolInt(turn.InputIncludesCache),
 					turn.DurationMS,
 					turn.GenerationMS,
+					turn.Block,
 					now,
 				)
 			}
-			sql := "INSERT INTO turns (session_id, seq, role, text, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, reasoning_content, input_includes_cache, duration_ms, generation_ms, created_at) VALUES " + strings.Join(placeholders, ", ")
+			sql := "INSERT INTO turns (session_id, seq, role, text, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, reasoning_content, input_includes_cache, duration_ms, generation_ms, block, created_at) VALUES " + strings.Join(placeholders, ", ")
 			if _, err := db.Query(sql, values...); err != nil {
 				lastErr = err
 				break
@@ -429,6 +441,13 @@ func EnsureTurns() {
 	if _, err := db.Query("ALTER TABLE turns ADD COLUMN reasoning_content TEXT NOT NULL DEFAULT ''"); err != nil &&
 		!strings.Contains(err.Error(), "duplicate column") {
 		log.Printf("session: cannot add reasoning_content: %v", err)
+	}
+	// block holds the row's display block as JSON: how the row draws, decided
+	// by the engine so new kinds of content need no app update. Old rows keep
+	// blank and the phone reads them through the role instead.
+	if _, err := db.Query("ALTER TABLE turns ADD COLUMN block TEXT NOT NULL DEFAULT ''"); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		log.Printf("session: cannot add block: %v", err)
 	}
 }
 

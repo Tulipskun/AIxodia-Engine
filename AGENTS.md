@@ -29,6 +29,7 @@
   - `config.Provider` fields differ from columns; mapping is `config.providerFromRow` (`index`→`ID`, `provider`→`Name`, `endpoint`→`APIURL`). `keys` is a JSON array as text.
 - `sessions(...)` and `turns(id, session_id, seq, role, text, model, input_tokens, output_tokens, duration_ms, ...)` — other clients already write here (existing rows with Thai titles), so keep column names and `UNIQUE(session_id, seq)` in mind.
   - Tool steps are stored as `tool_call` / `tool_result` turns (JSON in `text`, see `session/trail.go`) and replayed into the next request. They are written after each tool round, not at the end, so a turn that fails or is cut off still keeps the tools it ran.
+  - `turns.block` holds the row's display block as JSON (`session/block.go`: text/reasoning/tool/request/status). The engine owns this vocabulary — each provider round also announces `request` waiting/done events — and the phone renders blocks generically with a plain-card fallback for unknown types, so new kinds of content need no app update. Rows that predate blocks have `block=''` and render through the role.
   - `reasoning_content` (added by `EnsureTurns`) holds what a reasoning model wrote before its answer, so the replayed assistant turn carries it; a provider that serves one refuses a history without it. `reasoning_tokens` is only the count for the footer.
 - `tunnel(url)`: `db.SaveTunnel` creates the table, deletes all rows, inserts one.
 

@@ -58,6 +58,10 @@ type ToolEvent struct {
 	Text       string
 	IsError    bool
 	DurationMs int64
+	// Round is the provider request round the event belongs to, and State is
+	// where that round or step stands (waiting/thinking/running/done/error).
+	Round int
+	State string
 }
 
 type inFrame struct {
@@ -82,30 +86,34 @@ type attachment struct {
 }
 
 type outFrame struct {
-	Source             string          `json:"source"`
-	SessionID          string          `json:"session_id"`
-	Kind               string          `json:"kind"`
-	Text               string          `json:"text,omitempty"`
-	Role               string          `json:"role,omitempty"`
-	Agent              string          `json:"agent,omitempty"`
-	ClientMsgID        string          `json:"client_msg_id,omitempty"`
-	Stage              string          `json:"stage,omitempty"`
-	ToolCall           *toolCallJSON   `json:"tool_call,omitempty"`
-	ToolResult         *toolResultJSON `json:"tool_result,omitempty"`
-	ToolDuration       int64           `json:"tool_duration_ms,omitempty"`
-	Seq                int64           `json:"seq,omitempty"`
-	InputTokens        int             `json:"input_tokens,omitempty"`
-	OutputTokens       int             `json:"output_tokens,omitempty"`
-	CacheReadTokens    int             `json:"cache_read_tokens"`
-	CacheWriteTokens   int             `json:"cache_write_tokens"`
-	ReasoningTokens    int             `json:"reasoning_tokens"`
-	ReasoningContent   string          `json:"reasoning_content,omitempty"`
-	InputIncludesCache bool            `json:"input_includes_cache"`
-	Model              string          `json:"model,omitempty"`
-	DurationMS         int64           `json:"duration_ms,omitempty"`
-	GenerationMS       int64           `json:"generation_ms,omitempty"`
-	Turns              []session.Turn  `json:"turns,omitempty"`
-	TurnsSynced        bool            `json:"turns_synced"`
+	Source       string          `json:"source"`
+	SessionID    string          `json:"session_id"`
+	Kind         string          `json:"kind"`
+	Text         string          `json:"text,omitempty"`
+	Role         string          `json:"role,omitempty"`
+	Agent        string          `json:"agent,omitempty"`
+	ClientMsgID  string          `json:"client_msg_id,omitempty"`
+	Stage        string          `json:"stage,omitempty"`
+	ToolCall     *toolCallJSON   `json:"tool_call,omitempty"`
+	ToolResult   *toolResultJSON `json:"tool_result,omitempty"`
+	ToolDuration int64           `json:"tool_duration_ms,omitempty"`
+	// Block is the display block for this frame, described by the engine so
+	// the phone renders it without knowing the stage vocabulary. Frames from
+	// an older daemon carry nothing here and take the stage-based path.
+	Block              *session.Block `json:"block,omitempty"`
+	Seq                int64          `json:"seq,omitempty"`
+	InputTokens        int            `json:"input_tokens,omitempty"`
+	OutputTokens       int            `json:"output_tokens,omitempty"`
+	CacheReadTokens    int            `json:"cache_read_tokens"`
+	CacheWriteTokens   int            `json:"cache_write_tokens"`
+	ReasoningTokens    int            `json:"reasoning_tokens"`
+	ReasoningContent   string         `json:"reasoning_content,omitempty"`
+	InputIncludesCache bool           `json:"input_includes_cache"`
+	Model              string         `json:"model,omitempty"`
+	DurationMS         int64          `json:"duration_ms,omitempty"`
+	GenerationMS       int64          `json:"generation_ms,omitempty"`
+	Turns              []session.Turn `json:"turns,omitempty"`
+	TurnsSynced        bool           `json:"turns_synced"`
 }
 
 type toolCallJSON struct {
@@ -386,7 +394,7 @@ func (p *peer) answer(ctx context.Context, cancel context.CancelFunc, key string
 		_ = p.send(outFrame{Kind: "delta", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID, Text: piece, Role: "model", Agent: "main"})
 	}
 	onTool := func(ev ToolEvent) {
-		frame := outFrame{Kind: "trace", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID, Agent: "main", Stage: ev.Stage, ToolDuration: ev.DurationMs}
+		frame := outFrame{Kind: "trace", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID, Agent: "main", Stage: ev.Stage, ToolDuration: ev.DurationMs, Block: toolBlock(ev)}
 		switch ev.Stage {
 		case "tool_call":
 			frame.ToolCall = &toolCallJSON{ID: ev.CallID, Name: ev.Name, Arguments: ev.Arguments}
@@ -409,14 +417,40 @@ func (p *peer) answer(ctx context.Context, cancel context.CancelFunc, key string
 		return
 	}
 	answer := result.Answer
+	answerBlock := (*session.Block)(nil)
+	if b, ok := session.ParseBlock(answer.Block); ok {
+		answerBlock = &b
+	}
 	_ = p.send(outFrame{Kind: "message", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID,
 		Text: answer.Text, Role: "model", Agent: "main", Seq: int64(answer.Seq),
+		Block:       answerBlock,
 		InputTokens: answer.InputTokens, OutputTokens: answer.OutputTokens,
 		CacheReadTokens: answer.CacheReadTokens, CacheWriteTokens: answer.CacheWriteTokens,
 		ReasoningTokens: answer.ReasoningTokens, ReasoningContent: answer.ReasoningContent,
 		InputIncludesCache: answer.InputIncludesCache, Model: answer.Model,
 		DurationMS: answer.DurationMS, GenerationMS: answer.GenerationMS})
 	_ = p.send(outFrame{Kind: "done", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID, Seq: int64(answer.Seq), Turns: result.Turns, TurnsSynced: result.TurnsSynced})
+}
+
+// toolBlock describes a live tool event the way the stored row will: one
+// block per event, keyed the same, so the live thread and the stored thread
+// it becomes are the same blocks. Unknown stages carry no block and take the
+// text path, the way an older daemon's frames do.
+func toolBlock(ev ToolEvent) *session.Block {
+	var b session.Block
+	switch ev.Stage {
+	case "tool_call":
+		b = session.ToolBlock(ev.CallID, ev.Name, ev.Arguments, "", false, 0)
+	case "tool_result":
+		b = session.ToolBlock(ev.CallID, ev.Name, ev.Arguments, ev.Text, ev.IsError, ev.DurationMs)
+	case "request":
+		b = session.RequestBlock(ev.Round, ev.State)
+	case "reasoning":
+		b = session.ReasoningBlock(ev.Round, ev.Text)
+	default:
+		return nil
+	}
+	return &b
 }
 
 func readFrame(r *bufio.Reader) (byte, []byte, error) {
