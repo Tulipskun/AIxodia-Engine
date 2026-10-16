@@ -115,7 +115,6 @@ func (g *Gateway) listProviders(w http.ResponseWriter, r *http.Request) {
 			"name":     provider.Name,
 			"adapter":  provider.Adapter,
 			"endpoint": provider.APIURL,
-			"free":     provider.Free,
 			"keys":     len(provider.Keys),
 		})
 	}

@@ -112,7 +112,6 @@ type Provider struct {
 	Keys     []string
 	Adapter  string
 	Model    string
-	Free     bool
 }
 
 type Adapter interface {

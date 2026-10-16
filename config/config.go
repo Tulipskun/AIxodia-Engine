@@ -16,7 +16,6 @@ type Provider struct {
 	APIURL  string
 	Keys    []string
 	Adapter string
-	Free    bool
 }
 
 var (
@@ -25,7 +24,7 @@ var (
 )
 
 func LoadConfig() error {
-	rows, err := db.Select("providers")
+	rows, err := db.Select("llm_providers")
 	if err != nil {
 		return fmt.Errorf("config: load providers: %w", err)
 	}
@@ -87,24 +86,7 @@ func providerFromRow(row map[string]any) (Provider, error) {
 		APIURL:  stringValue(row["endpoint"]),
 		Keys:    parseKeys(row["keys"]),
 		Adapter: stringValue(row["adapter"]),
-		Free:    boolValue(row["free"]),
 	}, nil
-}
-
-func boolValue(value any) bool {
-	switch value := value.(type) {
-	case float64:
-		return value != 0
-	case int:
-		return value != 0
-	case bool:
-		return value
-	case string:
-		v := strings.TrimSpace(value)
-		return v == "1" || strings.EqualFold(v, "true")
-	default:
-		return false
-	}
 }
 
 func intString(value any) string {

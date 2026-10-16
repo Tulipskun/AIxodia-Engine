@@ -1059,7 +1059,6 @@ func toInternalProvider(cfg config.Provider) provider.Provider {
 		Endpoint: cfg.APIURL,
 		Keys:     cfg.Keys,
 		Adapter:  cfg.Adapter,
-		Free:     cfg.Free,
 	}
 }
 

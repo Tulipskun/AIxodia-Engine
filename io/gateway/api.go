@@ -95,7 +95,6 @@ func providerStatusJSON(cfg config.Provider, probe probeResult) map[string]any {
 		"id":            cfg.Name,
 		"adapter":       cfg.Adapter,
 		"endpoint":      cfg.APIURL,
-		"free_only":     cfg.Free,
 		"key_count":     len(cfg.Keys),
 		"model_count":   probe.ModelCount,
 		"reachable":     probe.Reachable,
@@ -151,7 +150,6 @@ type addProviderRequest struct {
 	Adapter  string   `json:"adapter"`
 	Endpoint string   `json:"endpoint"`
 	Keys     []string `json:"keys"`
-	FreeOnly bool     `json:"free_only"`
 }
 
 func (g *Gateway) apiAddProvider(w http.ResponseWriter, r *http.Request) {
@@ -179,12 +177,11 @@ func (g *Gateway) apiAddProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	keys := cleanKeys(body.Keys)
 	keysJSON, _ := json.Marshal(keys)
-	if _, err := db.Insert("providers", map[string]any{
+	if _, err := db.Insert("llm_providers", map[string]any{
 		"provider": body.ID,
 		"endpoint": strings.TrimSpace(body.Endpoint),
 		"keys":     string(keysJSON),
 		"adapter":  body.Adapter,
-		"free":     boolInt(body.FreeOnly),
 	}); err != nil {
 		writeError(w, http.StatusBadGateway, "database_error", err.Error())
 		return
@@ -200,7 +197,7 @@ func (g *Gateway) apiRemoveProvider(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "unknown provider")
 		return
 	}
-	if err := db.Delete("providers", db.Where{"provider": cfg.Name}); err != nil {
+	if err := db.Delete("llm_providers", db.Where{"provider": cfg.Name}); err != nil {
 		writeError(w, http.StatusBadGateway, "database_error", err.Error())
 		return
 	}
@@ -228,7 +225,7 @@ func (g *Gateway) apiChangeKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	keys := applyKeyChanges(cfg.Keys, body.Add, body.Remove, body.Replace)
 	keysJSON, _ := json.Marshal(keys)
-	if _, err := db.Update("providers", map[string]any{"keys": string(keysJSON)}, db.Where{"provider": cfg.Name}); err != nil {
+	if _, err := db.Update("llm_providers", map[string]any{"keys": string(keysJSON)}, db.Where{"provider": cfg.Name}); err != nil {
 		writeError(w, http.StatusBadGateway, "database_error", err.Error())
 		return
 	}

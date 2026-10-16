@@ -73,7 +73,7 @@ func TestListProvidersShowsEveryProviderWithProbeState(t *testing.T) {
 	gateway, _ := newTestGateway(t, newMemStore())
 	config.Providers = []config.Provider{
 		{ID: "1", Name: "alpha", APIURL: "https://a.example", Keys: []string{"k1", "k2"}, Adapter: "openai"},
-		{ID: "2", Name: "beta", APIURL: "https://b.example", Keys: []string{"k"}, Adapter: "anthropic", Free: true},
+		{ID: "2", Name: "beta", APIURL: "https://b.example", Keys: []string{"k"}, Adapter: "anthropic"},
 	}
 	gateway.probes.set("beta", probeResult{Probed: true, Reachable: true, ModelCount: 3, WorkingModel: "m"})
 
@@ -89,7 +89,6 @@ func TestListProvidersShowsEveryProviderWithProbeState(t *testing.T) {
 			ID         string `json:"id"`
 			Adapter    string `json:"adapter"`
 			KeyCount   int    `json:"key_count"`
-			FreeOnly   bool   `json:"free_only"`
 			Reachable  bool   `json:"reachable"`
 			ModelCount int    `json:"model_count"`
 		} `json:"providers"`
@@ -103,7 +102,7 @@ func TestListProvidersShowsEveryProviderWithProbeState(t *testing.T) {
 	if payload.Providers[0].KeyCount != 2 || payload.Providers[0].Reachable {
 		t.Errorf("alpha = %+v", payload.Providers[0])
 	}
-	if !payload.Providers[1].Reachable || payload.Providers[1].ModelCount != 3 || !payload.Providers[1].FreeOnly {
+	if !payload.Providers[1].Reachable || payload.Providers[1].ModelCount != 3 {
 		t.Errorf("beta = %+v", payload.Providers[1])
 	}
 }
