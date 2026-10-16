@@ -109,16 +109,20 @@ func (m *memStore) AppendTurns(id string, turns []session.TurnInput) error {
 	defer m.mu.Unlock()
 	for _, turn := range turns {
 		m.turns[id] = append(m.turns[id], session.Turn{
-			SessionID:        id,
-			Seq:              len(m.turns[id]) + 1,
-			Role:             turn.Role,
-			Text:             turn.Text,
-			Model:            turn.Model,
-			InputTokens:      turn.InputTokens,
-			OutputTokens:     turn.OutputTokens,
-			DurationMS:       turn.DurationMS,
-			GenerationMS:     turn.GenerationMS,
-			ReasoningContent: turn.ReasoningContent,
+			SessionID:          id,
+			Seq:                len(m.turns[id]) + 1,
+			Role:               turn.Role,
+			Text:               turn.Text,
+			Model:              turn.Model,
+			InputTokens:        turn.InputTokens,
+			OutputTokens:       turn.OutputTokens,
+			CacheReadTokens:    turn.CacheReadTokens,
+			CacheWriteTokens:   turn.CacheWriteTokens,
+			ReasoningTokens:    turn.ReasoningTokens,
+			InputIncludesCache: turn.InputIncludesCache,
+			DurationMS:         turn.DurationMS,
+			GenerationMS:       turn.GenerationMS,
+			ReasoningContent:   turn.ReasoningContent,
 		})
 	}
 	return nil
@@ -892,5 +896,48 @@ func TestRequireTokenComparesTheWholeToken(t *testing.T) {
 	handler.ServeHTTP(healthz, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if healthz.Code != http.StatusNoContent {
 		t.Errorf("/healthz without a token: status = %d, want it open", healthz.Code)
+	}
+}
+
+// What the prompt cache served must reach the stored turn. The figures live in
+// the usage details, not the top-level counts, and the gateway has to carry
+// them through the round loop: a reader that drops them shows a cache that
+// never works, which is exactly what a turn of zeroes looks like.
+func TestCacheReadFromUsageDetailsReachesTheStoredTurn(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-cache","model":"test-model",`+
+			`"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],`+
+			`"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,`+
+			`"prompt_tokens_details":{"cached_tokens":80},`+
+			`"completion_tokens_details":{"reasoning_tokens":2}}}`)
+	}))
+	defer upstream.Close()
+	config.Providers = []config.Provider{{
+		ID: "9", Name: "mock", APIURL: upstream.URL, Keys: []string{"test-key"}, Adapter: "openai",
+	}}
+	store := newMemStore()
+	gateway := New(store, registry.New(), tools.Builtin())
+
+	postJSON(t, gateway.Handler(), "/v1/sessions", `{"title":"t","model":"mock/test-model"}`)
+	recorder := postJSON(t, gateway.Handler(), "/v1/chat/completions",
+		`{"session_id":"s1","messages":[{"role":"user","content":"hi"}]}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("chat status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	turns, _ := store.Turns("s1")
+	last := turns[len(turns)-1]
+	if last.Role != "assistant" {
+		t.Fatalf("last turn = %+v", last)
+	}
+	if last.CacheReadTokens != 80 {
+		t.Errorf("stored cache read = %d, want 80", last.CacheReadTokens)
+	}
+	if last.ReasoningTokens != 2 {
+		t.Errorf("stored reasoning = %d, want 2", last.ReasoningTokens)
+	}
+	if !last.InputIncludesCache {
+		t.Error("input_includes_cache must be set: prompt_tokens already contains the cached part")
 	}
 }

@@ -3,7 +3,6 @@ package openai
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"time"
 
 	"ai-engine/provider"
 )
@@ -110,6 +108,14 @@ type chatResponse struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
 		TotalTokens      int `json:"total_tokens"`
+		// The cache figure rides under the prompt side: OpenAI counts the
+		// tokens the cache served inside PromptTokens rather than beside it.
+		PromptTokensDetails struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+		CompletionTokensDetails struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
 	} `json:"usage"`
 }
 
@@ -133,9 +139,15 @@ type chunk struct {
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
+		PromptTokens        int `json:"prompt_tokens"`
+		CompletionTokens    int `json:"completion_tokens"`
+		TotalTokens         int `json:"total_tokens"`
+		PromptTokensDetails struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+		CompletionTokensDetails struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
 	} `json:"usage"`
 }
 
@@ -170,6 +182,12 @@ func (a *Adapter) Complete(ctx context.Context, req *provider.Request, prov prov
 			PromptTokens:     parsed.Usage.PromptTokens,
 			CompletionTokens: parsed.Usage.CompletionTokens,
 			TotalTokens:      parsed.Usage.TotalTokens,
+			// OpenAI counts the cached tokens inside PromptTokens and the
+			// thinking tokens inside CompletionTokens, so both ride here and
+			// the flag says the prompt already contains its cache half.
+			CacheReadTokens:    parsed.Usage.PromptTokensDetails.CachedTokens,
+			ReasoningTokens:    parsed.Usage.CompletionTokensDetails.ReasoningTokens,
+			InputIncludesCache: true,
 		},
 	}
 	if len(parsed.Choices) > 0 {
@@ -230,6 +248,11 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 				PromptTokens:     part.Usage.PromptTokens,
 				CompletionTokens: part.Usage.CompletionTokens,
 				TotalTokens:      part.Usage.TotalTokens,
+				// The final chunk carries the same usage block the
+				// non-streaming reply does, details included.
+				CacheReadTokens:    part.Usage.PromptTokensDetails.CachedTokens,
+				ReasoningTokens:    part.Usage.CompletionTokensDetails.ReasoningTokens,
+				InputIncludesCache: true,
 			}
 		}
 		for _, choice := range part.Choices {
@@ -498,6 +521,15 @@ type responsesResponse struct {
 		PromptTokens     int `json:"input_tokens"`
 		CompletionTokens int `json:"output_tokens"`
 		TotalTokens      int `json:"total_tokens"`
+		// input_tokens already counts what the cache served (and what was
+		// written to it); the breakdown is what lets the reader split it.
+		InputTokensDetails struct {
+			CachedTokens     int `json:"cached_tokens"`
+			CacheWriteTokens int `json:"cache_write_tokens"`
+		} `json:"input_tokens_details"`
+		OutputTokensDetails struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"output_tokens_details"`
 	} `json:"usage"`
 }
 
@@ -546,7 +578,15 @@ func buildResponsesRequest(req *provider.Request, stream bool) responsesRequest 
 	bodyReq.Include = []string{"reasoning.encrypted_content"}
 	storeFalse := false
 	bodyReq.Store = &storeFalse
-	bodyReq.PromptCacheKey = newCacheKey()
+	// The prompt cache key is what lets the provider reuse the conversation's
+	// prefix. It has to name the conversation and nothing else: a fresh random
+	// key per request scatters the same prefix across buckets, so every round
+	// trip misses and the cache read is always zero. A request with no session
+	// sends no key at all — the provider then buckets by the prompt itself,
+	// which is better than a key that changes every time.
+	if req.SessionID != "" {
+		bodyReq.PromptCacheKey = cacheKeyFor(req.SessionID)
+	}
 	if req.User != "" {
 		bodyReq.User = req.User
 	}
@@ -564,17 +604,13 @@ func buildResponsesRequest(req *provider.Request, stream bool) responsesRequest 
 	return bodyReq
 }
 
-func newCacheKey() string {
-	var raw [12]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return fmt.Sprintf("ai-engine-%d", time.Now().UnixNano())
-	}
-	const b62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-	out := make([]byte, 16)
-	for i := range out {
-		out[i] = b62[int(raw[i%len(raw)])%len(b62)]
-	}
-	return "ai-engine-" + string(out)
+// cacheKeyFor turns a session id into the stable prompt cache key this engine
+// sends. The prefix names the engine so a key cannot collide with one another
+// client of the same provider sent, and the session follows unmodified: it is
+// the conversation's own name, and the whole point is that every request in a
+// conversation carries the same key.
+func cacheKeyFor(session string) string {
+	return "ai-engine-" + session
 }
 
 // parseResponsesOutput folds a Responses API output array into text,
@@ -588,6 +624,13 @@ func parseResponsesOutput(parsed responsesResponse) (string, []provider.ToolCall
 			PromptTokens:     parsed.Usage.PromptTokens,
 			CompletionTokens: parsed.Usage.CompletionTokens,
 			TotalTokens:      parsed.Usage.TotalTokens,
+			// The Responses API names the prompt side "input", and its
+			// input_tokens already contains what the cache served, so the
+			// split lives in the details and the flag says the total does.
+			CacheReadTokens:    parsed.Usage.InputTokensDetails.CachedTokens,
+			CacheWriteTokens:   parsed.Usage.InputTokensDetails.CacheWriteTokens,
+			ReasoningTokens:    parsed.Usage.OutputTokensDetails.ReasoningTokens,
+			InputIncludesCache: true,
 		}
 	}
 	for _, item := range parsed.Output {

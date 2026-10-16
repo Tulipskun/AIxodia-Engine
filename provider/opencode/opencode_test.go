@@ -582,3 +582,39 @@ func TestWorthRetryingWithoutImages(t *testing.T) {
 		}
 	}
 }
+
+// The cache key the adapter sends must name the conversation, not the moment:
+// the same chat has to carry the same key on every turn or the provider can
+// never reuse the prefix it already read.
+func TestResponsesCacheKeyIsStablePerSession(t *testing.T) {
+	server, seen := fakeZen(t)
+	adapter := New()
+	for turn := 0; turn < 2; turn++ {
+		_, err := adapter.Complete(context.Background(), &provider.Request{
+			Model:     "zen-model",
+			Messages:  []provider.Message{{Role: "user", Content: "hi"}},
+			Tools:     []provider.ToolDef{{Name: "current_time", Description: "now"}},
+			SessionID: "chat-123",
+		}, providerFor(server), "key")
+		if err != nil {
+			t.Fatalf("turn %d: %v", turn, err)
+		}
+	}
+	if len(*seen) < 2 {
+		t.Fatalf("requests = %d, want 2", len(*seen))
+	}
+	key := func(body []byte) string {
+		var parsed struct {
+			PromptCacheKey string `json:"prompt_cache_key"`
+		}
+		_ = json.Unmarshal(body, &parsed)
+		return parsed.PromptCacheKey
+	}
+	first, second := key((*seen)[0].Body), key((*seen)[1].Body)
+	if first == "" {
+		t.Fatal("responses request must carry a prompt cache key")
+	}
+	if first != second {
+		t.Errorf("cache key changed between turns: %q then %q", first, second)
+	}
+}

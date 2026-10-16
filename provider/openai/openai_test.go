@@ -237,3 +237,54 @@ func TestZZResponsesToolHistoryMapping(t *testing.T) {
 		t.Errorf("function_call_output item = %v", fco)
 	}
 }
+
+// The Responses API reports what the cache served and wrote in the input
+// details, and what the model thought in the output details. A parser that
+// reads only the top-level counts shows a cache that never works.
+func TestResponsesUsageCarriesCacheAndThinking(t *testing.T) {
+	raw := `{"id":"resp-1","model":"m","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],` +
+		`"usage":{"input_tokens":100,"output_tokens":5,"total_tokens":105,` +
+		`"input_tokens_details":{"cached_tokens":80,"cache_write_tokens":10},` +
+		`"output_tokens_details":{"reasoning_tokens":2}}}`
+	var parsed responsesResponse
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	_, _, usage := parseResponsesOutput(parsed)
+	if usage.CacheReadTokens != 80 {
+		t.Errorf("cache read = %d, want 80", usage.CacheReadTokens)
+	}
+	if usage.CacheWriteTokens != 10 {
+		t.Errorf("cache write = %d, want 10", usage.CacheWriteTokens)
+	}
+	if usage.ReasoningTokens != 2 {
+		t.Errorf("reasoning = %d, want 2", usage.ReasoningTokens)
+	}
+	if !usage.InputIncludesCache {
+		t.Error("input_tokens already contains the cache part; the flag must say so")
+	}
+}
+
+// The prompt cache key names the conversation, so every request in one chat
+// carries the same key. A key that changes per request scatters one prefix
+// across buckets and guarantees a cache miss.
+func TestResponsesCacheKeyNamesTheSession(t *testing.T) {
+	first := buildResponsesRequest(&provider.Request{Model: "m", SessionID: "s1"}, true)
+	same := buildResponsesRequest(&provider.Request{Model: "m", SessionID: "s1"}, true)
+	if first.PromptCacheKey == "" {
+		t.Fatal("a request with a session must carry a prompt cache key")
+	}
+	if first.PromptCacheKey != same.PromptCacheKey {
+		t.Errorf("cache key changed between requests: %q then %q", first.PromptCacheKey, same.PromptCacheKey)
+	}
+
+	other := buildResponsesRequest(&provider.Request{Model: "m", SessionID: "s2"}, true)
+	if other.PromptCacheKey == first.PromptCacheKey {
+		t.Errorf("a different session must key a different prefix, both = %q", other.PromptCacheKey)
+	}
+
+	none := buildResponsesRequest(&provider.Request{Model: "m"}, true)
+	if none.PromptCacheKey != "" {
+		t.Errorf("a request without a session must send no key, got %q", none.PromptCacheKey)
+	}
+}

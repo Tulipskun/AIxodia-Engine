@@ -54,7 +54,11 @@ type completionOptions struct {
 	tools       []provider.ToolDef
 	stream      bool
 	user        string
-	emit        func(string) error
+	// sessionID is the chat's own id. It names the conversation to the
+	// provider's prompt cache, so every turn of one chat carries the same
+	// cache key and the provider can reuse the prefix it already read.
+	sessionID string
+	emit      func(string) error
 	// Live tool activity, reported around each execution. Nil when nobody
 	// watches (non-streaming API); the streaming API and the phone socket
 	// forward them so tool use is visible while it runs.
@@ -180,6 +184,7 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 		tools:       toolset,
 		stream:      body.Stream,
 		user:        body.User,
+		sessionID:   sessionIDOf(stored),
 	}
 	fallback := g.fallbackRoute(stored)
 
@@ -438,6 +443,7 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 			Stream:      options.stream,
 			Tools:       options.tools,
 			User:        options.user,
+			SessionID:   options.sessionID,
 		}
 
 		callStarted := time.Now()
@@ -467,9 +473,7 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 		// so one stored answer read "กำลังเปิดอ่าน...ครับเปิดรูปไม่ขึ้น...ครับ".
 		final.Content = resp.Content
 		final.ReasoningContent = truncate(resp.ReasoningContent, 32*1024)
-		final.Usage.PromptTokens += resp.Usage.PromptTokens
-		final.Usage.CompletionTokens += resp.Usage.CompletionTokens
-		final.Usage.TotalTokens += resp.Usage.TotalTokens
+		addUsage(&final.Usage, resp.Usage)
 		final.FinishReason = resp.FinishReason
 
 		pending = len(resp.ToolCalls) > 0
@@ -528,6 +532,7 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 			TopP:        options.topP,
 			Stream:      options.stream,
 			User:        options.user,
+			SessionID:   options.sessionID,
 		}
 		callStarted := time.Now()
 		resp, err := g.call(ctx, current, request, emit, canRetry)
@@ -537,12 +542,28 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 		}
 		final.Content = resp.Content
 		final.ReasoningContent = truncate(resp.ReasoningContent, 32*1024)
-		final.Usage.PromptTokens += resp.Usage.PromptTokens
-		final.Usage.CompletionTokens += resp.Usage.CompletionTokens
-		final.Usage.TotalTokens += resp.Usage.TotalTokens
+		addUsage(&final.Usage, resp.Usage)
 		final.FinishReason = resp.FinishReason
 	}
 	return final, nil
+}
+
+// addUsage folds one round's usage into the turn's running total. The cache and
+// thinking counts are summed like the token counts they come from: a turn that
+// ran tools made several calls, and the prompt the cache served on each is part
+// of what the turn cost. InputIncludesCache is a property of the provider, not
+// of one round, so any round that says the prompt contains its cache half makes
+// the whole total say so.
+func addUsage(total *provider.Usage, round provider.Usage) {
+	total.PromptTokens += round.PromptTokens
+	total.CompletionTokens += round.CompletionTokens
+	total.TotalTokens += round.TotalTokens
+	total.CacheReadTokens += round.CacheReadTokens
+	total.CacheWriteTokens += round.CacheWriteTokens
+	total.ReasoningTokens += round.ReasoningTokens
+	if round.InputIncludesCache {
+		total.InputIncludesCache = true
+	}
 }
 
 // outOfRounds is the last thing the model reads in a turn that ran out of tool
@@ -884,6 +905,17 @@ func storedTopP(stored *session.Session) *float64 {
 		return nil
 	}
 	return stored.TopP
+}
+
+// sessionIDOf is the chat's id, or "" when nothing is persisted. An empty id is
+// passed on as empty rather than invented: a cache key that is not the
+// conversation's own name would key the wrong prefix, and the provider is
+// better left to bucket by the prompt itself.
+func sessionIDOf(stored *session.Session) string {
+	if stored == nil {
+		return ""
+	}
+	return stored.ID
 }
 
 func firstNonZero(value, fallback int) int {
