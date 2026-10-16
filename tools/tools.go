@@ -69,7 +69,7 @@ func Builtin() map[string]Tool {
 			"- Contents are returned with each line prefixed by its line number as `<line>: <content>`.\n" +
 			"- For directories, entries are returned one per line (without line numbers) with a trailing `/` for subdirectories.\n" +
 			"- Any line longer than 2000 characters is truncated.\n" +
-			"- Pictures cannot be read as text. Pass base64: true to get one as a data URI instead; it is shrunk first and the output is capped, because base64 in a prompt is charged by the character.",
+			"- Pictures cannot be read as text. Pass base64: true to have one shown to you as an image instead; it is shrunk first, and you receive the picture itself, not a base64 string.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -87,7 +87,7 @@ func Builtin() map[string]Tool {
 				},
 				"base64": map[string]any{
 					"type":        "boolean",
-					"description": "Return the file as a base64 data URI instead of as text. Pictures are shrunk to a size a model can use before encoding.",
+					"description": "Return the picture as an image you can see, instead of as text. Pictures are shrunk to a size a model can use first.",
 				},
 			},
 			"required": []any{"filePath"},

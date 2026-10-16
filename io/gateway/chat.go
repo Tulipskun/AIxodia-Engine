@@ -550,7 +550,7 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 				options.onToolCall(call)
 			}
 			started := time.Now()
-			output := g.runTool(ctx, call)
+			output, images := g.runTool(ctx, call)
 			if options.onToolResult != nil {
 				options.onToolResult(call, output, time.Since(started).Milliseconds(), isToolError(output))
 			}
@@ -562,6 +562,18 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 			}
 			conversation = append(conversation, result)
 			final.Trail = append(final.Trail, result)
+			// A picture the tool returned cannot ride on the tool result: both
+			// wire shapes take only a string there. It goes in its own message
+			// so the model can see what the tool actually produced instead of a
+			// wall of base64 it cannot read. It stays out of the trail, so it is
+			// neither stored nor replayed on the next turn.
+			if len(images) > 0 {
+				conversation = append(conversation, provider.Message{
+					Role:    "user",
+					Content: fmt.Sprintf("The picture the %s tool returned is attached below.", call.Name),
+					Images:  images,
+				})
+			}
 		}
 		if options.onTrail != nil {
 			options.onTrail(final.Trail)
@@ -689,16 +701,20 @@ func (g *Gateway) callKeys(ctx context.Context, target route, request *provider.
 	return nil, lastErr
 }
 
-func (g *Gateway) runTool(ctx context.Context, call provider.ToolCall) string {
+// runTool executes one tool call and returns its text plus any pictures it
+// produced. Pictures are lifted out of the text (see extractToolImages) so the
+// base64 never reaches the prompt and the model can be shown the image instead.
+func (g *Gateway) runTool(ctx context.Context, call provider.ToolCall) (string, []provider.Image) {
 	tool, ok := g.tools[call.Name]
 	if !ok {
-		return toolError(fmt.Sprintf("unknown tool %q", call.Name))
+		return toolError(fmt.Sprintf("unknown tool %q", call.Name)), nil
 	}
 	result, err := tool.Run(ctx, call.Arguments)
 	if err != nil {
-		return toolError(err.Error())
+		return toolError(err.Error()), nil
 	}
-	return truncate(result, 32*1024)
+	text, images := extractToolImages(result)
+	return truncate(text, 32*1024), images
 }
 
 // isToolError reports whether tool output is a toolError envelope (a failed
