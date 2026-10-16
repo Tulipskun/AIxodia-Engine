@@ -75,9 +75,9 @@ func TestIsPublicIP(t *testing.T) {
 	}
 }
 
-func TestBuiltinHasBashAndRead(t *testing.T) {
+func TestBuiltinOffersShellAndRead(t *testing.T) {
 	b := Builtin()
-	for _, name := range []string{"current_time", "fetch_url", "bash", "shell", "read"} {
+	for _, name := range []string{"current_time", "fetch_url", "shell", "read"} {
 		tool, ok := b[name]
 		if !ok {
 			t.Fatalf("Builtin() missing tool %q", name)
@@ -88,6 +88,12 @@ func TestBuiltinHasBashAndRead(t *testing.T) {
 		if tool.Run == nil {
 			t.Errorf("tool %q has nil Run", name)
 		}
+	}
+	// The v1 name must be gone: the command tool is "shell" only, matching the
+	// real OpenCode client, and leaving "bash" offered gave the model two
+	// identical tools to choose between.
+	if _, ok := b["bash"]; ok {
+		t.Error("Builtin() still offers the old \"bash\" tool")
 	}
 }
 

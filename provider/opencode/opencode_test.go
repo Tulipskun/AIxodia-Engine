@@ -146,7 +146,7 @@ func TestStreamKeepsGivenContractTools(t *testing.T) {
 	_, err := adapter.Stream(context.Background(), &provider.Request{
 		Model:    "zen-model",
 		Messages: []provider.Message{{Role: "user", Content: "hi"}},
-		Tools:    []provider.ToolDef{{Name: "bash"}, {Name: "read"}},
+		Tools:    []provider.ToolDef{{Name: "shell"}, {Name: "read"}},
 	}, providerFor(server), "key", func(delta string) error {
 		streamed.WriteString(delta)
 		return nil
@@ -158,8 +158,8 @@ func TestStreamKeepsGivenContractTools(t *testing.T) {
 		t.Errorf("emitted = %q", streamed.String())
 	}
 	names := toolNames((*seen)[0].Body)
-	if strings.Join(names, ",") != "bash,read" {
-		t.Errorf("tools = %v, want exactly bash,read", names)
+	if strings.Join(names, ",") != "shell,read" {
+		t.Errorf("tools = %v, want exactly shell,read", names)
 	}
 }
 
@@ -463,7 +463,7 @@ func TestSparkChainReachesResponsesTools(t *testing.T) {
 		Model:     "muse-spark-1.3-contributor-free",
 		Messages:  []provider.Message{{Role: "user", Content: "hi"}},
 		MaxTokens: 60,
-		Tools:     []provider.ToolDef{{Name: "bash", Description: "run"}, {Name: "read", Description: "read"}},
+		Tools:     []provider.ToolDef{{Name: "shell", Description: "run"}, {Name: "read", Description: "read"}},
 	}, providerFor(server), "key", func(s string) error { got = append(got, s); return nil })
 	if err != nil {
 		t.Fatalf("stream: %v (paths=%v)", err, paths)
@@ -493,14 +493,16 @@ func hasTools(body []byte) string {
 }
 
 func TestContractToolsExpandsPartialSets(t *testing.T) {
-	bash := provider.ToolDef{Name: "bash"}
-	got := contractTools([]provider.ToolDef{bash})
+	// The gate wants "shell" by name. A set that lacks it — even the old
+	// "bash" name the engine no longer offers — gets "shell" injected, never a
+	// rename of what was given.
+	got := contractTools([]provider.ToolDef{{Name: "bash"}})
 	names := map[string]bool{}
 	for _, d := range got {
 		names[d.Name] = true
 	}
-	if !names["bash"] || !names["read"] {
-		t.Errorf("contract([bash]) = %v, want bash+read", names)
+	if !names["bash"] || !names["shell"] || !names["read"] {
+		t.Errorf("contract([bash]) = %v, want bash kept and shell+read injected", names)
 	}
 	for _, d := range got {
 		if d.Name == "read" && len(d.Description) < 100 {

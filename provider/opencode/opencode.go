@@ -468,7 +468,7 @@ func contractTools(given []provider.ToolDef) []provider.ToolDef {
 	// The free-tier gate only passes the full rich declarations (it rejects
 	// stub shells), so inject the real builtin defs — never minimal sketches.
 	real := tools.Builtin()
-	if !present[shellTool] && !present["bash"] {
+	if !present[shellTool] {
 		if t, ok := real[shellTool]; ok {
 			out = append(out, t.Def)
 		} else {

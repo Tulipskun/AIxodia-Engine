@@ -470,6 +470,28 @@ func TestChatWithSessionPersistsTurns(t *testing.T) {
 	}
 }
 
+// The default offer carries "shell", not "bash": the real OpenCode client (v2)
+// sends "shell" — v1's "bash" was renamed — and it is the name the free-tier
+// gate recognises. Offering both left the model two identical tools to choose
+// between, and it always picked "bash".
+func TestDefaultToolsetOffersShellNotBash(t *testing.T) {
+	g := New(session.NewD1(), registry.New(), tools.Builtin())
+	defs, err := g.selectTools(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, d := range defs {
+		names[d.Name] = true
+	}
+	if !names["shell"] {
+		t.Errorf("default offer is missing shell: %v", names)
+	}
+	if names["bash"] {
+		t.Errorf("default offer still carries the old bash: %v", names)
+	}
+}
+
 // A tool's duration has to reach the stored tool_result row: the phone shows it
 // while the step runs, but the stored thread replaces the live one when the turn
 // closes, and a figure that lived only in the live frame would vanish there.

@@ -28,10 +28,14 @@ type Tool struct {
 }
 
 func Builtin() map[string]Tool {
-	bashDef := provider.ToolDef{
-		Name: "bash",
-		Description: "Executes a given bash command in a persistent shell session with optional timeout, " +
-			"ensuring proper handling and security measures.\n\nBe aware: OS: linux, Shell: bash\n\n" +
+	// The command tool is "shell", not "bash": that is the name the real
+	// OpenCode client (v2) sends — v1's "bash" was renamed to "shell" — and the
+	// one the free-tier gate recognises. Offering "bash" as well only made the
+	// model choose between two identical tools it then never used.
+	shellDef := provider.ToolDef{
+		Name: "shell",
+		Description: "Executes a given shell command in a persistent shell session with optional timeout, " +
+			"ensuring proper handling and security measures.\n\nBe aware: OS: linux, Shell: sh\n\n" +
 			"All commands run in the current working directory by default. Use the `workdir` parameter if you " +
 			"need to run a command in a different directory. AVOID using `cd <directory> && <command>` patterns - " +
 			"use `workdir` instead.\n\nThe command argument is required. " +
@@ -56,8 +60,6 @@ func Builtin() map[string]Tool {
 			"required": []any{"command"},
 		},
 	}
-	shellDef := bashDef
-	shellDef.Name = "shell"
 	readDef := provider.ToolDef{
 		Name: "read",
 		Description: "Read a file or directory from the local filesystem. If the path does not exist, an error is returned.\n\n" +
@@ -127,7 +129,6 @@ func Builtin() map[string]Tool {
 			},
 			Run: fetchURL,
 		},
-		"bash":  {Def: bashDef, Run: runBash},
 		"shell": {Def: shellDef, Run: runBash},
 		"read":  {Def: readDef, Run: readFile},
 	}
