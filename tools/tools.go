@@ -97,7 +97,7 @@ func Builtin() map[string]Tool {
 	}
 	editDef := provider.ToolDef{
 		Name:        "edit",
-		Description: "Edit a file by replacing exact text. oldString must occur in the file; by default it must occur exactly once (set replaceAll to replace every occurrence). Returns a short confirmation.",
+		Description: "Edit a file by replacing exact text. oldString must occur exactly once in the file. Returns a short confirmation.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -112,10 +112,6 @@ func Builtin() map[string]Tool {
 				"newString": map[string]any{
 					"type":        "string",
 					"description": "Text to replace oldString with.",
-				},
-				"replaceAll": map[string]any{
-					"type":        "boolean",
-					"description": "Replace every occurrence instead of requiring a unique match. Defaults to false.",
 				},
 			},
 			"required": []any{"filePath", "oldString", "newString"},
@@ -334,11 +330,10 @@ func readFile(ctx context.Context, args string) (string, error) {
 
 func runEdit(ctx context.Context, args string) (string, error) {
 	input := struct {
-		Path       string `json:"path"`
-		FilePath   string `json:"filePath"`
-		OldString  string `json:"oldString"`
-		NewString  string `json:"newString"`
-		ReplaceAll bool   `json:"replaceAll"`
+		Path      string `json:"path"`
+		FilePath  string `json:"filePath"`
+		OldString string `json:"oldString"`
+		NewString string `json:"newString"`
 	}{}
 	if err := json.Unmarshal([]byte(args), &input); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
@@ -378,15 +373,10 @@ func runEdit(ctx context.Context, args string) (string, error) {
 	if count == 0 {
 		return "", fmt.Errorf("oldString not found in %s", p)
 	}
-	if count > 1 && !input.ReplaceAll {
-		return "", fmt.Errorf("oldString occurs %d times in %s; set replaceAll or add more context", count, p)
+	if count > 1 {
+		return "", fmt.Errorf("oldString occurs %d times in %s; add more context to make it unique", count, p)
 	}
-	var newText string
-	if input.ReplaceAll {
-		newText = strings.ReplaceAll(text, input.OldString, input.NewString)
-	} else {
-		newText = strings.Replace(text, input.OldString, input.NewString, 1)
-	}
+	newText := strings.Replace(text, input.OldString, input.NewString, 1)
 	if err := os.WriteFile(clean, []byte(newText), st.Mode().Perm()); err != nil {
 		return "", fmt.Errorf("cannot write %s: %w", p, err)
 	}
