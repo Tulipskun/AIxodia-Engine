@@ -10,7 +10,7 @@ curl -fsSL https://raw.githubusercontent.com/Tulipskun/ai-engine/main/install.sh
 ```
 
 Installs to `/usr/local/bin`: `ai-engine`, `aixodia`, and `cloudflared` (if it
-is not already on your PATH). Linux/x86_64 only.
+is not already on your PATH). Linux x86_64 and arm64.
 
 Updating is the same command: it replaces the files. Restart a running engine
 afterwards to pick up the new build.

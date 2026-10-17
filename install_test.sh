@@ -67,6 +67,40 @@ else
   fail "failed download (rc=$rc, out=$out)"
 fi
 
+# --- downloads match the host architecture ----------------------------------
+record=$(mktemp)
+fakecurl=$(mktemp -d)
+cat > "$fakecurl/curl" <<'FAKE'
+#!/usr/bin/env bash
+# stand-in curl: records the requested url and writes a dummy file
+out=""; url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+printf '%s\n' "$url" >> "$RECORD"
+printf 'x\n' > "$out"
+FAKE
+chmod +x "$fakecurl/curl"
+want=amd64
+case "$(uname -m)" in aarch64|arm64) want=arm64 ;; esac
+prefix=$(mktemp -d)
+PATH="$fakecurl:/usr/bin:/bin" RECORD="$record" AIXODIA_PREFIX="$prefix" \
+  bash "$HERE/install.sh" >/dev/null 2>&1
+if grep -q "ai-engine-linux-$want" "$record"; then
+  pass "engine download matches the host arch ($want)"
+else
+  fail "engine url for $want: $(tr '\n' ' ' < "$record")"
+fi
+if grep -q "cloudflared-linux-$want" "$record"; then
+  pass "cloudflared download matches the host arch ($want)"
+else
+  fail "cloudflared url for $want: $(tr '\n' ' ' < "$record")"
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then
   echo "all installer tests passed"

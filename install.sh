@@ -16,7 +16,6 @@ set -euo pipefail
 REPO_SLUG="${AIXODIA_REPO_SLUG:-Tulipskun/ai-engine}"
 REF="${AIXODIA_REF:-main}"
 RAW_BASE="${AIXODIA_RAW_BASE:-https://raw.githubusercontent.com/$REPO_SLUG/$REF}"
-ENGINE_URL="${AIXODIA_ENGINE_URL:-https://github.com/$REPO_SLUG/releases/download/engine-latest/ai-engine}"
 PREFIX="${AIXODIA_PREFIX:-/usr/local/bin}"
 
 log() { printf '==> %s\n' "$*"; }
@@ -36,10 +35,12 @@ PLATFORM="${AIXODIA_PLATFORM:-}"
 if [ -z "$PLATFORM" ]; then
   case "$os/$arch" in
     Linux/x86_64) PLATFORM=linux-amd64 ;;
-    *) die "unsupported platform: $os/$arch (only Linux/x86_64 builds are published)" ;;
+    Linux/aarch64 | Linux/arm64) PLATFORM=linux-arm64 ;;
+    *) die "unsupported platform: $os/$arch (only Linux x86_64 and arm64 builds are published)" ;;
   esac
 fi
 
+ENGINE_URL="${AIXODIA_ENGINE_URL:-https://github.com/$REPO_SLUG/releases/download/engine-latest/ai-engine-$PLATFORM}"
 CLOUDFLARED_URL="${AIXODIA_CLOUDFLARED_URL:-https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-$PLATFORM}"
 
 mkdir -p "$PREFIX"
