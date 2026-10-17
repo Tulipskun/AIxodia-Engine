@@ -11,12 +11,9 @@ import (
 	"ai-engine/db"
 )
 
-// d1LogEnabled flips on once the daemon has verified its D1 credentials, so
-// logging never fires network calls during tests or before configuration.
 var d1LogEnabled bool
 
 const maxEngineLogRows = 5000
-const maxArchivedLogTables = 3
 
 type logEntry struct {
 	level string
@@ -28,8 +25,6 @@ var (
 	logOnce sync.Once
 )
 
-// startD1Logging spins up the single writer goroutine and tees the standard
-// logger into it. Call once, from main, after db.Verify succeeds.
 func startD1Logging() {
 	logOnce.Do(func() {
 		d1LogEnabled = true
@@ -43,7 +38,6 @@ func logWriter() {
 		if !d1LogEnabled {
 			continue
 		}
-		// Rotate before inserting if the current table is full.
 		if n, err := countEngineLogs("engine_logs"); err == nil && n >= maxEngineLogRows {
 			rotateEngineLogs()
 		}
@@ -93,11 +87,9 @@ func createEngineLogsTable() {
 }
 
 func rotateEngineLogs() {
-	// Drop the oldest archive.
 	if tableExists("engine_logs_3") {
 		_, _ = db.Query("DROP TABLE engine_logs_3")
 	}
-	// Shift archives down.
 	if tableExists("engine_logs_2") {
 		_, _ = db.Query("ALTER TABLE engine_logs_2 RENAME TO engine_logs_3")
 	}
@@ -110,8 +102,6 @@ func rotateEngineLogs() {
 	createEngineLogsTable()
 }
 
-// D1Log queues a structured log entry. Safe to call from any goroutine; it never
-// blocks the caller (drops when the queue is full).
 func D1Log(level, format string, args ...any) {
 	if !d1LogEnabled {
 		return
@@ -140,6 +130,3 @@ func (t *teeWriter) Write(p []byte) (int, error) {
 	}
 	return n, err
 }
-
-// Ensure the writer is used.
-var _ io.Writer = (*teeWriter)(nil)

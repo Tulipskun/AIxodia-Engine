@@ -78,7 +78,9 @@ func ParseBlock(s string) (Block, bool) {
 
 // RequestID names the block of one provider request round: the request's
 // own lifecycle and the reasoning that belongs to it share it, so the phone
-// can grow the right block no matter which event arrives first.
+// can grow the right block no matter which event arrives first. The format is
+// part of the protocol ("req<N}"): a tool event carries only its round, and
+// the phone derives this id to settle the round that spoke.
 func RequestID(round int) string {
 	return fmt.Sprintf("req%d", round)
 }
