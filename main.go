@@ -43,8 +43,8 @@ func main() {
 		log.Fatal("CF_TOKEN is invalid")
 	}
 
-	// Persist engine logs to D1 (rotating, max 3 archived tables) for debug.
-	createEngineLogsTableLocal()
+	// Engine logs live on this machine (local SQLite, rotating). Opening the
+	// database is what creates the table, so there is nothing to do before it.
 	startD1Logging()
 	log.Print("engine started")
 

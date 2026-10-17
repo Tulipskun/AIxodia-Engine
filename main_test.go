@@ -69,3 +69,13 @@ func TestSessionModelPrefersPin(t *testing.T) {
 		t.Errorf("error = %q", got)
 	}
 }
+
+// A log helper must never take the daemon down when the log database has not
+// been opened yet: main used to create the table before startD1Logging, which
+// panicked the whole process on a nil handle.
+func TestLogTableCreationIsSafeBeforeStart(t *testing.T) {
+	saved := logDB
+	logDB = nil
+	defer func() { logDB = saved }()
+	createEngineLogsTableLocal() // must not panic
+}

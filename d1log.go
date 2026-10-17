@@ -103,6 +103,9 @@ func tableExistsLocal(name string) bool {
 }
 
 func createEngineLogsTableLocal() {
+	if logDB == nil {
+		return
+	}
 	_, _ = logDB.Exec(`CREATE TABLE IF NOT EXISTS engine_logs (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		level TEXT NOT NULL DEFAULT 'info',
