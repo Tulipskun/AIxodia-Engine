@@ -2,7 +2,6 @@ package session
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,7 +11,6 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"ai-engine/db"
 )
 
 type SQLite struct {
@@ -102,91 +100,7 @@ func (s *SQLite) migrate() error {
 	return nil
 }
 
-// MigrateFromD1 copies chat history from D1 into this SQLite store if the
-// store is empty. Idempotent: does nothing when rows already exist.
-func (s *SQLite) MigrateFromD1() error {
-	var n int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM chat_sessions").Scan(&n); err != nil {
-		return err
-	}
-	if n > 0 {
-		return nil
-	}
-	// Read from D1.
-	rows, err := db.Query("SELECT id,title,provider,model,sub_provider,sub_model,sub_enabled,reasoning,temperature,top_p,max_tokens,created_at,updated_at FROM chat_sessions")
-	if err != nil {
-		return err
-	}
-	for _, r := range rows {
-		_, _ = s.db.Exec(`INSERT OR IGNORE INTO chat_sessions (id,title,provider,model,sub_provider,sub_model,sub_enabled,reasoning,temperature,top_p,max_tokens,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			str(r["id"]), str(r["title"]), str(r["provider"]), str(r["model"]), str(r["sub_provider"]), str(r["sub_model"]),
-			intVal(r["sub_enabled"]), intVal(r["reasoning"]), floatPtr(r["temperature"]), floatPtr(r["top_p"]), intVal(r["max_tokens"]),
-			int64Val(r["created_at"]), int64Val(r["updated_at"]))
-	}
-	trows, err := db.Query("SELECT session_id,seq,role,agent,job_id,text,created_at,model,input_tokens,output_tokens,duration_ms,cache_read_tokens,cache_write_tokens,reasoning_tokens,input_includes_cache,generation_ms,reasoning_content,block FROM chat_turns")
-	if err != nil {
-		return err
-	}
-	for _, r := range trows {
-		_, _ = s.db.Exec(`INSERT OR IGNORE INTO chat_turns (session_id,seq,role,agent,job_id,text,created_at,model,input_tokens,output_tokens,duration_ms,cache_read_tokens,cache_write_tokens,reasoning_tokens,input_includes_cache,generation_ms,reasoning_content,block) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			str(r["session_id"]), intVal(r["seq"]), str(r["role"]), str(r["agent"]), str(r["job_id"]), str(r["text"]), int64Val(r["created_at"]), str(r["model"]),
-			intVal(r["input_tokens"]), intVal(r["output_tokens"]), intVal(r["duration_ms"]), intVal(r["cache_read_tokens"]), intVal(r["cache_write_tokens"]), intVal(r["reasoning_tokens"]),
-			intVal(r["input_includes_cache"]), intVal(r["generation_ms"]), str(r["reasoning_content"]), str(r["block"]))
-	}
-	return nil
-}
 
-func str(v any) string {
-	if v == nil {
-		return ""
-	}
-	switch t := v.(type) {
-	case string:
-		return t
-	default:
-		b, _ := json.Marshal(t)
-		return string(b)
-	}
-}
-func intVal(v any) int {
-	switch t := v.(type) {
-	case float64:
-		return int(t)
-	case int:
-		return t
-	case int64:
-		return int(t)
-	case string:
-		var n int
-		fmt.Sscanf(t, "%d", &n)
-		return n
-	}
-	return 0
-}
-func int64Val(v any) int64 {
-	switch t := v.(type) {
-	case float64:
-		return int64(t)
-	case int:
-		return int64(t)
-	case int64:
-		return t
-	case string:
-		var n int64
-		fmt.Sscanf(t, "%d", &n)
-		return n
-	}
-	return 0
-}
-func floatPtr(v any) *float64 {
-	switch t := v.(type) {
-	case float64:
-		return &t
-	case nil:
-		return nil
-	}
-	return nil
-}
 
 func (s *SQLite) Create(params NewSession) (*Session, error) {
 	now := time.Now().Unix()

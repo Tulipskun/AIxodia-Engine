@@ -55,6 +55,7 @@ type Gateway struct {
 	modelList map[string]modelCache
 	brMu      sync.Mutex
 	breakers  map[string]*breaker
+	logReader func(int, string) []map[string]any
 	probes    *probeCache
 	startedAt int64
 	// uploadDir is where attachments are stored, so the agent can read them.
@@ -85,6 +86,7 @@ func New(sessions SessionStore, reg *registry.Registry, toolset map[string]tools
 // SetStartedAt records when this engine process began, so /healthz can report
 // how long the daemon has been up.
 func (g *Gateway) SetStartedAt(unixSeconds int64) { g.startedAt = unixSeconds }
+func (g *Gateway) SetLogReader(fn func(int, string) []map[string]any) { g.logReader = fn }
 
 // SetEngineUpdater registers the self-update routine behind
 // POST /api/engine/update. The routine returns a commit function so the handler

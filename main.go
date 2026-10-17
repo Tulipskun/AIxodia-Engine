@@ -44,7 +44,7 @@ func main() {
 	}
 
 	// Persist engine logs to D1 (rotating, max 3 archived tables) for debug.
-	createEngineLogsTable()
+	createEngineLogsTableLocal()
 	startD1Logging()
 	log.Print("engine started")
 
@@ -74,6 +74,7 @@ func main() {
 
 	g := gateway.New(store, registry.New(), tools.Builtin())
 	g.SetStartedAt(startedAt)
+	g.SetLogReader(recentLogs)
 	// Attachments land here; the agent reads them from these paths. Kaggle's
 	// /kaggle/working is the writable directory, and the env can point it
 	// somewhere else (or to nothing, which disables uploads).
@@ -487,10 +488,6 @@ func openSessionStore() (gateway.SessionStore, error) {
 		st, err := session.NewSQLite(p)
 		if err != nil {
 			return nil, err
-		}
-		// One-time migration from D1 if local store is empty.
-		if err := st.MigrateFromD1(); err != nil {
-			log.Printf("session: migrate from D1 failed: %v", err)
 		}
 		return st, nil
 	}
