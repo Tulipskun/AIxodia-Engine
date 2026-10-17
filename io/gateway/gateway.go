@@ -42,6 +42,7 @@ type SessionStore interface {
 	Turns(id string) ([]session.Turn, error)
 	History(id string) ([]provider.Message, error)
 	AppendTurns(id string, turns []session.TurnInput) ([]session.Turn, error)
+	Unfinished(limit int) ([]session.UnfinishedTurn, error)
 }
 
 type Gateway struct {

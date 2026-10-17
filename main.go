@@ -43,6 +43,11 @@ func main() {
 		log.Fatal("CF_TOKEN is invalid")
 	}
 
+	// Persist engine logs to D1 (rotating, max 3 archived tables) for debug.
+	createEngineLogsTable()
+	startD1Logging()
+	log.Print("engine started")
+
 	// A newer engine (started later) owns the `daemon/*` keys. If one is already
 	// running, this older instance exits instead of fighting it.
 	if newer, err := newerDaemonRunning(startedAt); err != nil {
@@ -57,7 +62,7 @@ func main() {
 	// every turn on an unknown column.
 	session.EnsureTurns()
 
-	// Session store: D1 (default) or local SQLite (AIXODIA_SESSION_STORE=sqlite).
+	// Session store: local SQLite (default) or D1 (AIXODIA_SESSION_STORE=d1). Chat history lives on the engine machine; D1 keeps only config/provider + daemon keys.
 	// SQLite keeps chat history on the engine machine (HF backup covers it).
 	store, err := openSessionStore()
 	if err != nil {
@@ -477,7 +482,8 @@ func parseStarted(version string) int64 {
 
 
 func openSessionStore() (gateway.SessionStore, error) {
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("AIXODIA_SESSION_STORE")), "sqlite") {
+	storeType := strings.TrimSpace(os.Getenv("AIXODIA_SESSION_STORE"))
+	if storeType == "" || strings.EqualFold(storeType, "sqlite") {
 		p := strings.TrimSpace(os.Getenv("AIXODIA_DB_PATH"))
 		st, err := session.NewSQLite(p)
 		if err != nil {
