@@ -133,6 +133,7 @@ func (g *Gateway) registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/settings", g.apiPutSettings)
 	mux.HandleFunc("POST /v1/attachments", g.apiUploadAttachment)
 	mux.HandleFunc("POST /api/engine/update", g.apiEngineUpdate)
+	mux.HandleFunc("POST /api/push-now", g.apiPushNow)
 	mux.HandleFunc("GET /api/sessions/{id}", g.apiGetSessionAgent)
 	mux.HandleFunc("PATCH /api/sessions/{id}", g.apiPatchSessionAgent)
 }
