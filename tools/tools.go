@@ -95,6 +95,32 @@ func Builtin() map[string]Tool {
 			"required": []any{"filePath"},
 		},
 	}
+	editDef := provider.ToolDef{
+		Name: "edit",
+		Description: "Edit a file by replacing exact text. oldString must occur in the file; by default it must occur exactly once (set replaceAll to replace every occurrence). Returns a short confirmation.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"filePath": map[string]any{
+					"type":        "string",
+					"description": "Absolute path to the file to edit.",
+				},
+				"oldString": map[string]any{
+					"type":        "string",
+					"description": "Exact text to find and replace.",
+				},
+				"newString": map[string]any{
+					"type":        "string",
+					"description": "Text to replace oldString with.",
+				},
+				"replaceAll": map[string]any{
+					"type":        "boolean",
+					"description": "Replace every occurrence instead of requiring a unique match. Defaults to false.",
+				},
+			},
+			"required": []any{"filePath", "oldString", "newString"},
+		},
+	}
 	m := map[string]Tool{
 		"current_time": {
 			Def: provider.ToolDef{
@@ -131,6 +157,7 @@ func Builtin() map[string]Tool {
 		},
 		"shell": {Def: shellDef, Run: runBash},
 		"read":  {Def: readDef, Run: readFile},
+		"edit":  {Def: editDef, Run: runEdit},
 	}
 	return m
 }
@@ -303,6 +330,67 @@ func readFile(ctx context.Context, args string) (string, error) {
 		out += "[truncated]"
 	}
 	return out, nil
+}
+
+func runEdit(ctx context.Context, args string) (string, error) {
+	input := struct {
+		Path       string `json:"path"`
+		FilePath   string `json:"filePath"`
+		OldString  string `json:"oldString"`
+		NewString  string `json:"newString"`
+		ReplaceAll bool   `json:"replaceAll"`
+	}{}
+	if err := json.Unmarshal([]byte(args), &input); err != nil {
+		return "", fmt.Errorf("invalid arguments: %w", err)
+	}
+	p := strings.TrimSpace(input.FilePath)
+	if p == "" {
+		p = strings.TrimSpace(input.Path)
+	}
+	if p == "" {
+		return "", fmt.Errorf("filePath must not be empty")
+	}
+	if !filepath.IsAbs(p) {
+		return "", fmt.Errorf("filePath must be absolute")
+	}
+	clean := filepath.Clean(p)
+	for _, blocked := range []string{"/proc", "/sys", "/dev"} {
+		if clean == blocked || strings.HasPrefix(clean, blocked+"/") {
+			return "", fmt.Errorf("editing %s is not allowed", blocked)
+		}
+	}
+	st, err := os.Stat(clean)
+	if err != nil {
+		return "", fmt.Errorf("cannot stat %s: %w", p, err)
+	}
+	if st.IsDir() {
+		return "", fmt.Errorf("%s is a directory", p)
+	}
+	raw, err := os.ReadFile(clean)
+	if err != nil {
+		return "", fmt.Errorf("cannot read %s: %w", p, err)
+	}
+	text := string(raw)
+	if text == input.OldString && input.OldString == input.NewString {
+		return "", fmt.Errorf("oldString and newString must differ")
+	}
+	count := strings.Count(text, input.OldString)
+	if count == 0 {
+		return "", fmt.Errorf("oldString not found in %s", p)
+	}
+	if count > 1 && !input.ReplaceAll {
+		return "", fmt.Errorf("oldString occurs %d times in %s; set replaceAll or add more context", count, p)
+	}
+	var newText string
+	if input.ReplaceAll {
+		newText = strings.ReplaceAll(text, input.OldString, input.NewString)
+	} else {
+		newText = strings.Replace(text, input.OldString, input.NewString, 1)
+	}
+	if err := os.WriteFile(clean, []byte(newText), st.Mode().Perm()); err != nil {
+		return "", fmt.Errorf("cannot write %s: %w", p, err)
+	}
+	return fmt.Sprintf("edited %s: %d replacement(s)", p, count), nil
 }
 
 func currentTime(ctx context.Context, args string) (string, error) {
