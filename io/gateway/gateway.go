@@ -42,6 +42,7 @@ type SessionStore interface {
 	Turns(id string) ([]session.Turn, error)
 	History(id string) ([]provider.Message, error)
 	AppendTurns(id string, turns []session.TurnInput) ([]session.Turn, error)
+	Unfinished(limit int) ([]session.UnfinishedTurn, error)
 }
 
 type Gateway struct {
@@ -101,6 +102,7 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/sessions", g.listSessions)
 	mux.HandleFunc("GET /v1/sessions/{id}", g.getSession)
 	mux.HandleFunc("DELETE /v1/sessions/{id}", g.deleteSession)
+	mux.HandleFunc("PATCH /v1/sessions/{id}", g.updateSession)
 	mux.HandleFunc("GET /v1/sessions/{id}/turns", g.getSessionTurns)
 	mux.HandleFunc("POST /v1/chat/completions", g.chat)
 	g.registerAPI(mux)
@@ -189,6 +191,26 @@ func (g *Gateway) deleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+}
+
+func (g *Gateway) updateSession(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Title string `json:"title"`
+	}
+	_ = decodeBody(r, &body)
+	found, err := g.sessions.Get(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found", err.Error())
+		return
+	}
+	if body.Title != "" {
+		found.Title = body.Title
+	}
+	if err := g.sessions.SaveConfig(r.PathValue("id"), *found); err != nil {
+		writeError(w, http.StatusBadGateway, "database_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, found)
 }
 
 func (g *Gateway) getSessionTurns(w http.ResponseWriter, r *http.Request) {
