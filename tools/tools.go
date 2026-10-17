@@ -96,7 +96,7 @@ func Builtin() map[string]Tool {
 		},
 	}
 	editDef := provider.ToolDef{
-		Name: "edit",
+		Name:        "edit",
 		Description: "Edit a file by replacing exact text. oldString must occur in the file; by default it must occur exactly once (set replaceAll to replace every occurrence). Returns a short confirmation.",
 		Parameters: map[string]any{
 			"type": "object",
