@@ -10,7 +10,6 @@ import (
 	"ai-engine/provider"
 
 	_ "modernc.org/sqlite"
-
 )
 
 type SQLite struct {
@@ -99,8 +98,6 @@ func (s *SQLite) migrate() error {
 	}
 	return nil
 }
-
-
 
 func (s *SQLite) Create(params NewSession) (*Session, error) {
 	now := time.Now().Unix()

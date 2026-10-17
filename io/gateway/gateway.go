@@ -85,7 +85,7 @@ func New(sessions SessionStore, reg *registry.Registry, toolset map[string]tools
 
 // SetStartedAt records when this engine process began, so /healthz can report
 // how long the daemon has been up.
-func (g *Gateway) SetStartedAt(unixSeconds int64) { g.startedAt = unixSeconds }
+func (g *Gateway) SetStartedAt(unixSeconds int64)                     { g.startedAt = unixSeconds }
 func (g *Gateway) SetLogReader(fn func(int, string) []map[string]any) { g.logReader = fn }
 
 // SetEngineUpdater registers the self-update routine behind
