@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -189,6 +190,17 @@ func runBash(ctx context.Context, args string) (string, error) {
 	} else if st, err := os.Stat("/kaggle/working"); err == nil && st.IsDir() {
 		cmd.Dir = "/kaggle/working"
 	}
+	// Put the shell in its own process group so a timeout kills the whole
+	// tree, not just the top-level shell (which would leave children running
+	// and the call hanging).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Kill the process group if the context is cancelled (timeout or caller).
+	go func() {
+		<-ctx.Done()
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+	}()
 	out, err := cmd.CombinedOutput()
 	text := string(out)
 	if len(text) > 32*1024 {

@@ -23,7 +23,7 @@ const (
 	// notebook used read, bash, read, bash and was cut off there, so the turn
 	// ended with the model still narrating what it was about to look at and
 	// nothing done (D1 turns for session smv6psjidc792, seq 15-26).
-	maxToolRounds  = 12
+	maxToolRounds  = 100
 	keyAttempts    = 3
 	upstreamWait   = 180 * time.Second
 	requestMaxBody = 8 << 20
