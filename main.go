@@ -475,7 +475,6 @@ func parseStarted(version string) int64 {
 	return n
 }
 
-
 func openSessionStore() (gateway.SessionStore, error) {
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("AIXODIA_SESSION_STORE")), "sqlite") {
 		p := strings.TrimSpace(os.Getenv("AIXODIA_DB_PATH"))

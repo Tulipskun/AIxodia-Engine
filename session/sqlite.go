@@ -188,7 +188,6 @@ func floatPtr(v any) *float64 {
 	return nil
 }
 
-
 func (s *SQLite) Create(params NewSession) (*Session, error) {
 	now := time.Now().Unix()
 	session := Session{
