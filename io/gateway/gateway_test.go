@@ -131,6 +131,10 @@ func (m *memStore) AppendTurns(id string, turns []session.TurnInput) ([]session.
 	return append([]session.Turn(nil), m.turns[id][start:]...), nil
 }
 
+func (m *memStore) Unfinished(limit int) ([]session.UnfinishedTurn, error) {
+	return nil, nil
+}
+
 func fakeUpstream(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

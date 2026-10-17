@@ -28,6 +28,8 @@ import (
 	"ai-engine/tools"
 )
 
+var sessionStore gateway.SessionStore
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -55,9 +57,17 @@ func main() {
 	// every turn on an unknown column.
 	session.EnsureTurns()
 
+	// Session store: D1 (default) or local SQLite (AIXODIA_SESSION_STORE=sqlite).
+	// SQLite keeps chat history on the engine machine (HF backup covers it).
+	store, err := openSessionStore()
+	if err != nil {
+		log.Fatal(err)
+	}
+	sessionStore = store
+
 	startConfigReloader(ctx)
 
-	g := gateway.New(session.NewD1(), registry.New(), tools.Builtin())
+	g := gateway.New(store, registry.New(), tools.Builtin())
 	g.SetStartedAt(startedAt)
 	// Attachments land here; the agent reads them from these paths. Kaggle's
 	// /kaggle/working is the writable directory, and the env can point it
@@ -463,4 +473,21 @@ func parseStarted(version string) int64 {
 		return 0
 	}
 	return n
+}
+
+
+func openSessionStore() (gateway.SessionStore, error) {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("AIXODIA_SESSION_STORE")), "sqlite") {
+		p := strings.TrimSpace(os.Getenv("AIXODIA_DB_PATH"))
+		st, err := session.NewSQLite(p)
+		if err != nil {
+			return nil, err
+		}
+		// One-time migration from D1 if local store is empty.
+		if err := st.MigrateFromD1(); err != nil {
+			log.Printf("session: migrate from D1 failed: %v", err)
+		}
+		return st, nil
+	}
+	return session.NewD1(), nil
 }

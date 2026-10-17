@@ -51,7 +51,11 @@ func publishHandover(ctx context.Context, tunnelURL string) {
 		EngineStarted: startedAt,
 		At:            time.Now().Unix(),
 	}
-	if open, err := session.NewD1().Unfinished(20); err == nil {
+	store := sessionStore
+	if store == nil {
+		store = session.NewD1()
+	}
+	if open, err := store.Unfinished(20); err == nil {
 		note.Unfinished = open
 	} else {
 		log.Printf("handover: cannot list unfinished turns: %v", err)
