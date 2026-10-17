@@ -679,7 +679,9 @@ func (a *Adapter) CompleteViaResponses(ctx context.Context, req *provider.Reques
 	if err != nil {
 		return nil, err
 	}
-	httpRequest.Header.Set("Authorization", "Bearer "+key)
+	if key != "" {
+		httpRequest.Header.Set("Authorization", "Bearer "+key)
+	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Accept", "application/json")
 	httpRequest.Header.Set("User-Agent", provider.UserAgent)
@@ -760,7 +762,9 @@ func (a *Adapter) StreamViaResponses(ctx context.Context, req *provider.Request,
 	if err != nil {
 		return nil, err
 	}
-	httpRequest.Header.Set("Authorization", "Bearer "+key)
+	if key != "" {
+		httpRequest.Header.Set("Authorization", "Bearer "+key)
+	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Accept", "text/event-stream")
 	httpRequest.Header.Set("User-Agent", provider.UserAgent)
@@ -893,7 +897,9 @@ func (a *Adapter) doRequest(ctx context.Context, prov provider.Provider, key str
 	if err != nil {
 		return nil, err
 	}
-	httpRequest.Header.Set("Authorization", "Bearer "+key)
+	if key != "" {
+		httpRequest.Header.Set("Authorization", "Bearer "+key)
+	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Accept", "application/json")
 	httpRequest.Header.Set("User-Agent", provider.UserAgent)

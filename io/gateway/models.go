@@ -97,7 +97,8 @@ func (g *Gateway) providerModels(cfg config.Provider) ([]string, error) {
 }
 
 func fetchModels(cfg config.Provider) ([]string, error) {
-	if len(cfg.Keys) == 0 {
+	// Non-login mode: opencode free tier needs no key. Other providers still do.
+	if len(cfg.Keys) == 0 && cfg.Adapter != "opencode" {
 		return nil, fmt.Errorf("provider has no API keys")
 	}
 	endpoint, err := provider.Endpoint(cfg.APIURL, "/v1/models", "/models")
@@ -112,7 +113,9 @@ func fetchModels(cfg config.Provider) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	request.Header.Set("Authorization", "Bearer "+cfg.Keys[0])
+	if len(cfg.Keys) > 0 {
+		request.Header.Set("Authorization", "Bearer "+cfg.Keys[0])
+	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", provider.UserAgent)
 
