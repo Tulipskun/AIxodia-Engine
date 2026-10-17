@@ -83,10 +83,6 @@ func main() {
 		uploads = "/kaggle/working/uploads"
 	}
 	g.SetUploadDir(uploads)
-	// Self-update: the daemon can replace its own binary and re-execute, so a
-	// new engine build reaches a running kernel without a dataset version or a
-	// kernel restart.
-	g.SetEngineUpdater(prepareSelfUpdate)
 	gw := g.Handler()
 	model := strings.TrimSpace(os.Getenv("AIXODIA_MODEL"))
 	if model == "" {
@@ -177,7 +173,6 @@ func startTunnel(ctx context.Context) (string, error) {
 	if err := cmd.Start(); err != nil {
 		return "", err
 	}
-	rememberTunnel(cmd)
 	found := make(chan string, 1)
 	go func() {
 		scanner := bufio.NewScanner(stderr)

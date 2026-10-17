@@ -1175,3 +1175,15 @@ func TestRequestRoundsAndBlocksRideTheStream(t *testing.T) {
 		t.Errorf("closing answer block = %q, want a text block", last.Block)
 	}
 }
+
+// Self-update was removed: updates happen by re-running the install script, so
+// the daemon must no longer expose a route that swaps its own binary.
+func TestEngineUpdateRouteIsGone(t *testing.T) {
+	g := New(newMemStore(), registry.New(), tools.Builtin())
+	req := httptest.NewRequest(http.MethodPost, "/api/engine/update", nil)
+	rec := httptest.NewRecorder()
+	g.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("POST /api/engine/update = %d, want 404 (self-update removed)", rec.Code)
+	}
+}
