@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Tests for install.sh. Run: bash install_test.sh
+# Downloads are served from file:// fixtures, so nothing touches the network
+# and nothing is written outside a temp prefix.
+set -u
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+fails=0
+pass() { echo "ok   - $1"; }
+fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
+
+srv=$(mktemp -d)
+printf '#!/usr/bin/env bash\necho engine\n' > "$srv/ai-engine"
+printf '#!/usr/bin/env bash\necho launcher\n' > "$srv/aixodia"
+printf '#!/usr/bin/env bash\necho cloudflared\n' > "$srv/cloudflared"
+chmod +x "$srv"/*
+missing="file://$srv/does-not-exist"
+
+# --- fresh install drops all three binaries in the prefix --------------------
+prefix=$(mktemp -d)
+out=$(PATH=/usr/bin:/bin \
+      AIXODIA_PREFIX="$prefix" AIXODIA_PLATFORM=linux-amd64 \
+      AIXODIA_ENGINE_URL="file://$srv/ai-engine" \
+      AIXODIA_RAW_BASE="file://$srv" \
+      AIXODIA_CLOUDFLARED_URL="file://$srv/cloudflared" \
+      bash "$HERE/install.sh" 2>&1); rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "install exits 0"
+else
+  fail "install rc=$rc ($out)"
+fi
+for f in ai-engine aixodia cloudflared; do
+  if [ -x "$prefix/$f" ]; then
+    pass "installed $f (executable)"
+  else
+    fail "missing or not executable: $prefix/$f"
+  fi
+done
+
+# --- an existing cloudflared is kept, not downloaded again -------------------
+prefix=$(mktemp -d)
+fakebin=$(mktemp -d)
+printf '#!/usr/bin/env bash\nexec sleep 100000\n' > "$fakebin/cloudflared"
+chmod +x "$fakebin/cloudflared"
+out=$(PATH="$fakebin:$PATH" \
+      AIXODIA_PREFIX="$prefix" AIXODIA_PLATFORM=linux-amd64 \
+      AIXODIA_ENGINE_URL="file://$srv/ai-engine" \
+      AIXODIA_RAW_BASE="file://$srv" \
+      AIXODIA_CLOUDFLARED_URL="$missing" \
+      bash "$HERE/install.sh" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qi "already installed"; then
+  pass "keeps an existing cloudflared"
+else
+  fail "existing cloudflared (rc=$rc, out=$out)"
+fi
+
+# --- a failed download fails the install ------------------------------------
+prefix=$(mktemp -d)
+out=$(AIXODIA_PREFIX="$prefix" AIXODIA_PLATFORM=linux-amd64 \
+      AIXODIA_ENGINE_URL="$missing" \
+      AIXODIA_RAW_BASE="file://$srv" \
+      AIXODIA_CLOUDFLARED_URL="file://$srv/cloudflared" \
+      bash "$HERE/install.sh" 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi "cannot download"; then
+  pass "a failed download fails loudly"
+else
+  fail "failed download (rc=$rc, out=$out)"
+fi
+
+echo
+if [ "$fails" -eq 0 ]; then
+  echo "all installer tests passed"
+else
+  echo "$fails installer test(s) failed"
+  exit 1
+fi

@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# aixodia — run the AIxodia engine (127.0.0.1:8787 + a Cloudflare quick tunnel)
+# in the background, print the public URL, and give the prompt back.
+#
+# Only one secret is needed: CF_TOKEN, which the engine uses to publish its
+# tunnel URL to D1 so the phone can find it.
+#
+#   export CF_TOKEN=xxxxx
+#   aixodia            # start (background)
+#   aixodia status      # is it up, and at which url
+#   aixodia logs        # tail the engine log
+#   aixodia stop        # shut it down
+set -uo pipefail
+
+AIXODIA_HOME="${AIXODIA_HOME:-$HOME/.aixodia}"
+PID_FILE="$AIXODIA_HOME/aixodia.pid"
+LOG_FILE="$AIXODIA_HOME/aixodia.log"
+ENGINE_BIN="${AIXODIA_ENGINE_BIN:-ai-engine}"
+TUNNEL_WAIT="${AIXODIA_TUNNEL_WAIT:-90}"
+
+die() { echo "aixodia: $*" >&2; exit 1; }
+
+# running_pid prints the live pid and succeeds only if the pidfile names a
+# process that is still alive.
+running_pid() {
+  [ -f "$PID_FILE" ] || return 1
+  local pid
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  printf '%s' "$pid"
+}
+
+tunnel_url() {
+  [ -f "$LOG_FILE" ] || return 1
+  grep -Eo 'https://[A-Za-z0-9.-]+\.trycloudflare\.com' "$LOG_FILE" | tail -1
+}
+
+cmd_start() {
+  [ -n "${CF_TOKEN:-}" ] || die "CF_TOKEN is not set — run: export CF_TOKEN=xxxxx"
+
+  local pid
+  if pid="$(running_pid)"; then
+    echo "aixodia: already running (pid $pid, url $(tunnel_url 2>/dev/null || echo unknown))"
+    return 0
+  fi
+
+  local resolved
+  resolved="$(command -v "$ENGINE_BIN" 2>/dev/null || true)"
+  [ -n "$resolved" ] || die "engine binary '$ENGINE_BIN' not found — reinstall with the install script"
+  command -v cloudflared >/dev/null 2>&1 || die "cloudflared not found in PATH — reinstall with the install script"
+
+  mkdir -p "$AIXODIA_HOME" || die "cannot create $AIXODIA_HOME"
+  # A fresh log per start so the url read below cannot be a stale one.
+  : > "$LOG_FILE"
+
+  # The engine's defaults assume Kaggle; point them at this machine instead.
+  export AIXODIA_DB_PATH="${AIXODIA_DB_PATH:-$AIXODIA_HOME/aixodia.db}"
+  export AIXODIA_UPLOADS="${AIXODIA_UPLOADS:-$AIXODIA_HOME/uploads}"
+  export AIXODIA_KERNEL_STARTED="${AIXODIA_KERNEL_STARTED:-$(date +%s)}"
+
+  cd "$AIXODIA_HOME" || die "cannot enter $AIXODIA_HOME"
+  nohup "$resolved" >>"$LOG_FILE" 2>&1 &
+  pid=$!
+  echo "$pid" > "$PID_FILE"
+
+  local waited=0 url
+  while [ "$waited" -lt "$TUNNEL_WAIT" ]; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "aixodia: engine exited during startup — last log lines:" >&2
+      tail -n 15 "$LOG_FILE" >&2
+      rm -f "$PID_FILE"
+      return 1
+    fi
+    url="$(tunnel_url || true)"
+    if [ -n "$url" ]; then
+      echo "aixodia: running (pid $pid)"
+      echo "aixodia: url $url"
+      echo "aixodia: log $LOG_FILE"
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  echo "aixodia: no tunnel url after ${TUNNEL_WAIT}s — engine still starting (pid $pid)" >&2
+  echo "aixodia: follow it with: aixodia logs" >&2
+  return 1
+}
+
+cmd_stop() {
+  local pid
+  if ! pid="$(running_pid)"; then
+    rm -f "$PID_FILE"
+    echo "aixodia: not running"
+    return 1
+  fi
+  kill "$pid" 2>/dev/null
+  local i
+  for i in $(seq 1 20); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.25
+  done
+  if kill -0 "$pid" 2>/dev/null; then kill -9 "$pid" 2>/dev/null; fi
+  rm -f "$PID_FILE"
+  echo "aixodia: stopped (pid $pid)"
+}
+
+cmd_status() {
+  local pid
+  if pid="$(running_pid)"; then
+    echo "aixodia: running (pid $pid, url $(tunnel_url 2>/dev/null || echo unknown))"
+    return 0
+  fi
+  echo "aixodia: not running"
+  return 1
+}
+
+cmd_logs() {
+  if [ -f "$LOG_FILE" ]; then tail -n "${1:-40}" "$LOG_FILE"; else echo "aixodia: no log yet"; fi
+}
+
+case "${1:-}" in
+  stop) cmd_stop ;;
+  status) cmd_status ;;
+  logs) cmd_logs "${2:-40}" ;;
+  ""|start|up) cmd_start ;;
+  *)
+    echo "usage: aixodia [start|stop|status|logs]" >&2
+    exit 2
+    ;;
+esac

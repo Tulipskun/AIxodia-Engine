@@ -33,3 +33,8 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+      - name: Launcher and installer tests
+        run: |
+          bash aixodia_test.sh
+          bash install_test.sh

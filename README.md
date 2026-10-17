@@ -1,0 +1,49 @@
+# ai-engine
+
+The AIxodia engine: serves the chat API on `127.0.0.1:8787`, publishes itself
+through a Cloudflare quick tunnel, and tells the phone where to find it via D1.
+
+## Install / update
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Tulipskun/ai-engine/main/install.sh | sudo bash
+```
+
+Installs to `/usr/local/bin`: `ai-engine`, `aixodia`, and `cloudflared` (if it
+is not already on your PATH). Linux/x86_64 only.
+
+Updating is the same command: it replaces the files. Restart a running engine
+afterwards to pick up the new build.
+
+## Run
+
+```bash
+export CF_TOKEN=xxxxx    # the only secret; used to publish the tunnel url to D1
+aixodia
+```
+
+`aixodia` starts the engine in the background, waits for the tunnel URL, prints
+it, and gives the prompt back.
+
+```bash
+aixodia status      # up? at which url
+aixodia logs        # tail the engine log
+aixodia stop        # shut it down
+```
+
+State lives in `~/.aixodia/` (`aixodia.pid`, `aixodia.log`, `aixodia.db`,
+`uploads/`).
+
+## Configuration
+
+Only `CF_TOKEN` is required. Everything else has a working default, and the
+usual engine variables (`AIXODIA_MODEL`, `AIXODIA_SESSION_STORE`,
+`AIXODIA_DB_PATH`, `AIXODIA_UPLOADS`) are respected when set.
+
+## Development
+
+```bash
+go build ./... && go vet ./... && gofmt -l . && go test ./...
+bash aixodia_test.sh      # launcher
+bash install_test.sh      # installer (offline, file:// fixtures)
+```
