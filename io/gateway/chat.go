@@ -740,7 +740,7 @@ const outOfRounds = "This turn has no tool calls left, so no further tool can ru
 	"Do not describe what you are about to look at, and do not ask for another tool."
 
 func (g *Gateway) call(ctx context.Context, target route, request *provider.Request, emit func(string) error, canRetry func() bool) (*provider.Response, error) {
-	if len(target.prov.Keys) == 0 {
+	if len(target.prov.Keys) == 0 && target.prov.Adapter != "opencode" {
 		return nil, fmt.Errorf("provider %s has no API keys", target.prov.Name)
 	}
 	now := time.Now()
@@ -762,10 +762,23 @@ func (g *Gateway) callKeys(ctx context.Context, target route, request *provider.
 	callCtx, cancel := context.WithTimeout(ctx, upstreamWait)
 	defer cancel()
 
-	start := g.nextKey(target.prov.Name)
+	// Non-login mode: an opencode provider may carry no keys (free tier).
+	// Treat it as a single empty key so the rotation math below still works.
+	keys := target.prov.Keys
+	if len(keys) == 0 {
+		keys = []string{""}
+	}
+	start := 0
+	if len(target.prov.Keys) > 0 {
+		start = g.nextKey(target.prov.Name)
+	}
 
 	var lastErr error
-	for attempt := 0; attempt < keyAttempts; attempt++ {
+	attempts := keyAttempts
+	if len(target.prov.Keys) == 0 {
+		attempts = 1
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
 		if attempt > 0 && !canRetry() {
 			break
 		}
@@ -776,7 +789,7 @@ func (g *Gateway) callKeys(ctx context.Context, target route, request *provider.
 			case <-time.After(time.Duration(attempt) * 750 * time.Millisecond):
 			}
 		}
-		key := target.prov.Keys[(start+attempt)%len(target.prov.Keys)]
+		key := keys[(start+attempt)%len(keys)]
 		var (
 			resp *provider.Response
 			err  error
