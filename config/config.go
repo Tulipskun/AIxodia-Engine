@@ -6,8 +6,6 @@ import (
 	"log"
 	"strings"
 	"sync"
-
-	"ai-engine/db"
 )
 
 type Provider struct {
@@ -23,19 +21,16 @@ var (
 	mu        sync.RWMutex
 )
 
+// LoadConfig reads the providers into memory. They live in the engine's own
+// store now, so this is a file read: nothing the phone does waits on D1.
 func LoadConfig() error {
-	rows, err := db.Select("llm_providers")
+	store, err := current()
+	if err != nil {
+		return err
+	}
+	providers, err := store.List()
 	if err != nil {
 		return fmt.Errorf("config: load providers: %w", err)
-	}
-
-	providers := make([]Provider, 0, len(rows))
-	for _, row := range rows {
-		provider, err := providerFromRow(row)
-		if err != nil {
-			return err
-		}
-		providers = append(providers, provider)
 	}
 
 	mu.Lock()
@@ -77,16 +72,6 @@ func GetProviderByName(name string) (Provider, bool) {
 		}
 	}
 	return Provider{}, false
-}
-
-func providerFromRow(row map[string]any) (Provider, error) {
-	return Provider{
-		ID:      intString(row["index"]),
-		Name:    stringValue(row["provider"]),
-		APIURL:  stringValue(row["endpoint"]),
-		Keys:    parseKeys(row["keys"]),
-		Adapter: stringValue(row["adapter"]),
-	}, nil
 }
 
 func intString(value any) string {

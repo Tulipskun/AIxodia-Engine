@@ -75,6 +75,10 @@ func main() {
 	storeDB = handle
 	store := session.NewSQLite(handle)
 	sessionStore = store
+	// Providers — with the API keys that exist nowhere else — live in that same
+	// file. D1's copy is read once by the reloader below, and only while the
+	// store holds none.
+	config.SetStore(config.NewStore(storeDB))
 	// History written before it lived on this machine is still in D1.
 	importLegacyHistory(store)
 
@@ -142,10 +146,18 @@ func main() {
 }
 
 func startConfigReloader(ctx context.Context) {
-	if err := config.LoadConfig(); err != nil {
-		log.Printf("config: %v", err)
-		return
+	loadProviders := func() {
+		// ImportLegacyProviders does nothing once the store holds a provider,
+		// which is what makes it the retry for a boot whose read of D1 failed:
+		// a provider set is never half-carried.
+		if _, err := config.ImportLegacyProviders(db.Query); err != nil {
+			log.Printf("config: %v", err)
+		}
+		if err := config.LoadConfig(); err != nil {
+			log.Printf("config: %v", err)
+		}
 	}
+	loadProviders()
 	go func() {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
@@ -154,9 +166,7 @@ func startConfigReloader(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := config.LoadConfig(); err != nil {
-					log.Printf("config: %v", err)
-				}
+				loadProviders()
 			}
 		}
 	}()

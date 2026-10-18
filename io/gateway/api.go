@@ -176,13 +176,7 @@ func (g *Gateway) apiAddProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	keys := cleanKeys(body.Keys)
-	keysJSON, _ := json.Marshal(keys)
-	if _, err := db.Insert("llm_providers", map[string]any{
-		"provider": body.ID,
-		"endpoint": strings.TrimSpace(body.Endpoint),
-		"keys":     string(keysJSON),
-		"adapter":  body.Adapter,
-	}); err != nil {
+	if err := config.AddProvider(body.ID, body.Endpoint, body.Adapter, keys); err != nil {
 		writeError(w, http.StatusBadGateway, "database_error", err.Error())
 		return
 	}
@@ -197,7 +191,7 @@ func (g *Gateway) apiRemoveProvider(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "unknown provider")
 		return
 	}
-	if err := db.Delete("llm_providers", db.Where{"provider": cfg.Name}); err != nil {
+	if err := config.RemoveProvider(cfg.Name); err != nil {
 		writeError(w, http.StatusBadGateway, "database_error", err.Error())
 		return
 	}
@@ -224,8 +218,7 @@ func (g *Gateway) apiChangeKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	keys := applyKeyChanges(cfg.Keys, body.Add, body.Remove, body.Replace)
-	keysJSON, _ := json.Marshal(keys)
-	if _, err := db.Update("llm_providers", map[string]any{"keys": string(keysJSON)}, db.Where{"provider": cfg.Name}); err != nil {
+	if err := config.SetProviderKeys(cfg.Name, keys); err != nil {
 		writeError(w, http.StatusBadGateway, "database_error", err.Error())
 		return
 	}
