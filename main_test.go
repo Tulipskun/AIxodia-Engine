@@ -12,7 +12,7 @@ func TestParseStarted(t *testing.T) {
 	cases := map[string]int64{
 		"aixodia-engine/1.1 started=1791457000": 1791457000,
 		"aixodia-engine/1.0":                    0,
-		"":                                 0,
+		"":                                      0,
 		"aixodia-engine/1.1 started=abc":        0,
 	}
 	for in, want := range cases {
