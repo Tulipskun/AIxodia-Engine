@@ -507,10 +507,3 @@ func writeRaw(w http.ResponseWriter, body json.RawMessage) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }
-
-func boolInt(value bool) int {
-	if value {
-		return 1
-	}
-	return 0
-}

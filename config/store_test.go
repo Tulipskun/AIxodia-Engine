@@ -185,4 +185,79 @@ func TestImportLegacyProvidersIgnoresAMissingTable(t *testing.T) {
 	if err != nil || imported != 0 {
 		t.Fatalf("import = %d, err = %v; want 0, nil", imported, err)
 	}
+
+	// And it stops reading D1: the table is gone for good.
+	reads := 0
+	imported, err = ImportLegacyProviders(func(string, ...any) ([]map[string]any, error) {
+		reads++
+		return nil, nil
+	})
+	if err != nil || imported != 0 || reads != 0 {
+		t.Fatalf("second import = %d, reads = %d, err = %v; want 0, 0, nil", imported, reads, err)
+	}
+}
+
+// A phone that removes its last provider means it. While D1 still holds the
+// table, the import must not hand them back.
+func TestImportLegacyProvidersDoesNotResurrectRemovedProviders(t *testing.T) {
+	store := testStore(t)
+	SetStore(store)
+	t.Cleanup(func() { SetStore(nil) })
+
+	rows := []map[string]any{{"index": float64(1), "provider": "Opencode", "endpoint": "https://opencode.test", "keys": `["sk-one"]`, "adapter": "opencode"}}
+	if _, err := ImportLegacyProviders(func(string, ...any) ([]map[string]any, error) { return rows, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Remove("Opencode"); err != nil {
+		t.Fatal(err)
+	}
+
+	reads := 0
+	imported, err := ImportLegacyProviders(func(string, ...any) ([]map[string]any, error) {
+		reads++
+		return rows, nil
+	})
+	if err != nil || imported != 0 || reads != 0 {
+		t.Fatalf("import after removing everything = %d, reads = %d, err = %v; want 0, 0, nil", imported, reads, err)
+	}
+}
+
+// D1's table can also be there but empty: that is the end of the copy too.
+func TestImportLegacyProvidersStopsOnAnEmptyD1Table(t *testing.T) {
+	store := testStore(t)
+	SetStore(store)
+	t.Cleanup(func() { SetStore(nil) })
+
+	if _, err := ImportLegacyProviders(func(string, ...any) ([]map[string]any, error) { return nil, nil }); err != nil {
+		t.Fatal(err)
+	}
+	reads := 0
+	imported, err := ImportLegacyProviders(func(string, ...any) ([]map[string]any, error) {
+		reads++
+		return nil, nil
+	})
+	if err != nil || imported != 0 || reads != 0 {
+		t.Fatalf("second import = %d, reads = %d, err = %v; want 0, 0, nil", imported, reads, err)
+	}
+}
+
+// A read that failed is the one case that has to be tried again: the keys are
+// still in D1 and the phone has none.
+func TestImportLegacyProvidersRetriesWhileTheReadFails(t *testing.T) {
+	store := testStore(t)
+	SetStore(store)
+	t.Cleanup(func() { SetStore(nil) })
+
+	imported, err := ImportLegacyProviders(func(string, ...any) ([]map[string]any, error) {
+		return nil, errors.New("db: D1 query failed: HTTP 502")
+	})
+	if err == nil || imported != 0 {
+		t.Fatalf("import = %d, err = %v; want the failure reported", imported, err)
+	}
+
+	rows := []map[string]any{{"index": float64(3), "provider": "Opencode", "endpoint": "https://opencode.test", "keys": `["sk-one"]`, "adapter": "opencode"}}
+	imported, err = ImportLegacyProviders(func(string, ...any) ([]map[string]any, error) { return rows, nil })
+	if err != nil || imported != 1 {
+		t.Fatalf("second import = %d, err = %v; want 1, nil", imported, err)
+	}
 }

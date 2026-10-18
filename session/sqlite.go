@@ -204,5 +204,3 @@ func (s *SQLite) Unfinished(limit int) ([]UnfinishedTurn, error) {
 	}
 	return out, rows.Err()
 }
-
-func (s *SQLite) Close() error { return s.db.Close() }

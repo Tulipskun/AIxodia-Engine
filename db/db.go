@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -21,10 +19,6 @@ var (
 var httpClient = &http.Client{Timeout: 15 * time.Second}
 
 const apiBase = "https://api.cloudflare.com/client/v4"
-
-var identifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
-type Where map[string]any
 
 type apiResponse struct {
 	Success bool            `json:"success"`
@@ -148,96 +142,6 @@ func TouchDaemon(version string, heartbeat int64) error {
 	return nil
 }
 
-func Insert(table string, data map[string]any) (int64, error) {
-	if err := validateIdentifier(table); err != nil {
-		return 0, err
-	}
-	if len(data) == 0 {
-		return 0, fmt.Errorf("db: insert data is empty")
-	}
-
-	columns, values, err := buildColumnsAndValues(data)
-	if err != nil {
-		return 0, err
-	}
-
-	sql := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", table, strings.Join(columns, ", "), placeholders(len(values)))
-	rows, err := Query(sql, values...)
-	if err != nil {
-		return 0, err
-	}
-	return affectedRows(rows), nil
-}
-
-func Select(table string, where ...Where) ([]map[string]any, error) {
-	if err := validateIdentifier(table); err != nil {
-		return nil, err
-	}
-
-	sql := "SELECT * FROM " + table
-	var params []any
-
-	if len(where) > 0 && len(where[0]) > 0 {
-		clause, values, err := buildWhere(where[0])
-		if err != nil {
-			return nil, err
-		}
-		sql += " WHERE " + clause
-		params = values
-	}
-
-	return Query(sql, params...)
-}
-
-func Update(table string, data map[string]any, where ...Where) (int64, error) {
-	if err := validateIdentifier(table); err != nil {
-		return 0, err
-	}
-	if len(data) == 0 {
-		return 0, fmt.Errorf("db: update data is empty")
-	}
-	if len(where) == 0 || len(where[0]) == 0 {
-		return 0, fmt.Errorf("db: update requires Where")
-	}
-
-	setClause, setValues, err := buildSet(data)
-	if err != nil {
-		return 0, err
-	}
-	whereClause, whereValues, err := buildWhere(where[0])
-	if err != nil {
-		return 0, err
-	}
-
-	params := append(setValues, whereValues...)
-	rows, err := Query(fmt.Sprintf("UPDATE %s SET %s WHERE %s", table, setClause, whereClause), params...)
-	if err != nil {
-		return 0, err
-	}
-	return affectedRows(rows), nil
-}
-
-func Delete(table string, where ...Where) error {
-	if err := validateIdentifier(table); err != nil {
-		return err
-	}
-
-	sql := "DELETE FROM " + table
-	var params []any
-
-	if len(where) > 0 && len(where[0]) > 0 {
-		clause, values, err := buildWhere(where[0])
-		if err != nil {
-			return err
-		}
-		sql += " WHERE " + clause
-		params = values
-	}
-
-	_, err := Query(sql, params...)
-	return err
-}
-
 func Query(sql string, params ...any) ([]map[string]any, error) {
 	sql = strings.TrimSpace(sql)
 	if sql == "" {
@@ -286,93 +190,6 @@ func Query(sql string, params ...any) ([]map[string]any, error) {
 	}
 
 	return results[0].Rows, nil
-}
-
-func buildColumnsAndValues(data map[string]any) ([]string, []any, error) {
-	columns := make([]string, 0, len(data))
-	for column := range data {
-		if err := validateIdentifier(column); err != nil {
-			return nil, nil, err
-		}
-		columns = append(columns, column)
-	}
-	sort.Strings(columns)
-
-	values := make([]any, len(columns))
-	for i, column := range columns {
-		values[i] = data[column]
-	}
-	return columns, values, nil
-}
-
-func buildSet(data map[string]any) (string, []any, error) {
-	columns, values, err := buildColumnsAndValues(data)
-	if err != nil {
-		return "", nil, err
-	}
-
-	parts := make([]string, len(columns))
-	for i, column := range columns {
-		parts[i] = column + " = ?"
-	}
-	return strings.Join(parts, ", "), values, nil
-}
-
-func buildWhere(where Where) (string, []any, error) {
-	if len(where) == 0 {
-		return "", nil, fmt.Errorf("db: Where is empty")
-	}
-
-	columns := make([]string, 0, len(where))
-	for column := range where {
-		if err := validateIdentifier(column); err != nil {
-			return "", nil, err
-		}
-		columns = append(columns, column)
-	}
-	sort.Strings(columns)
-
-	parts := make([]string, len(columns))
-	values := make([]any, len(columns))
-	for i, column := range columns {
-		parts[i] = column + " = ?"
-		values[i] = where[column]
-	}
-	return strings.Join(parts, " AND "), values, nil
-}
-
-func validateIdentifier(value string) error {
-	if !identifierPattern.MatchString(value) {
-		return fmt.Errorf("db: invalid identifier %q", value)
-	}
-	return nil
-}
-
-func placeholders(count int) string {
-	parts := make([]string, count)
-	for i := range parts {
-		parts[i] = "?"
-	}
-	return strings.Join(parts, ", ")
-}
-
-func affectedRows(rows []map[string]any) int64 {
-	if len(rows) == 0 {
-		return 0
-	}
-	for _, key := range []string{"rows_written", "changes"} {
-		if value, ok := rows[0][key]; ok {
-			switch n := value.(type) {
-			case float64:
-				return int64(n)
-			case int64:
-				return n
-			case int:
-				return int64(n)
-			}
-		}
-	}
-	return 0
 }
 
 func get(path, cfToken string, out any) error {

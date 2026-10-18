@@ -80,4 +80,12 @@ func TestSessionAgentPatchLandsInTheStore(t *testing.T) {
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("patch of a missing session = %d, body = %s; want 404", recorder.Code, recorder.Body.String())
 	}
+
+	// Reading the pin of a chat that is gone is a 404 too, not a store failure:
+	// the phone asks for this after it deletes a chat.
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/sessions/no-such-chat", nil))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("get of a missing session = %d, body = %s; want 404", recorder.Code, recorder.Body.String())
+	}
 }

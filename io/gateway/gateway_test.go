@@ -53,7 +53,7 @@ func (m *memStore) Get(id string) (*session.Session, error) {
 	defer m.mu.Unlock()
 	found, ok := m.sessions[id]
 	if !ok {
-		return nil, io.EOF
+		return nil, session.ErrNotFound
 	}
 	return found, nil
 }
