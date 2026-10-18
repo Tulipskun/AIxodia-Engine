@@ -40,6 +40,7 @@ type SessionStore interface {
 	List() ([]session.Session, error)
 	Delete(id string) error
 	SaveConfig(id string, saved session.Session) error
+	SaveAgent(id string, patch session.AgentPatch) error
 	Turns(id string) ([]session.Turn, error)
 	History(id string) ([]provider.Message, error)
 	AppendTurns(id string, turns []session.TurnInput) ([]session.Turn, error)

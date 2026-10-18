@@ -91,6 +91,31 @@ func (m *memStore) SaveConfig(id string, saved session.Session) error {
 	return nil
 }
 
+func (m *memStore) SaveAgent(id string, patch session.AgentPatch) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	target, ok := m.sessions[id]
+	if !ok {
+		return session.ErrNotFound
+	}
+	if patch.Provider != nil {
+		target.Provider = *patch.Provider
+	}
+	if patch.Model != nil {
+		target.Model = *patch.Model
+	}
+	if patch.SubProvider != nil {
+		target.SubProvider = *patch.SubProvider
+	}
+	if patch.SubModel != nil {
+		target.SubModel = *patch.SubModel
+	}
+	if patch.SubEnabled != nil {
+		target.SubEnabled = *patch.SubEnabled
+	}
+	return nil
+}
+
 func (m *memStore) Turns(id string) ([]session.Turn, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -480,7 +505,7 @@ func TestChatWithSessionPersistsTurns(t *testing.T) {
 // gate recognises. Offering both left the model two identical tools to choose
 // between, and it always picked "bash".
 func TestDefaultToolsetOffersShellNotBash(t *testing.T) {
-	g := New(session.NewD1(), registry.New(), tools.Builtin())
+	g := New(newMemStore(), registry.New(), tools.Builtin())
 	defs, err := g.selectTools(nil)
 	if err != nil {
 		t.Fatal(err)

@@ -18,9 +18,9 @@ import (
 	"sync"
 
 	"ai-engine/config"
-	"ai-engine/db"
 	"ai-engine/localdb"
 	"ai-engine/provider/registry"
+	"ai-engine/session"
 )
 
 var providerIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -409,26 +409,23 @@ func (g *Gateway) apiPutSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) apiGetSessionAgent(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Select("chat_sessions", db.Where{"id": r.PathValue("id")})
+	saved, err := g.sessions.Get(r.PathValue("id"))
+	if errors.Is(err, session.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "session not found")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "database_error", err.Error())
 		return
 	}
-	if len(rows) == 0 {
-		writeError(w, http.StatusNotFound, "not_found", "session not found")
-		return
-	}
-	row := rows[0]
-	model := rowString(row, "model")
-	subModel := rowString(row, "sub_model")
 	writeJSON(w, http.StatusOK, map[string]any{
-		"provider":     rowString(row, "provider"),
-		"model":        model,
-		"pinned":       model != "",
-		"sub_provider": rowString(row, "sub_provider"),
-		"sub_model":    subModel,
-		"sub_enabled":  rowBool(row, "sub_enabled"),
-		"sub_pinned":   subModel != "",
+		"provider":     saved.Provider,
+		"model":        saved.Model,
+		"pinned":       saved.Model != "",
+		"sub_provider": saved.SubProvider,
+		"sub_model":    saved.SubModel,
+		"sub_enabled":  saved.SubEnabled,
+		"sub_pinned":   saved.SubModel != "",
 	})
 }
 
@@ -442,33 +439,39 @@ type patchSessionAgentRequest struct {
 	SubEnabled  *bool   `json:"sub_enabled"`
 }
 
-// applySessionAgentPatch turns a PATCH body into the column values to write.
-func applySessionAgentPatch(body patchSessionAgentRequest) map[string]any {
-	data := map[string]any{}
+// applySessionAgentPatch turns a PATCH body into the fields to write. The clear
+// flags exist because an absent field means "unchanged": without them the phone
+// could not say "this chat has no pinned model any more".
+func applySessionAgentPatch(body patchSessionAgentRequest) session.AgentPatch {
+	patch := session.AgentPatch{}
 	if body.ClearModel {
-		data["provider"] = ""
-		data["model"] = ""
+		empty := ""
+		patch.Provider, patch.Model = &empty, &empty
 	}
 	if body.Provider != nil {
-		data["provider"] = strings.TrimSpace(*body.Provider)
+		trimmed := strings.TrimSpace(*body.Provider)
+		patch.Provider = &trimmed
 	}
 	if body.Model != nil {
-		data["model"] = strings.TrimSpace(*body.Model)
+		trimmed := strings.TrimSpace(*body.Model)
+		patch.Model = &trimmed
 	}
 	if body.ClearSub {
-		data["sub_provider"] = ""
-		data["sub_model"] = ""
+		empty := ""
+		patch.SubProvider, patch.SubModel = &empty, &empty
 	}
 	if body.SubProvider != nil {
-		data["sub_provider"] = strings.TrimSpace(*body.SubProvider)
+		trimmed := strings.TrimSpace(*body.SubProvider)
+		patch.SubProvider = &trimmed
 	}
 	if body.SubModel != nil {
-		data["sub_model"] = strings.TrimSpace(*body.SubModel)
+		trimmed := strings.TrimSpace(*body.SubModel)
+		patch.SubModel = &trimmed
 	}
 	if body.SubEnabled != nil {
-		data["sub_enabled"] = boolInt(*body.SubEnabled)
+		patch.SubEnabled = body.SubEnabled
 	}
-	return data
+	return patch
 }
 
 func (g *Gateway) apiPatchSessionAgent(w http.ResponseWriter, r *http.Request) {
@@ -478,9 +481,14 @@ func (g *Gateway) apiPatchSessionAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	data := applySessionAgentPatch(body)
-	if len(data) > 0 {
-		if _, err := db.Update("chat_sessions", data, db.Where{"id": id}); err != nil {
+	patch := applySessionAgentPatch(body)
+	if !patch.Empty() {
+		err := g.sessions.SaveAgent(id, patch)
+		if errors.Is(err, session.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "session not found")
+			return
+		}
+		if err != nil {
 			writeError(w, http.StatusBadGateway, "database_error", err.Error())
 			return
 		}

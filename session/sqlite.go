@@ -45,12 +45,16 @@ func (s *SQLite) Create(params NewSession) (*Session, error) {
 	return &session, nil
 }
 
+// ErrNotFound is what a chat that is not in the store returns, so a route can
+// tell "no such chat" from "the store failed".
+var ErrNotFound = errors.New("session not found")
+
 func (s *SQLite) Get(id string) (*Session, error) {
 	row := s.db.QueryRow(`SELECT id,title,provider,model,sub_provider,sub_model,sub_enabled,reasoning,temperature,top_p,max_tokens,created_at,updated_at FROM chat_sessions WHERE id=?`, id)
 	sess, err := scanSession(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("session %q not found", id)
+			return nil, fmt.Errorf("%w: %q", ErrNotFound, id)
 		}
 		return nil, err
 	}
