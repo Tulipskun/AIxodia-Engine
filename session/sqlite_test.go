@@ -4,17 +4,20 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"ai-engine/localdb"
 )
 
 // List must return. It used to open a second query without draining or closing
 // the first, and the pool is capped at one connection, so the second query
 // waited forever — GET /v1/sessions hung instead of answering.
 func TestSQLiteListReturns(t *testing.T) {
-	st, err := NewSQLite(filepath.Join(t.TempDir(), "aixodia.db"))
+	handle, err := localdb.Open(filepath.Join(t.TempDir(), "aixodia.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer handle.Close()
+	st := NewSQLite(handle)
 	if _, err := st.Create(NewSession{Title: "t"}); err != nil {
 		t.Fatal(err)
 	}
@@ -41,11 +44,12 @@ func TestSQLiteListReturns(t *testing.T) {
 // to keep the ids and sequence numbers the phone already knows, and running it
 // again must change nothing.
 func TestSQLiteImportKeepsIDsAndIsRepeatable(t *testing.T) {
-	st, err := NewSQLite(filepath.Join(t.TempDir(), "aixodia.db"))
+	handle, err := localdb.Open(filepath.Join(t.TempDir(), "aixodia.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer handle.Close()
+	st := NewSQLite(handle)
 
 	sess := Session{ID: "abc123", Title: "old chat", Model: "Opencode/m", CreatedAt: 100, UpdatedAt: 200}
 	turns := []Turn{

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"ai-engine/localdb"
 	"ai-engine/session"
 )
 
@@ -20,11 +21,12 @@ import (
 // Server: a server's Close waits for the stuck request, so a regression would
 // hang the test binary instead of failing it.
 func TestListSessionsAnswersOnTheSQLiteStore(t *testing.T) {
-	store, err := session.NewSQLite(filepath.Join(t.TempDir(), "aixodia.db"))
+	handle, err := localdb.Open(filepath.Join(t.TempDir(), "aixodia.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer handle.Close()
+	store := session.NewSQLite(handle)
 	gateway, _ := newTestGateway(t, store)
 
 	created := postJSON(t, gateway.Handler(), "/v1/sessions", `{"title":"hello","model":"mock/test-model"}`)

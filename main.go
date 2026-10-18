@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,12 +24,19 @@ import (
 	"ai-engine/db"
 	"ai-engine/io/gateway"
 	"ai-engine/io/mobile"
+	"ai-engine/localdb"
 	"ai-engine/provider/registry"
 	"ai-engine/session"
 	"ai-engine/tools"
 )
 
-var sessionStore gateway.SessionStore
+var (
+	sessionStore gateway.SessionStore
+	// storeDB is the handle behind sessionStore: providers, settings and the
+	// daemon's own notes live in the same file, but they are not chat history,
+	// so they are not reached through the gateway's store interface.
+	storeDB *sql.DB
+)
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -57,18 +65,18 @@ func main() {
 		return
 	}
 
-	// Session store: local SQLite (default) or D1 (AIXODIA_SESSION_STORE=d1).
-	// Chat history lives on the engine machine; D1 keeps only config/provider +
-	// daemon keys.
-	store, err := openSessionStore()
+	// The store is this machine's own file: chat history, providers with their
+	// API keys, settings and the daemon's notes all live in it. D1 keeps the
+	// discovery keys and nothing else, and no request waits on it.
+	handle, err := localdb.Open(localdb.Path())
 	if err != nil {
 		log.Fatal(err)
 	}
+	storeDB = handle
+	store := session.NewSQLite(handle)
 	sessionStore = store
 	// History written before it lived on this machine is still in D1.
-	if sqlStore, ok := store.(*session.SQLite); ok {
-		importLegacyHistory(sqlStore)
-	}
+	importLegacyHistory(store)
 
 	startConfigReloader(ctx)
 
@@ -474,21 +482,4 @@ func parseStarted(version string) int64 {
 		return 0
 	}
 	return n
-}
-
-func openSessionStore() (gateway.SessionStore, error) {
-	storeType := strings.TrimSpace(os.Getenv("AIXODIA_SESSION_STORE"))
-	if storeType == "" || strings.EqualFold(storeType, "sqlite") {
-		p := strings.TrimSpace(os.Getenv("AIXODIA_DB_PATH"))
-		st, err := session.NewSQLite(p)
-		if err != nil {
-			return nil, err
-		}
-		return st, nil
-	}
-	// Only D1 needs the columns added from here: the local store creates its
-	// own schema, and asking D1 for a column of a table that no longer exists
-	// is the one thing this must not do.
-	session.EnsureTurns()
-	return session.NewD1(), nil
 }

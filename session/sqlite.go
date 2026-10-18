@@ -4,100 +4,19 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	"ai-engine/provider"
-
-	_ "modernc.org/sqlite"
 )
 
+// SQLite serves chat history out of the engine's own store. The file and its
+// schema belong to localdb, which opens it once and hands the handle around.
 type SQLite struct {
 	db *sql.DB
 }
 
-func NewSQLite(path string) (*SQLite, error) {
-	if path == "" {
-		if st, err := os.Stat("/kaggle/working"); err == nil && st.IsDir() {
-			path = "/kaggle/working/aixodia.db"
-		} else {
-			path = "./aixodia.db"
-		}
-	}
-	// Ensure parent dir exists.
-	if dir := filepath.Dir(path); dir != "" && dir != "." {
-		_ = os.MkdirAll(dir, 0755)
-	}
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1)
-	s := &SQLite{db: db}
-	if err := s.migrate(); err != nil {
-		db.Close()
-		return nil, err
-	}
-	return s, nil
-}
-
-func (s *SQLite) migrate() error {
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS chat_sessions (
-			id TEXT PRIMARY KEY,
-			title TEXT NOT NULL DEFAULT '',
-			provider TEXT NOT NULL DEFAULT '',
-			model TEXT NOT NULL DEFAULT '',
-			created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-			updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-			sub_provider TEXT DEFAULT '',
-			sub_model TEXT DEFAULT '',
-			sub_enabled INTEGER DEFAULT 0,
-			reasoning INTEGER NOT NULL DEFAULT 0,
-			temperature REAL,
-			top_p REAL,
-			max_tokens INTEGER
-		)`,
-		`CREATE TABLE IF NOT EXISTS chat_turns (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
-			seq INTEGER NOT NULL,
-			role TEXT NOT NULL,
-			agent TEXT NOT NULL DEFAULT '',
-			job_id TEXT NOT NULL DEFAULT '',
-			text TEXT NOT NULL DEFAULT '',
-			created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-			model TEXT NOT NULL DEFAULT '',
-			input_tokens INTEGER NOT NULL DEFAULT 0,
-			output_tokens INTEGER NOT NULL DEFAULT 0,
-			duration_ms INTEGER NOT NULL DEFAULT 0,
-			cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-			cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-			reasoning_tokens INTEGER NOT NULL DEFAULT 0,
-			input_includes_cache INTEGER NOT NULL DEFAULT 0,
-			generation_ms INTEGER NOT NULL DEFAULT 0,
-			reasoning_content TEXT NOT NULL DEFAULT '',
-			block TEXT NOT NULL DEFAULT '',
-			UNIQUE(session_id, seq)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated ON chat_sessions(updated_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_chat_turns_session_seq ON chat_turns(session_id, seq)`,
-	}
-	for _, st := range stmts {
-		if _, err := s.db.Exec(st); err != nil {
-			return err
-		}
-	}
-	// Ensure turns columns exist (idempotent).
-	for _, col := range []string{
-		`ALTER TABLE chat_turns ADD COLUMN generation_ms INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE chat_turns ADD COLUMN reasoning_content TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE chat_turns ADD COLUMN block TEXT NOT NULL DEFAULT ''`,
-	} {
-		_, _ = s.db.Exec(col) // ignore duplicate column errors
-	}
-	return nil
+func NewSQLite(handle *sql.DB) *SQLite {
+	return &SQLite{db: handle}
 }
 
 func (s *SQLite) Create(params NewSession) (*Session, error) {
