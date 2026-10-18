@@ -2,6 +2,7 @@ package session
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -129,6 +130,9 @@ func (s *SQLite) Get(id string) (*Session, error) {
 	row := s.db.QueryRow(`SELECT id,title,provider,model,sub_provider,sub_model,sub_enabled,reasoning,temperature,top_p,max_tokens,created_at,updated_at FROM chat_sessions WHERE id=?`, id)
 	sess, err := scanSession(row)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("session %q not found", id)
+		}
 		return nil, err
 	}
 	return sess, nil
@@ -141,59 +145,28 @@ func (s *SQLite) List() ([]Session, error) {
 	}
 	defer rows.Close()
 	var out []Session
-	for rows.Scan() == nil {
-		// placeholder; handled below
-	}
-	// Re-scan properly
-	rows2, err := s.db.Query(`SELECT id,title,provider,model,sub_provider,sub_model,sub_enabled,reasoning,temperature,top_p,max_tokens,created_at,updated_at FROM chat_sessions ORDER BY updated_at DESC LIMIT 200`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows2.Close()
-	for rows2.Next() {
-		sess, err := scanSessionRows(rows2)
+	for rows.Next() {
+		sess, err := scanSession(rows)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, *sess)
 	}
-	return out, rows2.Err()
+	return out, rows.Err()
 }
 
-func scanSession(row *sql.Row) (*Session, error) {
+// rowScanner is satisfied by both *sql.Row and *sql.Rows, so one scanner serves
+// Get and List. They used to be two copies, and only one of them was ever run.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanSession(row rowScanner) (*Session, error) {
 	var sess Session
 	var subEnabled, reasoning int
 	var temp, topP sql.NullFloat64
 	var maxTokens sql.NullInt64
 	err := row.Scan(&sess.ID, &sess.Title, &sess.Provider, &sess.Model, &sess.SubProvider, &sess.SubModel, &subEnabled, &reasoning, &temp, &topP, &maxTokens, &sess.CreatedAt, &sess.UpdatedAt)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("session %q not found", sess.ID)
-		}
-		return nil, err
-	}
-	sess.SubEnabled = subEnabled != 0
-	sess.Reasoning = reasoning != 0
-	if temp.Valid {
-		v := temp.Float64
-		sess.Temperature = &v
-	}
-	if topP.Valid {
-		v := topP.Float64
-		sess.TopP = &v
-	}
-	if maxTokens.Valid {
-		sess.MaxTokens = int(maxTokens.Int64)
-	}
-	return &sess, nil
-}
-
-func scanSessionRows(rows *sql.Rows) (*Session, error) {
-	var sess Session
-	var subEnabled, reasoning int
-	var temp, topP sql.NullFloat64
-	var maxTokens sql.NullInt64
-	err := rows.Scan(&sess.ID, &sess.Title, &sess.Provider, &sess.Model, &sess.SubProvider, &sess.SubModel, &subEnabled, &reasoning, &temp, &topP, &maxTokens, &sess.CreatedAt, &sess.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
