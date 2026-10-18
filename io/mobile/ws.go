@@ -1,30 +1,23 @@
 // Package mobile serves the WebSocket the AIxodia app talks to: one socket per
 // phone, frames are JSON, auth is the bearer token in the handshake only.
-// Stdlib only (RFC 6455 framing is implemented here).
+// The RFC 6455 handshake and framing come from io/wsock, shared with the
+// terminal socket.
 package mobile
 
 import (
 	"bufio"
 	"context"
-	"crypto/sha1"
-	"crypto/subtle"
-	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
 
+	"ai-engine/io/wsock"
 	"ai-engine/session"
 )
-
-const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-const maxFrame = 1 << 20
 
 // ChatFunc answers one user message in a session, calling onDelta for each
 // streamed piece and onTool for each live tool activity, and returns the
@@ -157,35 +150,23 @@ func (h *Hub) remove(p *peer) {
 // method on Hub so the connection is registered for broadcasts.
 func (h *Hub) Handler(token string, chat ChatFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-		if token == "" || subtle.ConstantTimeCompare([]byte(auth), []byte(token)) != 1 {
+		if !wsock.BearerOK(r, token) {
 			http.Error(w, "token rejected", http.StatusUnauthorized)
 			return
 		}
-		key := r.Header.Get("Sec-WebSocket-Key")
-		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") ||
-			!strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") ||
-			r.Header.Get("Sec-WebSocket-Version") != "13" || key == "" {
+		conn, br, err := wsock.Accept(w, r)
+		switch {
+		case errors.Is(err, wsock.ErrNotUpgrade):
 			http.Error(w, "websocket upgrade required", http.StatusBadRequest)
 			return
-		}
-		hj, ok := w.(http.Hijacker)
-		if !ok {
+		case errors.Is(err, wsock.ErrNoHijack):
 			http.Error(w, "hijack unsupported", http.StatusInternalServerError)
 			return
-		}
-		conn, rw, err := hj.Hijack()
-		if err != nil {
+		case err != nil:
 			return
 		}
 		defer conn.Close()
-		sum := sha1.Sum([]byte(key + wsGUID))
-		accept := base64.StdEncoding.EncodeToString(sum[:])
-		fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", accept)
-		if err := rw.Flush(); err != nil {
-			return
-		}
-		h.serve(conn, rw.Reader, chat)
+		h.serve(conn, br, chat)
 	})
 }
 
@@ -215,7 +196,7 @@ func (p *peer) send(f outFrame) error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return writeFrame(p.conn, 0x1, data)
+	return wsock.WriteFrame(p.conn, wsock.OpText, data)
 }
 
 func (h *Hub) serve(conn net.Conn, r *bufio.Reader, chat ChatFunc) {
@@ -230,27 +211,27 @@ func (h *Hub) serve(conn net.Conn, r *bufio.Reader, chat ChatFunc) {
 	// pulls the newest turns and finds the answer there. Only a close frame is
 	// the phone saying it is finished, and that one cancels.
 	for {
-		op, payload, err := readFrame(r)
+		op, payload, err := wsock.ReadFrame(r)
 		if err != nil {
 			return
 		}
 		switch op {
-		case 0x1: // text
+		case wsock.OpText:
 			var in inFrame
 			if err := json.Unmarshal(payload, &in); err != nil {
 				_ = p.send(outFrame{Kind: "error", Text: "frame ที่อ่านไม่ได้"})
 				continue
 			}
 			handle(p, in, chat)
-		case 0x8: // close
+		case wsock.OpClose:
 			p.mu.Lock()
-			_ = writeFrame(conn, 0x8, []byte{})
+			_ = wsock.WriteFrame(conn, wsock.OpClose, []byte{})
 			p.mu.Unlock()
 			p.cancelSession("")
 			return
-		case 0x9: // ping
+		case wsock.OpPing:
 			p.mu.Lock()
-			_ = writeFrame(conn, 0xA, payload)
+			_ = wsock.WriteFrame(conn, wsock.OpPong, payload)
 			p.mu.Unlock()
 		}
 	}
@@ -451,67 +432,4 @@ func toolBlock(ev ToolEvent) *session.Block {
 		return nil
 	}
 	return &b
-}
-
-func readFrame(r *bufio.Reader) (byte, []byte, error) {
-	var h [2]byte
-	if _, err := io.ReadFull(r, h[:]); err != nil {
-		return 0, nil, err
-	}
-	op := h[0] & 0x0f
-	masked := h[1]&0x80 != 0
-	n := uint64(h[1] & 0x7f)
-	switch n {
-	case 126:
-		var b [2]byte
-		if _, err := io.ReadFull(r, b[:]); err != nil {
-			return 0, nil, err
-		}
-		n = uint64(binary.BigEndian.Uint16(b[:]))
-	case 127:
-		var b [8]byte
-		if _, err := io.ReadFull(r, b[:]); err != nil {
-			return 0, nil, err
-		}
-		n = binary.BigEndian.Uint64(b[:])
-	}
-	if n > maxFrame {
-		return 0, nil, errors.New("frame too large")
-	}
-	var mask [4]byte
-	if masked {
-		if _, err := io.ReadFull(r, mask[:]); err != nil {
-			return 0, nil, err
-		}
-	}
-	payload := make([]byte, n)
-	if _, err := io.ReadFull(r, payload); err != nil {
-		return 0, nil, err
-	}
-	if masked {
-		for i := range payload {
-			payload[i] ^= mask[i%4]
-		}
-	}
-	return op, payload, nil
-}
-
-func writeFrame(w io.Writer, op byte, payload []byte) error {
-	hdr := []byte{0x80 | op}
-	n := len(payload)
-	switch {
-	case n < 126:
-		hdr = append(hdr, byte(n))
-	case n <= 0xFFFF:
-		hdr = append(hdr, 126, 0, 0)
-		binary.BigEndian.PutUint16(hdr[2:], uint16(n))
-	default:
-		hdr = append(hdr, 127, 0, 0, 0, 0, 0, 0, 0, 0)
-		binary.BigEndian.PutUint64(hdr[2:], uint64(n))
-	}
-	if _, err := w.Write(hdr); err != nil {
-		return err
-	}
-	_, err := w.Write(payload)
-	return err
 }

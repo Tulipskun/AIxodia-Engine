@@ -1,6 +1,7 @@
 package mobile
 
 import (
+	"ai-engine/io/wsock"
 	"ai-engine/session"
 	"bufio"
 	"context"
@@ -38,7 +39,7 @@ func TestClosingFramesCarryActualSeqAndFullTurnBatch(t *testing.T) {
 	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 	sendMasked(t, conn, []byte(`{"type":"message","session_id":"s1","client_msg_id":"c1","content":[{"text":"hi"}]}`))
 	for {
-		_, payload, err := readFrame(r)
+		_, payload, err := wsock.ReadFrame(r)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -120,7 +121,7 @@ func TestMessageRoundTrip(t *testing.T) {
 	var kinds []string
 	var msg outFrame
 	for len(kinds) < 6 {
-		op, payload, err := readFrame(r)
+		op, payload, err := wsock.ReadFrame(r)
 		if err != nil {
 			if err == io.EOF {
 				break
@@ -225,7 +226,7 @@ func TestCancelWithNothingRunningAnswersAlreadyDone(t *testing.T) {
 	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 	sendMasked(t, conn, []byte(`{"type":"cancel","session_id":"s1"}`))
 	for {
-		_, payload, err := readFrame(r)
+		_, payload, err := wsock.ReadFrame(r)
 		if err != nil {
 			t.Fatal(err)
 		}
