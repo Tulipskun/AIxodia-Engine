@@ -14,8 +14,7 @@ import (
 )
 
 // Logs live on the engine machine (local SQLite), not in D1. D1 is only used
-// for daemon discovery (tunnel URL) and the push-now flag, which other
-// sessions/app instances must read remotely.
+// for daemon discovery (the tunnel URL), which the phone must read remotely.
 
 var logDB *sql.DB
 var d1LogEnabled bool // kept for compat; always true once started

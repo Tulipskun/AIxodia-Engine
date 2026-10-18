@@ -31,7 +31,7 @@ const (
 
 // Version is the release tag, baked in at build time. Bump on every release
 // so a live service can be identified via GET /healthz.
-const Version = "v1.134"
+const Version = "v1.135"
 
 type SessionStore interface {
 	Create(params session.NewSession) (*session.Session, error)
@@ -89,6 +89,7 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": Version, "started": g.startedAt})
 	})
+	mux.HandleFunc("POST /restart", g.apiRestart)
 	mux.HandleFunc("GET /v1/providers", g.listProviders)
 	mux.HandleFunc("GET /v1/models", g.listModels)
 	mux.HandleFunc("POST /v1/sessions", g.createSession)
