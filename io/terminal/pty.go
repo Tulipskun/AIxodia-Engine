@@ -24,10 +24,10 @@ type PTY struct {
 	code     int
 }
 
-// StartPTY opens a pty and starts shell on it, sized to cols x rows. dir is the
-// shell's working directory, or "" to inherit this process's. The caller owns
-// the result and must Close it.
-func StartPTY(shell string, cols, rows uint16, dir string) (*PTY, error) {
+// StartPTY opens a pty and starts shell with args on it, sized to cols x rows.
+// dir is the shell's working directory, or "" to inherit this process's. The
+// caller owns the result and must Close it.
+func StartPTY(shell string, args []string, cols, rows uint16, dir string) (*PTY, error) {
 	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open /dev/ptmx: %w", err)
@@ -49,7 +49,7 @@ func StartPTY(shell string, cols, rows uint16, dir string) (*PTY, error) {
 		return nil, fmt.Errorf("open pty slave: %w", err)
 	}
 
-	cmd := exec.Command(shell)
+	cmd := exec.Command(shell, args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
 	if dir != "" {
 		cmd.Dir = dir

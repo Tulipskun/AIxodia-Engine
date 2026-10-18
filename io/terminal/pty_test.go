@@ -71,7 +71,7 @@ func waitWithin(t *testing.T, p *PTY, within time.Duration) int {
 }
 
 func TestPTYShellSeesWindowSize(t *testing.T) {
-	p, err := StartPTY("/bin/sh", 100, 30, t.TempDir())
+	p, err := StartPTY("/bin/sh", nil, 100, 30, t.TempDir())
 	if err != nil {
 		t.Fatalf("StartPTY: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestPTYShellSeesWindowSize(t *testing.T) {
 }
 
 func TestPTYResizeSignalsTheShell(t *testing.T) {
-	p, err := StartPTY("/bin/sh", 80, 24, t.TempDir())
+	p, err := StartPTY("/bin/sh", nil, 80, 24, t.TempDir())
 	if err != nil {
 		t.Fatalf("StartPTY: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestPTYResizeSignalsTheShell(t *testing.T) {
 }
 
 func TestPTYShellDeathIsASignal(t *testing.T) {
-	p, err := StartPTY("/bin/sh", 80, 24, "")
+	p, err := StartPTY("/bin/sh", nil, 80, 24, "")
 	if err != nil {
 		t.Fatalf("StartPTY: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestPTYShellDeathIsASignal(t *testing.T) {
 }
 
 func TestPTYCloseKillsTheShell(t *testing.T) {
-	p, err := StartPTY("/bin/sh", 80, 24, "")
+	p, err := StartPTY("/bin/sh", nil, 80, 24, "")
 	if err != nil {
 		t.Fatalf("StartPTY: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestPTYCloseKillsTheShell(t *testing.T) {
 }
 
 func TestPTYMissingShellFails(t *testing.T) {
-	p, err := StartPTY("/nonexistent/sh", 80, 24, "")
+	p, err := StartPTY("/nonexistent/sh", nil, 80, 24, "")
 	if err == nil {
 		p.Close()
 		t.Fatalf("StartPTY accepted a shell that does not exist")
