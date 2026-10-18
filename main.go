@@ -79,8 +79,6 @@ func main() {
 	// file. D1's copy is read once by the reloader below, and only while the
 	// store holds none.
 	config.SetStore(config.NewStore(storeDB))
-	// History written before it lived on this machine is still in D1.
-	importLegacyHistory(store)
 
 	startConfigReloader(ctx)
 

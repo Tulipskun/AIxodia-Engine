@@ -37,8 +37,14 @@ State lives in `~/.aixodia/` (`aixodia.pid`, `aixodia.log`, `aixodia.db`,
 ## Configuration
 
 Only `CF_TOKEN` is required. Everything else has a working default, and the
-usual engine variables (`AIXODIA_MODEL`, `AIXODIA_SESSION_STORE`,
-`AIXODIA_DB_PATH`, `AIXODIA_UPLOADS`) are respected when set.
+usual engine variables (`AIXODIA_MODEL`, `AIXODIA_DB_PATH`, `AIXODIA_UPLOADS`)
+are respected when set.
+
+Everything the engine owns lives in one SQLite file: chat history, providers
+with their API keys, settings, and the note a session leaves for the one that
+replaces it. D1 holds only the daemon discovery keys (`daemon/url`,
+`daemon/version`, `daemon/heartbeat`), which is how the phone finds the
+tunnel — no request waits on it.
 
 ## Development
 

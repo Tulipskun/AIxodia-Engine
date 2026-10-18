@@ -508,30 +508,6 @@ func writeRaw(w http.ResponseWriter, body json.RawMessage) {
 	_, _ = w.Write(body)
 }
 
-func rowString(row map[string]any, key string) string {
-	switch value := row[key].(type) {
-	case string:
-		return value
-	case float64:
-		return fmt.Sprint(int64(value))
-	default:
-		return ""
-	}
-}
-
-func rowBool(row map[string]any, key string) bool {
-	switch value := row[key].(type) {
-	case float64:
-		return value != 0
-	case bool:
-		return value
-	case string:
-		return value == "1" || value == "true"
-	default:
-		return false
-	}
-}
-
 func boolInt(value bool) int {
 	if value {
 		return 1

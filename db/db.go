@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"regexp"
 	"sort"
@@ -131,15 +130,6 @@ func SaveDaemon(url, version string, heartbeat int64) error {
 	} {
 		if err := upsertState(kv[0], kv[1]); err != nil {
 			return err
-		}
-	}
-	// Keep reads fast as tables grow. Idempotent: safe to run on every daemon start.
-	for _, idx := range []string{
-		"CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated ON chat_sessions(updated_at)",
-		"CREATE INDEX IF NOT EXISTS idx_chat_turns_session_seq ON chat_turns(session_id, seq)",
-	} {
-		if _, err := Query(idx); err != nil {
-			log.Printf("db index %s: %v", idx, err)
 		}
 	}
 	return nil
