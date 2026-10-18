@@ -271,9 +271,9 @@ func TestTerminalLimitReturns503(t *testing.T) {
 		t.Fatalf("second terminal answered %q, want 503", line)
 	}
 
-	// Closing the first one must give the slot back, in the defer, so 503s and
-	// dropped sockets both release it.
-	_ = conn.Close()
+	// Ending the shell (not just the connection) must free the slot: the
+	// session stays alive across disconnects, so only a dead session releases it.
+	sendBinary(t, conn, "exit 0\n")
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		line := dialStatus(t, srv.URL, testToken, "")
@@ -285,6 +285,7 @@ func TestTerminalLimitReturns503(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	_ = conn.Close()
 }
 
 func TestTerminalPingsWhileIdle(t *testing.T) {
