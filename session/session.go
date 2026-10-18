@@ -424,7 +424,8 @@ func boolField(row map[string]any, key string) bool {
 	}
 }
 
-// EnsureTurns has the columns the current engine writes. Adding a column is
+// EnsureTurns has the columns the current engine writes. It is the D1 store's
+// housekeeping (the local store creates its own schema): adding a column is
 // cheap and idempotent, and doing it here means a database that predates the
 // generation clock keeps working instead of failing every insert.
 func EnsureTurns() {

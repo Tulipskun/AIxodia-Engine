@@ -57,13 +57,9 @@ func main() {
 		return
 	}
 
-	// Columns the current engine writes are added before anything can insert
-	// them, so a database that predates this version serves instead of failing
-	// every turn on an unknown column.
-	session.EnsureTurns()
-
-	// Session store: local SQLite (default) or D1 (AIXODIA_SESSION_STORE=d1). Chat history lives on the engine machine; D1 keeps only config/provider + daemon keys.
-	// SQLite keeps chat history on the engine machine (HF backup covers it).
+	// Session store: local SQLite (default) or D1 (AIXODIA_SESSION_STORE=d1).
+	// Chat history lives on the engine machine; D1 keeps only config/provider +
+	// daemon keys.
 	store, err := openSessionStore()
 	if err != nil {
 		log.Fatal(err)
@@ -490,5 +486,9 @@ func openSessionStore() (gateway.SessionStore, error) {
 		}
 		return st, nil
 	}
+	// Only D1 needs the columns added from here: the local store creates its
+	// own schema, and asking D1 for a column of a table that no longer exists
+	// is the one thing this must not do.
+	session.EnsureTurns()
 	return session.NewD1(), nil
 }
