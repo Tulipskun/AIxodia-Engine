@@ -54,8 +54,11 @@ cmd_start() {
   # A fresh log per start so the url read below cannot be a stale one.
   : > "$LOG_FILE"
 
-  # The engine's defaults assume Kaggle; point them at this machine instead.
-  export AIXODIA_DB_PATH="${AIXODIA_DB_PATH:-$AIXODIA_HOME/aixodia.db}"
+  # The engine picks the database itself: /kaggle/working/aixodia.db where that
+  # directory exists - the session's durable directory, and where history moved
+  # off D1 already lives - and ./aixodia.db everywhere else, which is this
+  # directory because the engine starts here. Setting AIXODIA_DB_PATH by hand
+  # still wins.
   export AIXODIA_UPLOADS="${AIXODIA_UPLOADS:-$AIXODIA_HOME/uploads}"
   export AIXODIA_KERNEL_STARTED="${AIXODIA_KERNEL_STARTED:-$(date +%s)}"
 

@@ -186,6 +186,46 @@ func scanSession(row rowScanner) (*Session, error) {
 	return &sess, nil
 }
 
+// Import writes a session and its turns keeping the ids and sequence numbers
+// they already carry, and skips rows that are present. It is only used to move
+// history that predates the local store (D1's chat tables) onto this machine,
+// so it must never renumber a turn: the phone knows turns by (session, seq).
+func (s *SQLite) Import(sess Session, turns []Turn) (bool, int, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`INSERT OR IGNORE INTO chat_sessions (id,title,provider,model,sub_provider,sub_model,sub_enabled,reasoning,temperature,top_p,max_tokens,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		sess.ID, sess.Title, sess.Provider, sess.Model, sess.SubProvider, sess.SubModel, boolInt(sess.SubEnabled), boolInt(sess.Reasoning),
+		sess.Temperature, sess.TopP, sess.MaxTokens, sess.CreatedAt, sess.UpdatedAt)
+	if err != nil {
+		return false, 0, err
+	}
+	added, err := res.RowsAffected()
+	if err != nil {
+		return false, 0, err
+	}
+	inserted := 0
+	for _, t := range turns {
+		res, err := tx.Exec(`INSERT OR IGNORE INTO chat_turns (session_id,seq,role,agent,job_id,text,created_at,model,input_tokens,output_tokens,duration_ms,cache_read_tokens,cache_write_tokens,reasoning_tokens,input_includes_cache,generation_ms,reasoning_content,block) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			sess.ID, t.Seq, t.Role, t.Agent, t.JobID, t.Text, t.CreatedAt, t.Model, t.InputTokens, t.OutputTokens, t.DurationMS,
+			t.CacheReadTokens, t.CacheWriteTokens, t.ReasoningTokens, boolInt(t.InputIncludesCache), t.GenerationMS, t.ReasoningContent, t.Block)
+		if err != nil {
+			return false, inserted, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return false, inserted, err
+		}
+		inserted += int(n)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, inserted, err
+	}
+	return added > 0, inserted, nil
+}
+
 func (s *SQLite) Delete(id string) error {
 	if _, err := s.db.Exec(`DELETE FROM chat_turns WHERE session_id=?`, id); err != nil {
 		return err

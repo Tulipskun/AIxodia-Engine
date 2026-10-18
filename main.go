@@ -69,6 +69,10 @@ func main() {
 		log.Fatal(err)
 	}
 	sessionStore = store
+	// History written before it lived on this machine is still in D1.
+	if sqlStore, ok := store.(*session.SQLite); ok {
+		importLegacyHistory(sqlStore)
+	}
 
 	startConfigReloader(ctx)
 
