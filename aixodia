@@ -15,7 +15,7 @@ set -uo pipefail
 AIXODIA_HOME="${AIXODIA_HOME:-$HOME/.aixodia}"
 PID_FILE="$AIXODIA_HOME/aixodia.pid"
 LOG_FILE="$AIXODIA_HOME/aixodia.log"
-ENGINE_BIN="${AIXODIA_ENGINE_BIN:-ai-engine}"
+ENGINE_BIN="${AIXODIA_ENGINE_BIN:-aixodia-engine}"
 TUNNEL_WAIT="${AIXODIA_TUNNEL_WAIT:-90}"
 
 die() { echo "aixodia: $*" >&2; exit 1; }

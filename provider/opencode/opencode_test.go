@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"ai-engine/provider"
+	"aixodia-engine/provider"
 )
 
 type capturedRequest struct {

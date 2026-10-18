@@ -5,7 +5,7 @@ import (
 	"log"
 	"strings"
 
-	"ai-engine/localdb"
+	"aixodia-engine/localdb"
 )
 
 // QueryFunc is how the import reads D1: db.Query, passed in so the read is

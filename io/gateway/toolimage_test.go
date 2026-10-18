@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"ai-engine/config"
-	"ai-engine/provider"
-	"ai-engine/provider/registry"
-	"ai-engine/tools"
+	"aixodia-engine/config"
+	"aixodia-engine/provider"
+	"aixodia-engine/provider/registry"
+	"aixodia-engine/tools"
 )
 
 // tinyPNG is a 2x2 PNG as base64. It is a real picture so the tools that

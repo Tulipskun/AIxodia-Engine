@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"ai-engine/config"
-	"ai-engine/provider"
+	"aixodia-engine/config"
+	"aixodia-engine/provider"
 )
 
 const modelCacheTTL = time.Minute

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"ai-engine/provider"
+	"aixodia-engine/provider"
 )
 
 func fakeServer(t *testing.T, handler http.HandlerFunc) provider.Provider {

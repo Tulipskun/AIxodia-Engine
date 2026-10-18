@@ -1,4 +1,4 @@
-# ai-engine
+# AIxodia
 
 The AIxodia engine: serves the chat API on `127.0.0.1:8787`, publishes itself
 through a Cloudflare quick tunnel, and tells the phone where to find it via D1.
@@ -6,10 +6,10 @@ through a Cloudflare quick tunnel, and tells the phone where to find it via D1.
 ## Install / update
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Tulipskun/ai-engine/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Tulipskun/aixodia-engine/main/install.sh | sudo bash
 ```
 
-Installs to `/usr/local/bin`: `ai-engine`, `aixodia`, and `cloudflared` (if it
+Installs to `/usr/local/bin`: `aixodia-engine`, `aixodia`, and `cloudflared` (if it
 is not already on your PATH). Linux x86_64 and arm64.
 
 Updating is the same command: it replaces the files. Restart a running engine

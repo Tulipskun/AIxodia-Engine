@@ -1,4 +1,4 @@
-module ai-engine
+module aixodia-engine
 
 go 1.26.0
 

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"ai-engine/provider"
+	"aixodia-engine/provider"
 )
 
 // A reasoning model writes its thinking before the answer. The engine used to

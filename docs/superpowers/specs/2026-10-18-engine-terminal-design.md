@@ -2,7 +2,7 @@
 
 - วันที่: 2026-10-18
 - สถานะ: รออนุมัติ
-- ขอบเขต: **`Tulipskun/ai-engine` เท่านั้น** — ฝั่งแอพ (`aixodia-app`) ผู้ใช้ทำเอง: terminal view + WS client ตามสัญญาใน §3
+- ขอบเขต: **`Tulipskun/aixodia-engine` เท่านั้น** — ฝั่งแอพ (`aixodia-app`) ผู้ใช้ทำเอง: terminal view + WS client ตามสัญญาใน §3
 - ที่มา: ผู้ใช้ขอ (18 ต.ค. 2026) "ทำให้ engine เปิด ssh ผ่าน ws ด้วย url tunnel เดียวกันได้มั้ย? แบบที่ทำใน notebook kaggle ที่ชื่อ opencode" → ดูของเดิมแล้ว notebook `kyomusen/opencode` ทำ `sshd:2222` → `websockify:8080` → cloudflared อีก tunnel หนึ่ง และต่อด้วย `ssh -o ProxyCommand="websocat --binary wss://..."`; ต่อมาผู้ใช้ตัดสิน "ถ้าทำได้ก็ไม่ต้องเปิด ssh" (อยากได้ terminal ในแอพคล้าย Termux) และยืนยันรูปร่างที่เล่นกลับว่า "ตามนั้นเลย"
 - ของเดิมที่ใช้ต่อ: tunnel เดียว (`cloudflared` ชี้ `127.0.0.1:8787`) และ WS hand-rolled ใน `io/mobile/ws.go` (handshake + frame + `maxFrame` 1 MiB)
 

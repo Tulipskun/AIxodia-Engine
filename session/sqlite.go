@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"ai-engine/provider"
+	"aixodia-engine/provider"
 )
 
 // SQLite serves chat history out of the engine's own store. The file and its

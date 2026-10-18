@@ -19,8 +19,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"ai-engine/imageprep"
-	"ai-engine/provider"
+	"aixodia-engine/imageprep"
+	"aixodia-engine/provider"
 )
 
 type Tool struct {

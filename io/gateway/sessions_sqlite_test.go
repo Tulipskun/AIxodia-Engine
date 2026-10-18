@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"ai-engine/localdb"
-	"ai-engine/session"
+	"aixodia-engine/localdb"
+	"aixodia-engine/session"
 )
 
 // The live failure was this endpoint: GET /v1/sessions never answered because

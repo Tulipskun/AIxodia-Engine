@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-const UserAgent = "ai-engine/1.0"
+const UserAgent = "aixodia-engine/1.0"
 
 var HTTP = &http.Client{}
 

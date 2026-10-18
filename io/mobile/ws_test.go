@@ -1,8 +1,8 @@
 package mobile
 
 import (
-	"ai-engine/io/wsock"
-	"ai-engine/session"
+	"aixodia-engine/io/wsock"
+	"aixodia-engine/session"
 	"bufio"
 	"context"
 	"crypto/rand"

@@ -327,15 +327,15 @@ git commit -m "app docs: schema ชื่อใหม่ + README/example ตร
 ### Task 13: Pre-flight — backup + archive v174
 
 - [ ] **Step 1: dump D1 ทั้งชุด** (5 ตาราง user; ข้าม `_cf_KV`) → `/tmp/d1_pre_switch_backup.json` (python ตาม precedent; มี table/rows/keys ครบ)
-- [ ] **Step 2: archive engine binary ปัจจุบัน** `curl -sL -o /tmp/ai-engine-v174.bin https://github.com/Tulipskun/ai-engine/releases/download/engine-latest/ai-engine` → sha256sum → upload ขึ้น HF `kyomu53n/aixodia-work` path `ai-engine-v174.bin` (ใช้ token จาก D1 `hf/token`; ตรวจด้วย HEAD/ขนาดไฟล์)
+- [ ] **Step 2: archive engine binary ปัจจุบัน** `curl -sL -o /tmp/aixodia-engine-v174.bin https://github.com/Tulipskun/aixodia-engine/releases/download/engine-latest/aixodia-engine` → sha256sum → upload ขึ้น HF `kyomu53n/aixodia-work` path `aixodia-engine-v174.bin` (ใช้ token จาก D1 `hf/token`; ตรวจด้วย HEAD/ขนาดไฟล์)
 - [ ] **Step 3: ยืนยันก่อนสลับ**: v174 ยัง healthz ผ่าน (tunnel ปัจจุบัน); `push/now` = `""`/`"0"` (ไม่มี trigger ค้าง); /tmp/aixodia-apk มี APK พร้อม (จาก Task 12)
 Expected: ครบ 3 ข้อก่อนไป E2
 
 ### Task 14: engine main → release (E2 — ทำติดกับ E3)
 
 - [ ] **Step 1:** `git checkout main && git merge spec/d1-schema-rename && git push origin main` (ff; `session/block.go` ต้อง**ไม่**ถูก add — ตรวจ `git status` ก่อน push)
-- [ ] **Step 2:** `gh run list -R Tulipskun/ai-engine --workflow="Release engine" --limit 1` → watch → success
-- [ ] **Step 3:** ยืนยัน asset ใหม่: `gh release view engine-latest -R Tulipskun/ai-engine --json assets,updatedAt` Expected: updatedAt = วันนี้ (บวกกับ time ไม่ kosong) — **binary ใหม่ live สำหรับ boot ถัดไป; ห้าม boot คั่นก่อน E3 เสร็จ**
+- [ ] **Step 2:** `gh run list -R Tulipskun/aixodia-engine --workflow="Release engine" --limit 1` → watch → success
+- [ ] **Step 3:** ยืนยัน asset ใหม่: `gh release view engine-latest -R Tulipskun/aixodia-engine --json assets,updatedAt` Expected: updatedAt = วันนี้ (บวกกับ time ไม่ kosong) — **binary ใหม่ live สำหรับ boot ถัดไป; ห้าม boot คั่นก่อน E3 เสร็จ**
 
 ### Task 15: config dataset version (E3 — ต่อจาก E2 ทันที)
 

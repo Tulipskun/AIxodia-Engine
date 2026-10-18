@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"ai-engine/io/wsock"
+	"aixodia-engine/io/wsock"
 )
 
 const testToken = "good"

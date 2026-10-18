@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"ai-engine/localdb"
-	"ai-engine/session"
+	"aixodia-engine/localdb"
+	"aixodia-engine/session"
 )
 
 // Pinning a model for one chat is what the phone's per-chat menu does. The pin

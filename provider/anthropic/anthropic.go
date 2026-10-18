@@ -12,7 +12,7 @@ import (
 	"net/http"
 	"strings"
 
-	"ai-engine/provider"
+	"aixodia-engine/provider"
 )
 
 const (

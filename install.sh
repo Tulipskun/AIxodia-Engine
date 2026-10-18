@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # aixodia installer — one line:
 #
-#   curl -fsSL https://raw.githubusercontent.com/Tulipskun/ai-engine/main/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/Tulipskun/aixodia-engine/main/install.sh | sudo bash
 #
 # Installs to /usr/local/bin:
-#   ai-engine   the engine binary
-#   aixodia     the launcher (start / stop / status / logs)
-#   cloudflared the tunnel helper, if it is not already installed
+#   aixodia-engine  the engine binary
+#   aixodia         the launcher (start / stop / status / logs)
+#   cloudflared     the tunnel helper, if it is not already installed
 #
 # Updating is the same command again: it replaces the files and stops there.
 # Restart a running engine afterwards (aixodia stop; aixodia) to pick the new
 # build up.
 set -euo pipefail
 
-REPO_SLUG="${AIXODIA_REPO_SLUG:-Tulipskun/ai-engine}"
+REPO_SLUG="${AIXODIA_REPO_SLUG:-Tulipskun/aixodia-engine}"
 REF="${AIXODIA_REF:-main}"
 RAW_BASE="${AIXODIA_RAW_BASE:-https://raw.githubusercontent.com/$REPO_SLUG/$REF}"
 PREFIX="${AIXODIA_PREFIX:-/usr/local/bin}"
@@ -40,7 +40,7 @@ if [ -z "$PLATFORM" ]; then
   esac
 fi
 
-ENGINE_URL="${AIXODIA_ENGINE_URL:-https://github.com/$REPO_SLUG/releases/download/engine-latest/ai-engine-$PLATFORM}"
+ENGINE_URL="${AIXODIA_ENGINE_URL:-https://github.com/$REPO_SLUG/releases/download/engine-latest/aixodia-engine-$PLATFORM}"
 CLOUDFLARED_URL="${AIXODIA_CLOUDFLARED_URL:-https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-$PLATFORM}"
 
 mkdir -p "$PREFIX"
@@ -58,7 +58,7 @@ fetch() {
   mv -f "$TMP/download" "$dest"
 }
 
-fetch "$ENGINE_URL" "$PREFIX/ai-engine"
+fetch "$ENGINE_URL" "$PREFIX/aixodia-engine"
 fetch "$RAW_BASE/aixodia" "$PREFIX/aixodia"
 
 if command -v cloudflared >/dev/null 2>&1; then
@@ -67,7 +67,7 @@ else
   fetch "$CLOUDFLARED_URL" "$PREFIX/cloudflared"
 fi
 
-log "installed: $PREFIX/{ai-engine, aixodia}$(command -v cloudflared >/dev/null 2>&1 && echo "" || echo ", cloudflared")"
+log "installed: $PREFIX/{aixodia-engine, aixodia}$(command -v cloudflared >/dev/null 2>&1 && echo "" || echo ", cloudflared")"
 echo
 echo "Start it with:"
 echo "  export CF_TOKEN=xxxxx   # the engine publishes its tunnel url to D1 with this"

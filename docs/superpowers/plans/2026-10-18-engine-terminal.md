@@ -68,7 +68,7 @@ Lift the handshake and framing out of `io/mobile` unchanged, so `/ws` and `/term
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `go test ./io/wsock/ -v`
-Expected: FAIL — build error, `no required module provides package ai-engine/io/wsock` (the package does not exist yet).
+Expected: FAIL — build error, `no required module provides package aixodia-engine/io/wsock` (the package does not exist yet).
 
 - [ ] **Step 3: Create `io/wsock/wsock.go`** with the code moved verbatim from `io/mobile/ws.go`: `wsGUID` → `GUID`, `maxFrame` → `MaxFrame`, `readFrame` → `ReadFrame`, `writeFrame` → `WriteFrame`, plus the opcode block, `ErrNotUpgrade`, and the two new helpers. `IsUpgrade` is the four-header test currently inside `Hub.Handler` (`io/mobile/ws.go:165-171`); `Accept` is the hijack plus 101 write from `io/mobile/ws.go:172-187`; `BearerOK` is `io/mobile/ws.go:160-164`.
 
@@ -88,7 +88,7 @@ In `io/mobile/ws.go`: `Hub.Handler` becomes `BearerOK` → 401, hijack via `wsoc
 - [ ] **Step 7: Run the whole toolchain — the mobile tests are the regression gate**
 
 Run: `go clean -testcache && go build ./... && go vet ./... && gofmt -l . && go test ./...`
-Expected: build/vet clean, `gofmt -l .` prints nothing, all packages PASS (notably `ok ai-engine/io/mobile`).
+Expected: build/vet clean, `gofmt -l .` prints nothing, all packages PASS (notably `ok aixodia-engine/io/mobile`).
 
 - [ ] **Step 8: Commit**
 
@@ -268,7 +268,7 @@ Operator task (needs the Cloudflare token and the tunnel URL; run it from the re
 git push origin main
 gh run list --limit 4          # CI + Release both green for the pushed SHA
 ```
-Expected: `verify` and `Release engine` succeed; the release uploads `ai-engine` for linux/amd64 and arm64 to `engine-latest`.
+Expected: `verify` and `Release engine` succeed; the release uploads `aixodia-engine` for linux/amd64 and arm64 to `engine-latest`.
 
 - [ ] **Step 2: Restart the session and confirm the new version**
 
@@ -279,7 +279,7 @@ curl -sS "$ENGINE/healthz"      # → {"version":"v1.139",...}
 ```
 Expected: `v1.139`; if the tunnel URL changed, take the new one from D1 (`daemon/url`).
 
-- [ ] **Step 3: Exercise the real endpoint through the tunnel** with a throwaway client at `/tmp/opencode/termcheck/main.go` (its own `go.mod`, no import of `ai-engine`, hand-rolled handshake plus masked frames). It takes the tunnel URL + token, opens `/terminal`, and prints frames. Verify, in order:
+- [ ] **Step 3: Exercise the real endpoint through the tunnel** with a throwaway client at `/tmp/opencode/termcheck/main.go` (its own `go.mod`, no import of `aixodia-engine`, hand-rolled handshake plus masked frames). It takes the tunnel URL + token, opens `/terminal`, and prints frames. Verify, in order:
 
 - the `ready` frame's `shell` runs, `cwd` is an absolute path, `cols`/`rows` match `?cols=100&rows=30`;
 - `echo hi` → output contains `hi`; `stty size` → `30 100`;

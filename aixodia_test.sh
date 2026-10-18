@@ -25,7 +25,7 @@ STUB
 }
 
 # --- missing CF_TOKEN: refuse before starting anything ------------------------
-home=$(tmp_home); bin=$(tmp_home)/ai-engine; make_stub_engine "$bin"
+home=$(tmp_home); bin=$(tmp_home)/aixodia-engine; make_stub_engine "$bin"
 out=$(env -u CF_TOKEN AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" bash "$LAUNCHER" 2>&1); rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi "CF_TOKEN"; then
   pass "start without CF_TOKEN fails with a message"
@@ -48,7 +48,7 @@ else
 fi
 
 # --- already running: do not start a second engine ---------------------------
-home=$(tmp_home); bin=$(tmp_home)/ai-engine; make_stub_engine "$bin"
+home=$(tmp_home); bin=$(tmp_home)/aixodia-engine; make_stub_engine "$bin"
 echo "$$" > "$home/aixodia.pid"
 out=$(CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" bash "$LAUNCHER" 2>&1); rc=$?
 if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qi "already running"; then
@@ -63,7 +63,7 @@ else
 fi
 
 # --- start, then status, stop, status ---------------------------------------
-home=$(tmp_home); fakebin=$(tmp_home); bin=$fakebin/ai-engine
+home=$(tmp_home); fakebin=$(tmp_home); bin=$fakebin/aixodia-engine
 make_stub_engine "$bin"
 printf '#!/usr/bin/env bash\nexec sleep 100000\n' > "$fakebin/cloudflared"
 chmod +x "$fakebin/cloudflared"

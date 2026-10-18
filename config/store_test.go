@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"ai-engine/localdb"
+	"aixodia-engine/localdb"
 )
 
 func testStore(t *testing.T) *Store {

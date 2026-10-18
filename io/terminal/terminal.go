@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"ai-engine/io/wsock"
+	"aixodia-engine/io/wsock"
 )
 
 const (

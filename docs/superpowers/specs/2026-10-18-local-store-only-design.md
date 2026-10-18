@@ -2,7 +2,7 @@
 
 - วันที่: 2026-10-18
 - สถานะ: รออนุมัติ (ผู้ใช้สั่งในแชท 18 ต.ค. 2026: "รื้อทั้งหมด เขียนลง local sql ล้วน ยกเว้น tunnel url อย่างเดียว" และ "ไม่มีอะไรต้องย้าย ยกเว้น providers ที่เก็บ api key")
-- ขอบเขต: **`Tulipskun/ai-engine` เท่านั้น** (ผู้ใช้สั่ง "แก้ไขฝั่ง engine อย่างเดียวก่อน ฉันจะแก้ฝั่งแอพเอง") + D1 database `aixodia` + notebook เก่า `kyomusen/aixodia` เป็นงานops ที่ผมทำหลัง engine ผ่าน (ยืนยันก่อนลบ)
+- ขอบเขต: **`Tulipskun/aixodia-engine` เท่านั้น** (ผู้ใช้สั่ง "แก้ไขฝั่ง engine อย่างเดียวก่อน ฉันจะแก้ฝั่งแอพเอง") + D1 database `aixodia` + notebook เก่า `kyomusen/aixodia` เป็นงานops ที่ผมทำหลัง engine ผ่าน (ยืนยันก่อนลบ)
 - ฝั่งแอพไม่แตะเลย: `aixodia-app/db/schema.sql` และ `db/README.md` ยังสร้าง/อธิบาย `llm_providers`+`system_state` อยู่ — ผู้ใช้จัดการเอง (รวม comment เก่าที่ผิดใน `HistoryApi.kt:38`)
 - ที่มา: หลังย้ายประวัติแชทลง local SQLite สำเร็จ (engine v1.137 รันจริง + snapshot HF ครบวง: backup → สร้าง repo ใหม่ → push ตัวเอง → restore ไม่ import ซ้ำ) เหลือ D1 อีก 4 ส่วนที่ยังถูกใช้จริง
 

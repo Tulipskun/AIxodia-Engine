@@ -11,11 +11,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"ai-engine/config"
-	"ai-engine/provider"
-	"ai-engine/provider/registry"
-	"ai-engine/session"
-	"ai-engine/tools"
+	"aixodia-engine/config"
+	"aixodia-engine/provider"
+	"aixodia-engine/provider/registry"
+	"aixodia-engine/session"
+	"aixodia-engine/tools"
 )
 
 const (

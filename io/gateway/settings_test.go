@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"ai-engine/localdb"
+	"aixodia-engine/localdb"
 )
 
 // Settings are the phone's choice of model, saved between sessions. They used

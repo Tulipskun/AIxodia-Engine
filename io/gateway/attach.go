@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"ai-engine/imageprep"
-	"ai-engine/provider"
+	"aixodia-engine/imageprep"
+	"aixodia-engine/provider"
 )
 
 // chatAttachment is one file the phone uploaded before sending its message. The

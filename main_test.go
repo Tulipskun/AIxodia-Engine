@@ -1,7 +1,7 @@
 package main
 
 import (
-	"ai-engine/io/mobile"
+	"aixodia-engine/io/mobile"
 	"context"
 	"fmt"
 	"net/http"
@@ -10,10 +10,10 @@ import (
 
 func TestParseStarted(t *testing.T) {
 	cases := map[string]int64{
-		"ai-engine/1.1 started=1791457000": 1791457000,
-		"ai-engine/1.0":                    0,
+		"aixodia-engine/1.1 started=1791457000": 1791457000,
+		"aixodia-engine/1.0":                    0,
 		"":                                 0,
-		"ai-engine/1.1 started=abc":        0,
+		"aixodia-engine/1.1 started=abc":        0,
 	}
 	for in, want := range cases {
 		if got := parseStarted(in); got != want {

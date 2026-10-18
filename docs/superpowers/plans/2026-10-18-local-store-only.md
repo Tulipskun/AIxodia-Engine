@@ -6,13 +6,13 @@
 
 **Architecture:** แพ็กเกจใหม่ `localdb` เป็นเจ้าของ path + schema ของ local DB ไฟล์เดียว เปิด `*sql.DB` ครั้งเดียวแล้วแจก handle ให้ `session`, `config` และ gateway; ลบ D1 session store / `importd1.go` / index creation บนตารางแชท; import provider จาก D1 ครั้งเดียวด้วย gate "local ว่าง"
 
-**Tech Stack:** Go 1.22 (stdlib only), `modernc.org/sqlite`, D1 REST ผ่าน `ai-engine/db`
+**Tech Stack:** Go 1.22 (stdlib only), `modernc.org/sqlite`, D1 REST ผ่าน `aixodia-engine/db`
 
 **Spec:** `docs/superpowers/specs/2026-10-18-local-store-only-design.md`
 
 ## Global Constraints
 
-- แก้เฉพาะ repo `Tulipskun/ai-engine` — ห้ามแตะ `aixodia-app` (ผู้ใช้แก้เอง)
+- แก้เฉพาะ repo `Tulipskun/aixodia-engine` — ห้ามแตะ `aixodia-app` (ผู้ใช้แก้เอง)
 - HTTP API path/รูปแบบห้ามเปลี่ยน (`/api/providers`, `/api/providers/{id}/keys`, `/api/settings`, `/api/sessions/{id}`, `/v1/*`)
 - D1 ที่ engine เขียนได้เหลือ 3 คีย์: `daemon/url`, `daemon/version`, `daemon/heartbeat`
 - local DB ไฟล์เดียว (`AIXODIA_DB_PATH`, default `/kaggle/working/aixodia.db`, local dev `./aixodia.db`); log DB แยกไฟล์เหมือนเดิม ห้ามแตะ `d1log.go`
@@ -53,7 +53,7 @@ func TestPathPrefersEnv(t *testing.T)             // AIXODIA_DB_PATH wins; ค�
 func TestSessionStoreUsesGivenHandle(t *testing.T) // localdb.Open(temp) → session.NewSQLite(db) → Create/Get ได้
 ```
 
-- [ ] **Step 2: รันให้เห็นว่าล้ม** — `go test ./localdb/` → `no required module provides package ai-engine/localdb`
+- [ ] **Step 2: รันให้เห็นว่าล้ม** — `go test ./localdb/` → `no required module provides package aixodia-engine/localdb`
 - [ ] **Step 3: implement `localdb`** — `Path()` (env → `/kaggle/working/aixodia.db` ถ้ามี dir → `./aixodia.db`), `Open()` ตาม Interfaces; ย้าย DDL ของ chat_* จาก `session/sqlite.go` มาไว้ที่นี่ (รวม `ALTER TABLE ... ADD COLUMN` แบบ ignore duplicate)
 - [ ] **Step 4: `session.NewSQLite(db *sql.DB)`** — ตัดการเปิด/ migrate ออก; แก้ `session/sqlite_test.go` ให้ใช้ `localdb.Open(t.TempDir()+"/a.db")`
 - [ ] **Step 5: `main.go` ใช้ local store อย่างเดียว** — `openSessionStore()` เหลือ `localdb.Open(localdb.Path())` + `session.NewSQLite(db)`; ลบสาขา D1, `AIXODIA_SESSION_STORE`, `session.EnsureTurns()`

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"ai-engine/localdb"
+	"aixodia-engine/localdb"
 )
 
 func testSQLite(t *testing.T) *SQLite {

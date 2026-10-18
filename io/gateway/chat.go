@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"ai-engine/config"
-	"ai-engine/provider"
-	"ai-engine/session"
+	"aixodia-engine/config"
+	"aixodia-engine/provider"
+	"aixodia-engine/session"
 )
 
 type chatMessage struct {

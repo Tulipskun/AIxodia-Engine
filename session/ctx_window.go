@@ -1,7 +1,7 @@
 package session
 
 import (
-	"ai-engine/provider"
+	"aixodia-engine/provider"
 )
 
 const (

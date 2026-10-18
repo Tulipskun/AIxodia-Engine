@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"ai-engine/provider"
+	"aixodia-engine/provider"
 )
 
 func TestTrailRoundTripsThroughTurns(t *testing.T) {

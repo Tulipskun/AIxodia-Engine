@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"ai-engine/provider"
+	"aixodia-engine/provider"
 )
 
 // A tool can hand a picture back only as text, and the one form both tool

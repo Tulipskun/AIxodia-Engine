@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"ai-engine/config"
-	"ai-engine/localdb"
-	"ai-engine/session"
+	"aixodia-engine/config"
+	"aixodia-engine/localdb"
+	"aixodia-engine/session"
 )
 
 // The provider API is where the API keys are edited, and the keys are the one

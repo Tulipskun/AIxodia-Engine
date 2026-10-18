@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"sort"
 
-	"ai-engine/provider"
-	"ai-engine/provider/anthropic"
-	"ai-engine/provider/openai"
-	"ai-engine/provider/opencode"
+	"aixodia-engine/provider"
+	"aixodia-engine/provider/anthropic"
+	"aixodia-engine/provider/openai"
+	"aixodia-engine/provider/opencode"
 )
 
 type Registry struct {

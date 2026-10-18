@@ -2,7 +2,7 @@
 
 - วันที่: 2026-10-16
 - สถานะ: แผนที่ชื่ออนุมัติในแชทแล้ว (16 ต.ค. 2026) — เอกสารนี้คือรายละเอียดรออนุมัติ
-- ขอบเขต: `Tulipskun/ai-engine` (Go daemon), `Tulipskun/AIxodia` (Android app), `kyomusen/aixodia-config` (Kaggle dataset: apply.sh/hf-sync.py), kernel notebook (push10), operator scripts
+- ขอบเขต: `Tulipskun/aixodia-engine` (Go daemon), `Tulipskun/AIxodia` (Android app), `kyomusen/aixodia-config` (Kaggle dataset: apply.sh/hf-sync.py), kernel notebook (push10), operator scripts
 - ที่มา: "ตั้งชื่อใหม่ให้เข้าใจง่ายๆ … อันไหนซ้ำซ้อนก็ยุบรวมหรือลบ … free ใน providers ควรลบออก เราจะ fetch ทุก model แล้วกรองเอาผ่าน app"
 
 ## 1. Intent — ทำทำไม
@@ -141,7 +141,7 @@ Race: ถ้ามีบู้ตแทรกกลางข้อ 1–2 (ไม
 
 ## 8. Deliverables (ต่อไฟล์)
 
-**engine (Tulipskun/ai-engine)**
+**engine (Tulipskun/aixodia-engine)**
 - `config/config.go`: `Select("providers")`→`llm_providers`; ตัด `Free` + `boolValue` (ถ้าไม่เหลือใช้)
 - `provider/types.go`: ตัด `Provider.Free` + ทุกจุด set (`io/gateway/chat.go` toInternalProvider)
 - `db/db.go`: `SaveTunnel`→upsert `daemon/url|version` (+heartbeat แรก); `TouchTunnel`→upsert `daemon/version|heartbeat`; ตัดโค้ดสร้าง/ALTER ตาราง tunnel; index names ใหม่ (แนะนำ rename ฟังก์ชันเป็น SaveDaemon/TouchDaemon)

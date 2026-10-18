@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"ai-engine/provider"
+	"aixodia-engine/provider"
 )
 
 // A provider that fails repeatedly is paused for a while so every chat does not

@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"ai-engine/provider"
-	"ai-engine/provider/openai"
-	"ai-engine/tools"
+	"aixodia-engine/provider"
+	"aixodia-engine/provider/openai"
+	"aixodia-engine/tools"
 )
 
 // clientAgentMeasured is the name the client itself sends. It builds

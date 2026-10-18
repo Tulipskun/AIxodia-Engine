@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"ai-engine/provider"
+	"aixodia-engine/provider"
 )
 
 // fakeUpstream answers the way a text-only model does: normally without a

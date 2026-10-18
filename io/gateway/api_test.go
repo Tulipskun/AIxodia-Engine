@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"ai-engine/config"
+	"aixodia-engine/config"
 )
 
 func TestApplyKeyChangesRemovesByIndexThenAdds(t *testing.T) {

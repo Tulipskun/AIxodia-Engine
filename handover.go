@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"ai-engine/localdb"
-	"ai-engine/session"
+	"aixodia-engine/localdb"
+	"aixodia-engine/session"
 )
 
 // handoverStateKey is where a session leaves a note for the one that replaces

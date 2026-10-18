@@ -17,10 +17,10 @@ import (
 	"strings"
 	"sync"
 
-	"ai-engine/config"
-	"ai-engine/localdb"
-	"ai-engine/provider/registry"
-	"ai-engine/session"
+	"aixodia-engine/config"
+	"aixodia-engine/localdb"
+	"aixodia-engine/provider/registry"
+	"aixodia-engine/session"
 )
 
 var providerIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)

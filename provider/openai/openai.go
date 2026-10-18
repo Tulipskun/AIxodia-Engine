@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"ai-engine/provider"
+	"aixodia-engine/provider"
 )
 
 type Adapter struct {
@@ -619,7 +619,7 @@ func buildResponsesRequest(req *provider.Request, stream bool) responsesRequest 
 // the conversation's own name, and the whole point is that every request in a
 // conversation carries the same key.
 func cacheKeyFor(session string) string {
-	return "ai-engine-" + session
+	return "aixodia-engine-" + session
 }
 
 // parseResponsesOutput folds a Responses API output array into text,

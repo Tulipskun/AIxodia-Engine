@@ -20,15 +20,15 @@ import (
 	"syscall"
 	"time"
 
-	"ai-engine/config"
-	"ai-engine/db"
-	"ai-engine/io/gateway"
-	"ai-engine/io/mobile"
-	"ai-engine/io/terminal"
-	"ai-engine/localdb"
-	"ai-engine/provider/registry"
-	"ai-engine/session"
-	"ai-engine/tools"
+	"aixodia-engine/config"
+	"aixodia-engine/db"
+	"aixodia-engine/io/gateway"
+	"aixodia-engine/io/mobile"
+	"aixodia-engine/io/terminal"
+	"aixodia-engine/localdb"
+	"aixodia-engine/provider/registry"
+	"aixodia-engine/session"
+	"aixodia-engine/tools"
 )
 
 var (
@@ -62,7 +62,7 @@ func main() {
 	if newer, err := newerDaemonRunning(startedAt); err != nil {
 		log.Printf("guard: %v", err)
 	} else if newer {
-		log.Print("a newer ai-engine is already serving; exiting")
+		log.Print("a newer aixodia-engine is already serving; exiting")
 		return
 	}
 
@@ -415,7 +415,7 @@ func (w *sseWriter) Write(p []byte) (int, error) {
 // startedAt marks this process; a later start is a newer engine.
 var startedAt = time.Now().Unix()
 
-const versionTag = "ai-engine/1.1"
+const versionTag = "aixodia-engine/1.1"
 
 // startHeartbeat keeps the daemon keys current so the app can find
 // this daemon and read its uptime. Before each write it checks whether a newer
@@ -428,7 +428,7 @@ func startHeartbeat(ctx context.Context, stop context.CancelFunc) {
 			log.Printf("heartbeat guard: %v", err)
 		}
 		if newer {
-			log.Print("heartbeat: a newer ai-engine took over; stopping")
+			log.Print("heartbeat: a newer aixodia-engine took over; stopping")
 			stop()
 			return false
 		}

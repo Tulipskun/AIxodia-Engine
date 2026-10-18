@@ -1,7 +1,7 @@
 package openai
 
 import (
-	"ai-engine/provider"
+	"aixodia-engine/provider"
 	"context"
 	"fmt"
 	"net/http"

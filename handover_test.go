@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"ai-engine/localdb"
-	"ai-engine/session"
+	"aixodia-engine/localdb"
+	"aixodia-engine/session"
 )
 
 // The note is how a new session learns whether the one before it was cut off

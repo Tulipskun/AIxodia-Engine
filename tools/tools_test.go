@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"ai-engine/imageprep"
+	"aixodia-engine/imageprep"
 )
 
 func TestValidatePublicURLRejectsLocalTargets(t *testing.T) {

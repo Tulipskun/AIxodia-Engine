@@ -10,7 +10,7 @@ pass() { echo "ok   - $1"; }
 fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
 
 srv=$(mktemp -d)
-printf '#!/usr/bin/env bash\necho engine\n' > "$srv/ai-engine"
+printf '#!/usr/bin/env bash\necho engine\n' > "$srv/aixodia-engine"
 printf '#!/usr/bin/env bash\necho launcher\n' > "$srv/aixodia"
 printf '#!/usr/bin/env bash\necho cloudflared\n' > "$srv/cloudflared"
 chmod +x "$srv"/*
@@ -20,7 +20,7 @@ missing="file://$srv/does-not-exist"
 prefix=$(mktemp -d)
 out=$(PATH=/usr/bin:/bin \
       AIXODIA_PREFIX="$prefix" AIXODIA_PLATFORM=linux-amd64 \
-      AIXODIA_ENGINE_URL="file://$srv/ai-engine" \
+      AIXODIA_ENGINE_URL="file://$srv/aixodia-engine" \
       AIXODIA_RAW_BASE="file://$srv" \
       AIXODIA_CLOUDFLARED_URL="file://$srv/cloudflared" \
       bash "$HERE/install.sh" 2>&1); rc=$?
@@ -29,7 +29,7 @@ if [ "$rc" -eq 0 ]; then
 else
   fail "install rc=$rc ($out)"
 fi
-for f in ai-engine aixodia cloudflared; do
+for f in aixodia-engine aixodia cloudflared; do
   if [ -x "$prefix/$f" ]; then
     pass "installed $f (executable)"
   else
@@ -44,7 +44,7 @@ printf '#!/usr/bin/env bash\nexec sleep 100000\n' > "$fakebin/cloudflared"
 chmod +x "$fakebin/cloudflared"
 out=$(PATH="$fakebin:$PATH" \
       AIXODIA_PREFIX="$prefix" AIXODIA_PLATFORM=linux-amd64 \
-      AIXODIA_ENGINE_URL="file://$srv/ai-engine" \
+      AIXODIA_ENGINE_URL="file://$srv/aixodia-engine" \
       AIXODIA_RAW_BASE="file://$srv" \
       AIXODIA_CLOUDFLARED_URL="$missing" \
       bash "$HERE/install.sh" 2>&1); rc=$?
@@ -90,7 +90,7 @@ case "$(uname -m)" in aarch64|arm64) want=arm64 ;; esac
 prefix=$(mktemp -d)
 PATH="$fakecurl:/usr/bin:/bin" RECORD="$record" AIXODIA_PREFIX="$prefix" \
   bash "$HERE/install.sh" >/dev/null 2>&1
-if grep -q "ai-engine-linux-$want" "$record"; then
+if grep -q "aixodia-engine-linux-$want" "$record"; then
   pass "engine download matches the host arch ($want)"
 else
   fail "engine url for $want: $(tr '\n' ' ' < "$record")"

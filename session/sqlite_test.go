@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"ai-engine/localdb"
+	"aixodia-engine/localdb"
 )
 
 // List must return. It used to open a second query without draining or closing

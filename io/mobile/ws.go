@@ -15,8 +15,8 @@ import (
 	"strings"
 	"sync"
 
-	"ai-engine/io/wsock"
-	"ai-engine/session"
+	"aixodia-engine/io/wsock"
+	"aixodia-engine/session"
 )
 
 // ChatFunc answers one user message in a session, calling onDelta for each

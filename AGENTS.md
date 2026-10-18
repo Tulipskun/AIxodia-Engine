@@ -7,7 +7,7 @@
 - `db` and `config` cannot be unit-tested offline: `db.Verify` must hit api.cloudflare.com first or every call returns "Verify must succeed first".
 
 ## Architecture (not obvious from filenames)
-- Module `ai-engine`, Go 1.22.2, **stdlib only** (no go.sum, no third-party deps).
+- Module `aixodia-engine`, Go 1.22.2, **stdlib only** (no go.sum, no third-party deps).
 - `db/` is not a local database — it is a thin HTTP client for the Cloudflare **D1 REST API**. No SQL files, no migrations; schema lives only in D1 and in the column names quoted in code.
   - The query body must be a **JSON object**: `{"sql":"...","params":[...]}`. An array of statements is rejected with error 7400 ("Expected object, received array") — this silently broke the original code.
 - Startup (`main.go`): `CF_TOKEN` → `db.Verify` → `config.LoadConfig()` (error logged, process continues) → serve `127.0.0.1:8787` → config reloads every 60s → `cloudflared` quick tunnel → `db.SaveTunnel(url)`.
@@ -41,12 +41,12 @@
 ## Adapters (`provider/`)
 - Shared types and the `Adapter` interface live in package `provider` (`provider/types.go`). They are **not** under `provider/internal/`: Go's `internal` rule would block `session`, `tools`, and `io/gateway` from importing them, and that directory was removed.
 - Two adapters: **openai** (streaming, tools, usage — also used by `agentrouter`, `tokenharbor`, `cavoti`, `NousResearch`) and **opencode** (wraps openai, see contract below). `provider/anthropic` and `provider/gemini` are still empty placeholders — a D1 row using those adapter names fails with `unknown adapter`.
-- Outbound HTTP must send `User-Agent: ai-engine/1.0` (`provider.UserAgent`). Cloudflare returns a 403 HTML challenge for Go's default `Go-http-client/1.1` — this was a real outage on NousResearch.
+- Outbound HTTP must send `User-Agent: aixodia-engine/1.0` (`provider.UserAgent`). Cloudflare returns a 403 HTML challenge for Go's default `Go-http-client/1.1` — this was a real outage on NousResearch.
 - `openai.Adapter.HeaderFunc` is called per request and its entries overwrite the standard headers — that is the only hook the opencode adapter uses.
 
 ### OpenCode Zen free-tier contract (`provider/opencode`)
 Verified by live probes against `https://opencode.ai/zen/v1/chat/completions` on 2026-10-07. All four conditions are required; missing any one gives `403 FreeTierError "can only be used from within OpenCode"` (426 `UpgradeRequired` if the UA version is below 1.18.0, 403 error 1010 if UA is absent):
-1. `User-Agent: opencode/<version>` — any version ≥ 1.18.0 works (`opencode/1.18.31` is what we send); `ai-engine/1.0` and `Go-http-client/1.1` are rejected. This overrides `provider.UserAgent`.
+1. `User-Agent: opencode/<version>` — any version ≥ 1.18.0 works (`opencode/1.18.31` is what we send); `aixodia-engine/1.0` and `Go-http-client/1.1` are rejected. This overrides `provider.UserAgent`.
 2. `x-opencode-session: ses_<12 hex><14 base62>` — required and format-checked (all-zero timestamps rejected). We keep one per adapter instance and send **no** `x-opencode-request` header at all: the gate reads that header as a request the client never sent and answers 403 FreeTierError. Measured 2026-10-15 by replaying the engine's own captured request — with the header 403, remove only that header and the identical request is 200. Everything the request-id headers would have carried is already in the message and session headers. `x-opencode-client: cli`, `x-opencode-project: global` are sent for fidelity but are not independently required (the real project hash was tried and changed nothing).
 3. Body must declare tools — `shell` **and** `read` at minimum, which the adapter injects when the request has none. `shell` is the command tool's name: the real OpenCode client (v2) sends `shell` (v1's `bash` was renamed to it), and it is the name the gate reads. `bash` was measured to pass too (2026-10-16), but the engine offers `shell` only so it matches the real client. A tool-less body is refused by the gate: a plain `instructions`-only title request the client makes is accepted, but the same body with a generic system prompt is 403. With the tools present the body is accepted with or without a system prompt, so the contract injection in the ladder must not be dropped.
 4. Body must have `"stream": true` — a non-stream request is rejected even with correct headers. The adapter therefore always calls the openai stream path; `Complete` buffers the deltas into `Response.Content` (usage and `finish_reason` arrive on the final chunk).

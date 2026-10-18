@@ -25,8 +25,8 @@ jobs:
         run: |
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
-              go build -trimpath -ldflags "-s -w" -o "ai-engine-linux-$arch" .
-            ls -l "ai-engine-linux-$arch"
+              go build -trimpath -ldflags "-s -w" -o "aixodia-engine-linux-$arch" .
+            ls -l "aixodia-engine-linux-$arch"
           done
 
       - name: Publish rolling release
@@ -36,9 +36,9 @@ jobs:
           gh release view engine-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create engine-latest --repo "$GITHUB_REPOSITORY" \
               --title "engine-latest" --notes "Rolling build of main"
-          gh release upload engine-latest ai-engine-linux-amd64 ai-engine-linux-arm64 \
+          gh release upload engine-latest aixodia-engine-linux-amd64 aixodia-engine-linux-arm64 \
             --repo "$GITHUB_REPOSITORY" --clobber
-          # Bare `ai-engine` stays the amd64 build: the Kaggle notebook
+          # Bare `aixodia-engine` stays the amd64 build: the Kaggle notebook
           # downloads that name.
-          cp ai-engine-linux-amd64 ai-engine
-          gh release upload engine-latest ai-engine --repo "$GITHUB_REPOSITORY" --clobber
+          cp aixodia-engine-linux-amd64 aixodia-engine
+          gh release upload engine-latest aixodia-engine --repo "$GITHUB_REPOSITORY" --clobber
