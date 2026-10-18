@@ -321,6 +321,23 @@ func TestTerminalClampsResize(t *testing.T) {
 	readOutput(t, conn, br, "STILL-1", 10*time.Second)
 }
 
+func TestTerminalIgnoresPartialResize(t *testing.T) {
+	srv := serveTerminal(t, testServer(t))
+	conn, br := dialTerminal(t, srv.URL, testToken, "")
+	_ = nextTextFrame(t, conn, br, 10*time.Second)
+
+	sendText(t, conn, resizeFrame{Type: "resize", Cols: 10, Rows: 50})
+	sendBinary(t, conn, "stty size\n")
+	readOutput(t, conn, br, "50 10", 10*time.Second)
+
+	// A frame naming only one dimension must change nothing: defaulting the
+	// other to 80x24 would silently resize a terminal the app did not ask to
+	// resize. The contract's frame always carries both.
+	sendText(t, conn, map[string]any{"type": "resize", "cols": 20})
+	sendBinary(t, conn, "printf 'SIZE-%s\\n' \"$(stty size)\"\n")
+	readOutput(t, conn, br, "SIZE-50 10", 10*time.Second)
+}
+
 func TestTerminalErrorFrameWhenShellMissing(t *testing.T) {
 	s := NewServer(testToken)
 	s.Shell = "/nonexistent/x"

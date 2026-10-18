@@ -43,7 +43,7 @@ engine รันอยู่ในเครื่องที่ผู้ใช�
 | header | `Authorization: Bearer <CF_TOKEN>` — ตัวเดียวกับที่ `/ws` ใช้ |
 | query (ไม่บังคับ) | `?cols=100&rows=30` ขนาดเริ่มต้น (default 80x24) |
 | binary frame | byte ของ terminal ทั้งสองทาง: แอพ → engine = stdin, engine → แอพ = output |
-| text frame (แอพ → engine) | `{"type":"resize","cols":100,"rows":30}` |
+| text frame (แอพ → engine) | `{"type":"resize","cols":100,"rows":30}` — ต้องมีทั้ง `cols` และ `rows`; frame ที่ขาดตัวใดตัวหนึ่ง engine มองข้าม (ไม่ resize, ไม่ปิด terminal) เพราะการเติมค่าที่ขาดด้วย default จะย่อ/ขยาย terminal ที่แอพไม่ได้สั่ง; ค่าที่เกินขอบเขตถูก clamp เป็น 1–1000 |
 | text frame (engine → แอพ) | `{"type":"ready","shell":"/bin/bash","cwd":"/kaggle/working","cols":80,"rows":24}` แล้วตอนจบ `{"type":"exit","code":0}` (แล้วปิด WS); ถ้าเปิด pty/shell ไม่สำเร็จหลัง handshake → `{"type":"error","error":"..."}` แล้วปิด (`cwd` คือค่าที่ใช้จริงตาม §4.2) |
 | ping | engine ส่ง WS ping ทุก 30 วิ และตอบ ping ของแอพอยู่แล้ว — แอพตอบ pong ตามมาตรฐาน WS อัตโนมัติ; จะตั้ง `pingInterval` แบบ `/ws` (20 วิ) ไว้ด้วยก็ได้ ไม่ชนกัน |
 | Ctrl-C / Ctrl-D / Ctrl-Z | ส่งเป็น byte `0x03` / `0x04` / `0x1a` ทาง binary ปกติ (pty line discipline จัดการเอง ไม่ต้องมี control frame) |

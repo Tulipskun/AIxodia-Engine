@@ -285,6 +285,10 @@ func (s *Server) serve(conn net.Conn, br *bufio.Reader, r *http.Request) {
 		if err != nil {
 			break
 		}
+		// Any opcode not handled here — a continuation frame's 0x0, a pong —
+		// is dropped. The contract is one frame per message, so a continued
+		// message is not something the app sends; see docs/superpowers/specs/
+		// 2026-10-18-engine-terminal-design.md §3.
 		switch op {
 		case wsock.OpBinary:
 			if _, err := p.Write(payload); err != nil {
@@ -312,25 +316,20 @@ func (s *Server) serve(conn net.Conn, br *bufio.Reader, r *http.Request) {
 }
 
 // parseResize reads the one control frame the app sends. Anything else — an
-// unknown type, a frame that is not JSON — is ignored: a bad control frame must
-// not end a working terminal.
+// unknown type, a frame that is not JSON, a frame that names only one of the
+// two dimensions — is ignored: a bad control frame must not end a working
+// terminal, and it must not silently resize it either, which is what filling a
+// missing dimension with a default would do.
 func parseResize(payload []byte) (cols, rows uint16, ok bool) {
 	var in struct {
 		Type string `json:"type"`
 		Cols *int   `json:"cols"`
 		Rows *int   `json:"rows"`
 	}
-	if err := json.Unmarshal(payload, &in); err != nil || in.Type != "resize" {
+	if err := json.Unmarshal(payload, &in); err != nil || in.Type != "resize" || in.Cols == nil || in.Rows == nil {
 		return 0, 0, false
 	}
-	colsInt, rowsInt := 80, 24
-	if in.Cols != nil {
-		colsInt = *in.Cols
-	}
-	if in.Rows != nil {
-		rowsInt = *in.Rows
-	}
-	return uint16(clamp(colsInt)), uint16(clamp(rowsInt)), true
+	return uint16(clamp(*in.Cols)), uint16(clamp(*in.Rows)), true
 }
 
 // wantedSize is the starting size: what the app asked for in the query,
