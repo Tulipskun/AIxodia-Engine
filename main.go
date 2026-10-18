@@ -24,6 +24,7 @@ import (
 	"ai-engine/db"
 	"ai-engine/io/gateway"
 	"ai-engine/io/mobile"
+	"ai-engine/io/terminal"
 	"ai-engine/localdb"
 	"ai-engine/provider/registry"
 	"ai-engine/session"
@@ -103,6 +104,9 @@ func main() {
 	hub := mobile.NewHub()
 	mux := http.NewServeMux()
 	mux.Handle("/ws", hub.Handler(token, chatViaGateway(gw, model)))
+	// The terminal checks the token itself: a pattern this specific wins over
+	// the "/" catch-all below, so RequireToken never sees this path.
+	mux.Handle("/terminal", terminal.NewServer(token).Handler())
 	mux.Handle("/", gateway.RequireToken(token, gw))
 	server := &http.Server{
 		Addr:    "127.0.0.1:8787",
