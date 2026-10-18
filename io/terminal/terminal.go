@@ -360,6 +360,14 @@ func clamp(v int) int {
 // started, which is $AIXODIA_HOME because the launcher cd's there. localdb
 // chooses its database path by the same rule.
 func termDir() string {
+	// Prefer the user's home directory so a new shell starts where the
+	// operator's files actually live; fall back to the notebook working dir and
+	// the engine's own dir for the other deployments.
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if st, err := os.Stat(home); err == nil && st.IsDir() {
+			return home
+		}
+	}
 	if st, err := os.Stat("/kaggle/working"); err == nil && st.IsDir() {
 		return "/kaggle/working"
 	}

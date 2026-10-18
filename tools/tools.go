@@ -187,6 +187,10 @@ func runBash(ctx context.Context, args string) (string, error) {
 	cmd := exec.CommandContext(ctx, "sh", "-c", input.Command)
 	if dir := strings.TrimSpace(input.Workdir); dir != "" {
 		cmd.Dir = dir
+	} else if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if st, err := os.Stat(home); err == nil && st.IsDir() {
+			cmd.Dir = home
+		}
 	} else if st, err := os.Stat("/kaggle/working"); err == nil && st.IsDir() {
 		cmd.Dir = "/kaggle/working"
 	}
