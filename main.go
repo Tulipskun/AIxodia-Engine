@@ -85,6 +85,7 @@ func main() {
 	startConfigReloader(ctx)
 
 	g := gateway.New(store, registry.New(), tools.Builtin())
+	g.SetLocalStore(storeDB)
 	g.SetStartedAt(startedAt)
 	g.SetLogReader(recentLogs)
 	// Attachments land here; the agent reads them from these paths. Kaggle's

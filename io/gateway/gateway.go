@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -60,6 +61,9 @@ type Gateway struct {
 	startedAt int64
 	// uploadDir is where attachments are stored, so the agent can read them.
 	uploadDir string
+	// local is the engine's own store, for what the phone saves: settings.
+	// Chat history goes through SessionStore instead.
+	local *sql.DB
 }
 
 type modelCache struct {
@@ -83,6 +87,10 @@ func New(sessions SessionStore, reg *registry.Registry, toolset map[string]tools
 // how long the daemon has been up.
 func (g *Gateway) SetStartedAt(unixSeconds int64)                     { g.startedAt = unixSeconds }
 func (g *Gateway) SetLogReader(fn func(int, string) []map[string]any) { g.logReader = fn }
+
+// SetLocalStore hands the gateway the store the engine opened, for the few
+// things it keeps that are not chat history.
+func (g *Gateway) SetLocalStore(handle *sql.DB) { g.local = handle }
 
 func (g *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()

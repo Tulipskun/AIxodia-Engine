@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"ai-engine/db"
+	"ai-engine/localdb"
 	"ai-engine/session"
 )
 
@@ -53,7 +53,8 @@ func publishHandover(ctx context.Context, tunnelURL string) {
 	}
 	store := sessionStore
 	if store == nil {
-		store = session.NewD1()
+		log.Print("handover: the session store is not open")
+		return
 	}
 	if open, err := store.Unfinished(20); err == nil {
 		note.Unfinished = open
@@ -66,11 +67,9 @@ func publishHandover(ctx context.Context, tunnelURL string) {
 		log.Printf("handover: %v", err)
 		return
 	}
-	if _, err := db.Query(
-		"INSERT INTO system_state (key, value, updated_at) VALUES (?, ?, unixepoch()) "+
-			"ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-		handoverStateKey, string(payload),
-	); err != nil {
+	// The note is written to the engine's own store: there is no reader left on
+	// the D1 side, and a note is only useful on this machine anyway.
+	if err := localdb.PutState(storeDB, handoverStateKey, string(payload)); err != nil {
 		log.Printf("handover: cannot write the note: %v", err)
 		return
 	}

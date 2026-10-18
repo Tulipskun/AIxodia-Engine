@@ -1,13 +1,14 @@
 package gateway
 
 // The /api routes are what the AIxodia app's Settings screen and per-chat agent
-// settings call over the tunnel. Providers, keys and agent routes live in D1
-// (llm_providers, chat_sessions, system_state tables). The probe results are kept in memory and
-// reset when the daemon restarts.
+// settings call over the tunnel. Everything they read and write lives in the
+// engine's own SQLite file; D1 keeps only the daemon discovery keys. The probe
+// results are kept in memory and reset when the daemon restarts.
 
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 
 	"ai-engine/config"
 	"ai-engine/db"
+	"ai-engine/localdb"
 	"ai-engine/provider/registry"
 )
 
@@ -341,8 +343,8 @@ const settingsStateKey = "engine/settings"
 // savedMainModel returns the provider/model saved in settings, or ""/""
 // when nothing usable is stored.
 func (g *Gateway) savedMainModel() (string, string) {
-	rows, err := db.Select("system_state", db.Where{"key": settingsStateKey})
-	if err != nil || len(rows) == 0 {
+	stored, found, err := g.storedSettings()
+	if err != nil || !found {
 		return "", ""
 	}
 	var saved struct {
@@ -351,10 +353,20 @@ func (g *Gateway) savedMainModel() (string, string) {
 			Model    string `json:"model"`
 		} `json:"main"`
 	}
-	if err := json.Unmarshal([]byte(rowString(rows[0], "value")), &saved); err != nil {
+	if err := json.Unmarshal([]byte(stored), &saved); err != nil {
 		return "", ""
 	}
 	return saved.Main.Provider, saved.Main.Model
+}
+
+// storedSettings reads the settings blob from the engine's own store. found is
+// false until the phone saves anything, which is what puts the defaults on the
+// screen of a fresh install.
+func (g *Gateway) storedSettings() (string, bool, error) {
+	if g.local == nil {
+		return "", false, errors.New("the local store is not open")
+	}
+	return localdb.GetState(g.local, settingsStateKey)
 }
 
 func defaultSettings() json.RawMessage {
@@ -362,17 +374,12 @@ func defaultSettings() json.RawMessage {
 }
 
 func (g *Gateway) apiGetSettings(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Select("system_state", db.Where{"key": settingsStateKey})
+	stored, found, err := g.storedSettings()
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "database_error", err.Error())
 		return
 	}
-	if len(rows) == 0 {
-		writeRaw(w, defaultSettings())
-		return
-	}
-	stored := rowString(rows[0], "value")
-	if !json.Valid([]byte(stored)) || stored == "" {
+	if !found || stored == "" || !json.Valid([]byte(stored)) {
 		writeRaw(w, defaultSettings())
 		return
 	}
@@ -390,10 +397,11 @@ func (g *Gateway) apiPutSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "settings must be a JSON object")
 		return
 	}
-	if _, err := db.Query(
-		"INSERT INTO system_state (key, value, updated_at) VALUES (?, ?, unixepoch()) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-		settingsStateKey, string(raw),
-	); err != nil {
+	if g.local == nil {
+		writeError(w, http.StatusBadGateway, "database_error", "the local store is not open")
+		return
+	}
+	if err := localdb.PutState(g.local, settingsStateKey, string(raw)); err != nil {
 		writeError(w, http.StatusBadGateway, "database_error", err.Error())
 		return
 	}
