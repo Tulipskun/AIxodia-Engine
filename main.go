@@ -93,9 +93,16 @@ func main() {
 	g.SetLocalStore(storeDB)
 	g.SetStartedAt(startedAt)
 	g.SetLogReader(recentLogs)
-	// Attachments land here; the agent reads them from these paths. Kaggle's
-	// /kaggle/working is the writable directory of the session.
-	g.SetUploadDir("/kaggle/working/uploads")
+	// Attachments land beside the store, under ~/.aixodia, because that is the
+	// directory the machine snapshot carries across Kaggle sessions. Anything
+	// under /kaggle/working is rebuilt on the next session, so a file saved
+	// there was gone the moment the kernel restarted. The agent reads
+	// attachments from these paths.
+	uploadDir := "./uploads"
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		uploadDir = filepath.Join(home, ".aixodia", "uploads")
+	}
+	g.SetUploadDir(uploadDir)
 	gw := g.Handler()
 	const model = "Opencode/big-pickle"
 	// One hub for every phone socket.
