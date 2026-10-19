@@ -2,7 +2,7 @@ export interface Env {
   ROOM: DurableObjectNamespace;
   RELAY_TOKEN: string;
 }
-export { Room } from "./room";
+export { Room2 } from "./room";
 
 function bearerOk(header: string | null, token: string): boolean {
   if (!token || !header) return false;
