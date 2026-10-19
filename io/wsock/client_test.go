@@ -3,7 +3,9 @@ package wsock
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -156,6 +158,110 @@ func TestClientCloseIsEOF(t *testing.T) {
 
 	if _, _, err := c.ReadMessage(); err != io.EOF {
 		t.Fatalf("close = %v, want io.EOF", err)
+	}
+}
+
+// A peer that accepts the handshake and then says nothing (no data, no ping,
+// no close) must not park the reader forever: liveness turns the silence into
+// an error the relay can reconnect on.
+func TestClientLivenessTimesOutSilentPeer(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, _, err := Accept(w, r)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := Dial(ctx, wsURL(t, srv), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+	c.SetLiveness(200 * time.Millisecond)
+
+	start := time.Now()
+	_, _, err = c.ReadMessage()
+	if err == nil {
+		t.Fatal("ReadMessage returned nil, want a timeout")
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("liveness took %v, want well under 3s", time.Since(start))
+	}
+	var ne net.Error
+	if !errors.As(err, &ne) || !ne.Timeout() {
+		t.Fatalf("err = %v, want a net.Error timeout", err)
+	}
+}
+
+// An idle but healthy peer is kept alive by its pings: each pong refreshes the
+// liveness clock, so a socket that never carries data is not torn down.
+func TestClientLivenessSurvivesPongs(t *testing.T) {
+	stop := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, br, err := Accept(w, r)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		go func() {
+			t := time.NewTicker(50 * time.Millisecond)
+			defer t.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-t.C:
+					if err := WriteFrame(conn, OpPing, nil); err != nil {
+						return
+					}
+				}
+			}
+		}()
+		for {
+			op, payload, err := ReadFrame(br)
+			if err != nil {
+				return
+			}
+			if op == OpPong {
+				continue
+			}
+			if op == OpText {
+				_ = WriteFrame(conn, OpText, payload)
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+	defer close(stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := Dial(ctx, wsURL(t, srv), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+	c.SetLiveness(300 * time.Millisecond)
+
+	// Wait past several pings before sending anything: the pongs must have kept
+	// the reader alive, so this round trip succeeds instead of timing out.
+	time.Sleep(900 * time.Millisecond)
+	if err := c.WriteMessage(OpText, []byte("still here")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	op, payload, err := c.ReadMessage()
+	if err != nil {
+		t.Fatalf("read after pings: %v", err)
+	}
+	if op != OpText || string(payload) != "still here" {
+		t.Fatalf("echo = %d %q", op, payload)
 	}
 }
 

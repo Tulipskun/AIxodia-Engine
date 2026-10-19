@@ -79,7 +79,7 @@ Envelope บน text frame (JSON):
 - **phone ปิดแอพ = ส่ง `act:"bye"` ก่อนปิด socket**: engine ไม่เห็น close frame ของ phone อีก จึงต้องมี frame บอกลา เพื่อคงพฤติกรรมเดิม "close = ยกเลิก turn ที่รันอยู่" (`io/mobile/ws.go:211-247`); socket หลุดเฉย ๆ (ไม่มี `bye`) = เหมือน drop วันนี้ (turn รันต่อ คำตอบถูกเก็บ)
 
 ### 4.3 ฝั่ง engine
-- package ใหม่ (ชื่อให้ผู้สร้างเลือก) `relay`: dial client (handshake เอง + mask frame), อ่าน loop, reconnect backoff + ping 20–30 วิ, ส่ง `role=engine`
+- package ใหม่ (ชื่อให้ผู้สร้างเลือก) `relay`: dial client (handshake เอง + mask frame), อ่าน loop, reconnect backoff (1s → 5s, รีเซ็ตเมื่อต่อได้ ≥10 วิ) + ping 20 วิ พร้อม read deadline 60 วิ (Cloudflare ตอบ pong ที่ edge → socket ที่ตายเงียบถูกตัดใน ~1 นาที ไม่รอ TCP keepalive เป็นนาที), ส่ง `role=engine`
 - router ในเครื่องตาม `ch`:
   - `chat` → ป้อนเข้า `mobile.Hub` ผ่าน transport interface ใหม่; **phone มีตัวเดียว** → `Hub` มี peer เดียวได้ (แต่ยังใช้ `Hub` เดิมได้เลย) — `bye` = `cancelSession("")`
   - `term`/binary → `terminal.Server` ผ่าน transport interface ใหม่; map `streamId` ↔ session + รับ `open`/`close`/`resize`
@@ -95,7 +95,7 @@ Envelope บน text frame (JSON):
 - **ปิดแอพ/ปิดหน้าต่าง chat → ส่ง `{"ch":"ctl","act":"bye"}` ก่อน close** เพื่อให้ engine ยกเลิก turn เหมือนเดิม
 - `SettingsStore`: **เหลือการตั้งค่าแค่ CF token เหมือนเดิม ไม่เพิ่มช่อง URL/room**; `daemon_url` ยังถูกเก็บจาก discovery แต่ค่าคือ **relay URL (นิ่ง)** แทน trycloudflare; `wsUrlFor()` ไม่ต้องประกอบ `/ws` อีก (relay base ใช้ตรง ๆ) — เดินตามค่า discovered
 - `DaemonDiscovery`: ยัง poll D1 + adopt URL เหมือนเดิม (URL นิ่งแล้วจึง adopt ครั้งเดียว); online/uptime/version จาก D1 เหมือนเดิม
-- backoff/ping ของ `AiDirectSocket` (1s → 30s + jitter, `pingInterval` 20 วิ) ใช้ต่อ
+- backoff/ping ของ `AiDirectSocket` (1s → 8s + jitter, `pingInterval` 10 วิ) ใช้ต่อ; `reconnect()` ปลุก loop ที่กำลัง backoff ให้ dial ทันที และ reconnect อีกครั้งเมื่อแอพกลับ foreground / เครือข่ายกลับมา
 
 ### 4.5 ทำไมพอ (หลักฐานจากเอกสาร Cloudflare, ต.ค. 2026)
 - Workers Free: **100,000 requests/วัน**; WS upgrade นับ 1 request; **ไม่คิดค่า egress/bandwidth**

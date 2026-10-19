@@ -18,7 +18,7 @@ engine รันอยู่ในเครื่องที่ผู้ใช�
 - shell จริงบน pty: `/bin/bash -l` (ไม่มีค่อย `/bin/sh`), env สืบทอดทั้งหมด + `TERM=xterm-256color`; cwd = `/kaggle/working` ถ้ามีจริง ไม่งั้น cwd ของ engine (จริง ๆ คือ `$AIXODIA_HOME` เพราะ `aixodia:65` `cd` เข้าไปก่อนรัน — ใช้กฎเดียวกับ `AIXODIA_DB_PATH` ใน `localdb`)
 - byte ผ่านตรงสองทาง (UTF-8/ANSI ไม่แกะ ไม่ strip) — แอพเอาไปเข้า terminal emulator ของตัวเอง
 - resize ได้ทั้งตอนเปิด (`?cols=&rows=`) และระหว่างใช้ (control frame) → `TIOCSWINSZ`
-- อยู่ได้ตอน terminal ว่าง: engine ส่ง WS ping เองทุก 30 วิ (Cloudflare ตัด WS ที่ไม่มีข้อมูล ~100 วิ; ฝั่งแชทวันนี้รอดเพราะแอพตั้ง `pingInterval` 20 วิ ที่ `AiDirectSocket.kt:50`)
+- อยู่ได้ตอน terminal ว่าง: engine ส่ง WS ping เองทุก 20 วิ (Cloudflare ตัด WS ที่ไม่มีข้อมูล ~100 วิ; ฝั่งแชทวันนี้รอดเพราะแอพตั้ง `pingInterval` 10 วิ ใน `RelayClient`)
 - ปิด WS = shell ตาย (SIGHUP จาก kernel + kill process group สำรอง)
 - หลาย connection = หลาย shell (pty แยกกัน) แต่จำกัดพร้อมกัน 8 → เกิน = 503
 - **ไม่เพิ่ม dependency** — WS primitives ที่มีอยู่ + `golang.org/x/sys/unix` (มีใน go.mod แล้ว: ยืนยัน `TIOCSPTLCK`/`TIOCGPTN`/`TIOCGPTPEER`/`TIOCSWINSZ` + `IoctlSetWinsize`/`IoctlGetInt`/`IoctlSetPointerInt` มีจริงใน x/sys v0.48.0)
@@ -45,7 +45,8 @@ engine รันอยู่ในเครื่องที่ผู้ใช�
 | binary frame | byte ของ terminal ทั้งสองทาง: แอพ → engine = stdin, engine → แอพ = output |
 | text frame (แอพ → engine) | `{"type":"resize","cols":100,"rows":30}` — ต้องมีทั้ง `cols` และ `rows`; frame ที่ขาดตัวใดตัวหนึ่ง engine มองข้าม (ไม่ resize, ไม่ปิด terminal) เพราะการเติมค่าที่ขาดด้วย default จะย่อ/ขยาย terminal ที่แอพไม่ได้สั่ง; ค่าที่เกินขอบเขตถูก clamp เป็น 1–1000 |
 | text frame (engine → แอพ) | `{"type":"ready","shell":"/bin/bash","cwd":"/kaggle/working","cols":80,"rows":24}` แล้วตอนจบ `{"type":"exit","code":0}` (แล้วปิด WS); ถ้าเปิด pty/shell ไม่สำเร็จหลัง handshake → `{"type":"error","error":"..."}` แล้วปิด (`cwd` คือค่าที่ใช้จริงตาม §4.2) |
-| ping | engine ส่ง WS ping ทุก 30 วิ และตอบ ping ของแอพอยู่แล้ว — แอพตอบ pong ตามมาตรฐาน WS อัตโนมัติ; จะตั้ง `pingInterval` แบบ `/ws` (20 วิ) ไว้ด้วยก็ได้ ไม่ชนกัน |
+| ping | engine ส่ง WS ping ทุก 20 วิ และตอบ ping ของแอพอยู่แล้ว — แอพตอบ pong ตามมาตรฐาน WS อัตโนมัติ; แอพตั้ง `pingInterval` 10 วิ ไม่ชนกัน |
+| reattach | ทุกครั้งที่ attach engine ส่ง RIS (`ESC c`) + โหมดที่โปรแกรมเปิดค้างไว้ + tail ของ ring buffer (ตัดที่ขอบ parser/UTF-8 เสมอ) ใน binary frame เดียว — แอพที่ยังถือจอเก่าจึงล้างก่อนวาดใหม่ ไม่ซ้ำ/ไม่ทับ และถ้าขนาดที่ขอต่างจาก pty เดิม engine จะ resize (SIGWINCH) ให้โปรแกรมเต็มจอวาดใหม่ |
 | Ctrl-C / Ctrl-D / Ctrl-Z | ส่งเป็น byte `0x03` / `0x04` / `0x1a` ทาง binary ปกติ (pty line discipline จัดการเอง ไม่ต้องมี control frame) |
 | ข้อควรระวัง | input ใส่ทีละ frame เล็ก ๆ (keystroke) — paste ยาวให้แบ่ง frame ละ ≤ 32 KiB |
 
@@ -109,7 +110,7 @@ engine รันอยู่ในเครื่องที่ผู้ใช�
 - **`TERM=xterm-256color`** — ถ้า emulator ฝั่งแอพไม่ใช่ xterm-256color บอกได้ เปลี่ยนเป็น `xterm`
 - **cwd เริ่มที่ `/kaggle/working` ถ้ามีจริง ไม่งั้น cwd ของ engine** — ถ้าอยากให้เริ่มที่ `$AIXODIA_HOME` หรือ `$HOME` บอกได้ (กฎเดิมของ repo: ใช้ `/kaggle/working` เมื่อมี)
 - **`bash -l` แบบ login+interactive ปล่อยให้ profile ทำงาน** — ไม่ re-assert env/cwd ทับ (ได้ PATH conda/CUDA ของ image)
-- **ping 30 วิ ทำที่ `/terminal` เท่านั้น** — ไม่แตะ ping/พฤติกรรมของ chat hub; `pingInterval` 20 วิ ของแอพใช้ร่วมได้ไม่ชนกัน
+- **ping 20 วิ ทำที่ `/terminal` เท่านั้น** — ไม่แตะ ping/พฤติกรรมของ chat hub; `pingInterval` 10 วิ ของแอพใช้ร่วมได้ไม่ชนกัน
 - **`error` frame** เพิ่มเข้ามา (หลัง handshake ล้มเหลว) แทนที่จะปิดเงียบ ๆ
 - **cap 8 connection, chunk 32 KiB, frame input ≤ 1 MiB** (เพดานเดิมของ `maxFrame`)
 - **ไม่ log เนื้อหา; ไม่ทำ persistence** (ให้รัน `tmux` เอง); engine restart = shell ตาย

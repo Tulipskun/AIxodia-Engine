@@ -157,3 +157,80 @@ func (t *modeTracker) replay() []byte {
 	}
 	return out
 }
+
+// trimRing keeps the newest cap bytes of a session's output for replay, but
+// only ever cuts where a terminal parser is back in the ground state and on a
+// UTF-8 boundary. Cutting at an arbitrary byte leaves a client that attaches
+// later parsing the middle of an escape sequence or character as if it were
+// text — the "terminal shows rubbish after a reconnect" failure. The ring
+// always starts in the ground state (it begins empty and is only ever trimmed
+// here), so scanning from its first byte gives the right parser state.
+func trimRing(ring []byte, cap int) []byte {
+	if len(ring) <= cap {
+		return ring
+	}
+	cut := len(ring) - cap
+	start := groundBoundary(ring, cut)
+	if start >= len(ring) {
+		return nil
+	}
+	for start < len(ring) && ring[start]&0xC0 == 0x80 {
+		// The cut landed inside a multi-byte UTF-8 character; skip what is
+		// left of it rather than draw a replacement glyph at the top.
+		start++
+	}
+	return ring[start:]
+}
+
+// groundBoundary returns the largest index at most limit at which b begins on
+// a parser ground state. It mirrors the subset of the stream the mode tracker
+// already understands: escape, CSI and string sequences.
+func groundBoundary(b []byte, limit int) int {
+	const (
+		ground = iota
+		esc
+		csi
+		str
+		strEsc
+	)
+	state := ground
+	best := 0
+	for i := 0; i < len(b); i++ {
+		c := b[i]
+		switch state {
+		case ground:
+			if c == 0x1b {
+				state = esc
+			}
+		case esc:
+			switch {
+			case c == '[':
+				state = csi
+			case c == ']' || c == 'P' || c == '_' || c == '^' || c == 'X':
+				state = str
+			case c == 0x1b:
+				// A second ESC restarts a sequence rather than ending it.
+			default:
+				state = ground
+			}
+		case csi:
+			if c >= 0x40 && c <= 0x7e {
+				state = ground
+			}
+		case str:
+			if c == 0x1b {
+				state = strEsc
+			}
+		case strEsc:
+			if c == '\\' {
+				state = ground
+			} else if c != 0x1b {
+				state = str
+			}
+		}
+		if state == ground && i+1 <= limit {
+			best = i + 1
+		}
+	}
+	return best
+}

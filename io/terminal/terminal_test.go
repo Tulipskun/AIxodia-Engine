@@ -226,6 +226,102 @@ func TestTerminalResizeChangesTheWindow(t *testing.T) {
 	readOutput(t, conn, br, "40 120", 10*time.Second)
 }
 
+// A client that attaches to an existing shell must be able to change its size.
+// The shell outlives the link, so a rotation or a keyboard change while the
+// phone was offline would otherwise leave it drawing for the old window.
+func TestTerminalReattachAppliesTheNewSize(t *testing.T) {
+	srv := serveTerminal(t, testServer(t))
+
+	conn, br := dialTerminal(t, srv.URL, testToken, "?id=sized&cols=90&rows=25")
+	ready := nextTextFrame(t, conn, br, 10*time.Second)
+	if ready["cols"] != float64(90) || ready["rows"] != float64(25) {
+		t.Fatalf("first ready = %v, want 90x25", ready)
+	}
+	sendBinary(t, conn, "stty size\n")
+	readOutput(t, conn, br, "25 90", 10*time.Second)
+	conn.Close()
+
+	conn2, br2 := dialTerminal(t, srv.URL, testToken, "?id=sized&cols=120&rows=40")
+	ready2 := nextTextFrame(t, conn2, br2, 10*time.Second)
+	if ready2["cols"] != float64(120) || ready2["rows"] != float64(40) {
+		t.Fatalf("reattached ready = %v, want 120x40", ready2)
+	}
+	sendBinary(t, conn2, "stty size\n")
+	readOutput(t, conn2, br2, "40 120", 10*time.Second)
+}
+
+// Every attach replays from RIS (ESC c), so a client that still holds the
+// previous screen resets before the tail is drawn instead of painting on top
+// of it.
+func TestTerminalReattachReplaysFromAReset(t *testing.T) {
+	srv := serveTerminal(t, testServer(t))
+	conn, br := dialTerminal(t, srv.URL, testToken, "?id=replay&cols=90&rows=25")
+	_ = nextTextFrame(t, conn, br, 10*time.Second)
+	sendBinary(t, conn, "printf 'KEEP-%s\\n' 77\n")
+	readOutput(t, conn, br, "KEEP-77", 10*time.Second)
+	conn.Close()
+
+	conn2, br2 := dialTerminal(t, srv.URL, testToken, "?id=replay&cols=90&rows=25")
+	_ = nextTextFrame(t, conn2, br2, 10*time.Second)
+	op, payload, err := readFrame(t, conn2, br2, 10*time.Second)
+	if err != nil {
+		t.Fatalf("read replay: %v", err)
+	}
+	if op != wsock.OpBinary {
+		t.Fatalf("replay op = %d, want binary", op)
+	}
+	if !strings.HasPrefix(string(payload), "\x1bc") {
+		t.Fatalf("replay does not start with RIS: %q", payload[:min(len(payload), 24)])
+	}
+	if !strings.Contains(string(payload), "KEEP-77") {
+		t.Fatalf("replay does not carry the shell's tail: %q", payload)
+	}
+}
+
+func TestTrimRingCutsAtAParserBoundary(t *testing.T) {
+	// 9 bytes, cut at index 3 lands in the middle of ESC[31m.
+	ring := []byte("AB\x1b[31mCD")
+	if got := string(trimRing(ring, 6)); got != "\x1b[31mCD" {
+		t.Fatalf("trimRing = %q, want the whole sequence from its ESC", got)
+	}
+	// A cut inside a three-byte Thai character must not leave its tail behind.
+	thai := "ab\u0e2acd" // a b E0 B8 AA c d
+	if got := string(trimRing([]byte(thai), 4)); got != "cd" {
+		t.Fatalf("trimRing = %q, want the tail after the split character", got)
+	}
+	// Under the cap, nothing moves.
+	if got := string(trimRing([]byte("short"), 64)); got != "short" {
+		t.Fatalf("trimRing short = %q", got)
+	}
+}
+
+func TestAcquireSessionKeepsSizeWhenUnknown(t *testing.T) {
+	s := testServer(t)
+	sess, err := s.acquireSession("keep", 100, 30, termDir(), "/bin/sh")
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.pty.Close() })
+
+	// Zero is "the client has not been laid out yet": keep 100x30.
+	same, err := s.acquireSession("keep", 0, 0, termDir(), "/bin/sh")
+	if err != nil {
+		t.Fatalf("re-acquire: %v", err)
+	}
+	if same.cols != 100 || same.rows != 30 {
+		t.Fatalf("unknown size resized the shell to %dx%d, want 100x30", same.cols, same.rows)
+	}
+
+	// A real size does apply.
+	changed, err := s.acquireSession("keep", 120, 40, termDir(), "/bin/sh")
+	if err != nil {
+		t.Fatalf("re-acquire sized: %v", err)
+	}
+	if changed.cols != 120 || changed.rows != 40 {
+		t.Fatalf("shell size = %dx%d, want 120x40", changed.cols, changed.rows)
+	}
+}
+
 func TestTerminalRejectsBadToken(t *testing.T) {
 	srv := serveTerminal(t, testServer(t))
 

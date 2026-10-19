@@ -63,9 +63,11 @@ func (c Config) logf(format string, args ...any) {
 }
 
 // Run dials the relay and keeps it dialled until ctx ends or a newer engine
-// takes the room. Reconnects back off from one second to ten: the handshake to
-// the relay takes seconds on a phone network, and every second of backoff is a
-// second in which the phone has an open room but no engine in it.
+// takes the room. A blip is measured in seconds, not half a minute: the phone
+// has an open room but no engine in it until this process is back, and the
+// handshake itself already takes a couple of seconds on a phone network. The
+// cap is therefore short, and a connection that stayed up for ten seconds
+// counts as healthy, so the next blip starts again from one second.
 func Run(ctx context.Context, cfg Config) error {
 	backoff := time.Second
 	for {
@@ -80,7 +82,7 @@ func Run(ctx context.Context, cfg Config) error {
 		if err != nil {
 			cfg.logf("relay: %v", err)
 		}
-		if time.Since(began) > 30*time.Second {
+		if time.Since(began) > 10*time.Second {
 			backoff = time.Second
 		}
 		select {
@@ -88,7 +90,7 @@ func Run(ctx context.Context, cfg Config) error {
 			return nil
 		case <-time.After(backoff):
 		}
-		if backoff < 10*time.Second {
+		if backoff < 5*time.Second {
 			backoff *= 2
 		}
 	}
@@ -102,6 +104,11 @@ func runOnce(ctx context.Context, cfg Config) error {
 		return err
 	}
 	defer c.Close()
+	// The relay answers protocol pings (Cloudflare terminates the WebSocket at
+	// the edge), so a silent read is proof the socket is gone. Without this a
+	// half-open socket is only noticed when TCP keepalive finally gives up,
+	// which is minutes — the phone shows the engine offline that whole time.
+	c.SetLiveness(60 * time.Second)
 	stop := make(chan struct{})
 	defer close(stop)
 	go func() {
@@ -188,7 +195,7 @@ func (s *session) close() {
 }
 
 func (s *session) ping(ctx context.Context) {
-	t := time.NewTicker(30 * time.Second)
+	t := time.NewTicker(20 * time.Second)
 	defer t.Stop()
 	for {
 		select {

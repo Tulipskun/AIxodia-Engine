@@ -28,6 +28,11 @@ const (
 	ringCap = 64 << 10
 )
 
+// risReset is RIS (ESC c): everything back to how a fresh terminal looks.
+// Every attach replays onto it so a returning client never draws on top of the
+// screen it already had.
+var risReset = []byte("\x1bc")
+
 type Server struct {
 	token     string
 	mu        sync.Mutex
@@ -90,7 +95,27 @@ func (s *Server) acquireSession(id string, cols, rows uint16, dir, sh string) (*
 	defer s.mu.Unlock()
 	if sess, ok := s.sess[id]; ok && !sess.dead {
 		sess.lastAct = time.Now()
+		// A returning client may be a different size than the shell was left
+		// at (rotation, keyboard, another phone). Apply it before the replay:
+		// the pty sends SIGWINCH, a full-screen program repaints, and the bytes
+		// that follow are laid out for the window about to draw them. A zero
+		// dimension means the client does not know its size yet, so the shell
+		// is left as it was rather than shrunk to the placeholder.
+		if cols > 0 && rows > 0 && (cols != sess.cols || rows != sess.rows) {
+			sess.mu.Lock()
+			sess.cols, sess.rows = cols, rows
+			if !sess.dead {
+				_ = sess.pty.Resize(cols, rows)
+			}
+			sess.mu.Unlock()
+		}
 		return sess, nil
+	}
+	if cols == 0 {
+		cols = 80
+	}
+	if rows == 0 {
+		rows = 24
 	}
 	if len(s.sess) >= s.limit() {
 		// reap dead ones
@@ -184,19 +209,28 @@ func (s *Server) Attach(conn net.Conn, id string, cols, rows int) error {
 	if id == "" {
 		id = newID()
 	}
-	if cols <= 0 {
-		cols = 80
+	// Zero is a real value here: the app may reattach before its view has been
+	// laid out, and it should then keep the shell's current size rather than
+	// force the 80x24 placeholder onto a running program. A new shell still
+	// gets the defaults inside acquireSession.
+	c, r := uint16(0), uint16(0)
+	if cols > 0 {
+		c = uint16(clamp(cols))
 	}
-	if rows <= 0 {
-		rows = 24
+	if rows > 0 {
+		r = uint16(clamp(rows))
 	}
-	c, r := uint16(clamp(cols)), uint16(clamp(rows))
 	dir, sh := termDir(), s.shell()
 	sess, err := s.acquireSession(id, c, r, dir, sh)
 	if err != nil {
 		return err
 	}
-	go s.serve(conn, bufio.NewReader(conn), nil, sess, id, c, r, dir, sh)
+	// The ready frame must name the size the shell actually has; when the
+	// client sent zero that is the size it was already running at.
+	sess.mu.Lock()
+	effC, effR := sess.cols, sess.rows
+	sess.mu.Unlock()
+	go s.serve(conn, bufio.NewReader(conn), nil, sess, id, effC, effR, dir, sh)
 	return nil
 }
 
@@ -214,11 +248,19 @@ func (s *Server) serve(conn net.Conn, br *bufio.Reader, r *http.Request, sess *s
 	_ = wsock.WriteFrame(conn, wsock.OpText, mustJSON(map[string]any{
 		"type": "ready", "shell": sh, "cwd": dir, "cols": cols, "rows": rows, "id": id,
 	}))
-	if len(modes) > 0 {
-		_ = wsock.WriteFrame(conn, wsock.OpBinary, modes)
-	}
-	if len(ring) > 0 {
-		_ = wsock.WriteFrame(conn, wsock.OpBinary, ring)
+	// Replay onto a known state. A client may be reattaching to a screen it
+	// already has — after a dropped link, or after the engine restarted under
+	// an open window — so drawing the tail on top of the old screen duplicates
+	// prompts and paints a full-screen app's frame over the previous one. RIS
+	// resets the client first; the modes then re-enter the alternate screen
+	// before the tail is drawn into it. It is all one binary frame so the
+	// order reset -> modes -> output cannot be split by the transport.
+	replay := make([]byte, 0, len(risReset)+len(modes)+len(ring))
+	replay = append(replay, risReset...)
+	replay = append(replay, modes...)
+	replay = append(replay, ring...)
+	if len(replay) > 0 {
+		_ = wsock.WriteFrame(conn, wsock.OpBinary, replay)
 	}
 	// read loop
 	for {
@@ -274,10 +316,7 @@ func (sess *session) readLoop() {
 			chunk := append([]byte(nil), buf[:n]...)
 			sess.mu.Lock()
 			sess.modes.scan(chunk)
-			sess.ring = append(sess.ring, chunk...)
-			if len(sess.ring) > ringCap {
-				sess.ring = sess.ring[len(sess.ring)-ringCap:]
-			}
+			sess.ring = trimRing(append(sess.ring, chunk...), ringCap)
 			sess.lastAct = time.Now()
 			subs := make([]*subscriber, 0, len(sess.subs))
 			for sub := range sess.subs {

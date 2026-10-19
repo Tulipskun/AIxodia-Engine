@@ -26,6 +26,13 @@ type Client struct {
 	conn net.Conn
 	br   *bufio.Reader
 	mu   sync.Mutex
+	// liveness bounds how long ReadMessage waits for any frame at all. Zero
+	// means wait forever. A peer that has gone away without a close frame —
+	// a dropped phone network, a relay edge that forgot the socket — leaves a
+	// reader parked on read until TCP keepalive eventually gives up, which on
+	// Linux is minutes. The engine pings on a shorter interval, so a live
+	// socket always answers within liveness; a silent one times out.
+	liveness time.Duration
 }
 
 // Dial opens a WebSocket to a ws:// or wss:// URL. The extra headers are sent
@@ -128,6 +135,15 @@ func (c *Client) ReadMessage() (byte, []byte, error) {
 	var op byte
 	var payload []byte
 	for {
+		// Refresh the deadline on every frame, not once per message: a pong
+		// answers the ping and says the peer is still there, and it must count.
+		// Without this an idle connection that only exchanges pings would time
+		// out while it is perfectly healthy.
+		if c.liveness > 0 {
+			if err := c.conn.SetReadDeadline(time.Now().Add(c.liveness)); err != nil {
+				return 0, nil, err
+			}
+		}
 		fin, frameOp, data, err := c.readFrame()
 		if err != nil {
 			return 0, nil, err
@@ -178,6 +194,11 @@ func (c *Client) Close() error { return c.conn.Close() }
 // SetReadDeadline bounds the next ReadMessage, for callers that would rather
 // time out than block on a silent peer.
 func (c *Client) SetReadDeadline(t time.Time) error { return c.conn.SetReadDeadline(t) }
+
+// SetLiveness makes ReadMessage give up when no frame of any kind arrives
+// within d. Every frame — data, ping or pong — resets the clock, so a peer that
+// is only answering pings still counts as alive. Zero disables the bound.
+func (c *Client) SetLiveness(d time.Duration) { c.liveness = d }
 
 func (c *Client) readFrame() (bool, byte, []byte, error) {
 	var h [2]byte
