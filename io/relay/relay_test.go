@@ -327,6 +327,37 @@ func TestEngineCarriesTerminalStreams(t *testing.T) {
 	}
 }
 
+func TestEngineReplacesAStreamOpenedWithTheSameSID(t *testing.T) {
+	// A restarted app starts its stream ids over; the engine's relay session
+	// still holds the previous run's id. The second open must be served, not
+	// dropped, or the phone waits for a ready that never comes.
+	fr := newFakeRelay(t, "tok")
+	term := terminal.NewServer("tok")
+	term.Shell = "/bin/sh"
+	term.PingEvery = time.Minute
+	start(t, Config{
+		URL: fr.url(), Token: "tok",
+		Hub:  mobile.NewHub(),
+		Term: term,
+		Logf: func(string, ...any) {},
+	})
+	wc := fr.accept(t)
+
+	wc.sendText(t, map[string]any{"ch": "ctl", "act": "open", "id": "old", "sid": 7, "cols": 80, "rows": 24})
+	wc.waitJSON(t, "first ready", func(m map[string]any) bool {
+		return m["ch"] == "term" && m["sid"] == float64(7) && m["id"] == "old"
+	})
+
+	wc.sendText(t, map[string]any{"ch": "ctl", "act": "open", "id": "new", "sid": 7, "cols": 80, "rows": 24})
+	ready := wc.waitJSON(t, "ready for the reused sid", func(m map[string]any) bool {
+		return m["ch"] == "term" && m["sid"] == float64(7) && m["id"] == "new"
+	})
+	p, _ := ready["p"].(map[string]any)
+	if p["type"] != "ready" {
+		t.Fatalf("ready = %+v", ready)
+	}
+}
+
 func TestEngineResizesTheTerminalOverTheRelay(t *testing.T) {
 	fr := newFakeRelay(t, "tok")
 	term := terminal.NewServer("tok")

@@ -299,13 +299,18 @@ func (s *session) control(e envelope) {
 	case "open":
 		sid := uint16(e.SID)
 		s.mu.Lock()
-		if _, exists := s.terms[sid]; exists {
-			s.mu.Unlock()
-			return
-		}
+		// A phone starts its stream ids over when its process restarts, while
+		// this relay session only forgets ids when the engine reconnects. A
+		// stale entry for the same sid must therefore give way to the new
+		// open: returning early left the phone waiting for a ready frame that
+		// could never arrive.
+		old := s.terms[sid]
 		pc := newPipeConn(s.termSink(sid, e.ID))
 		s.terms[sid] = &termStream{id: e.ID, conn: pc}
 		s.mu.Unlock()
+		if old != nil {
+			old.conn.Close()
+		}
 		if err := s.cfg.Term.Attach(pc, e.ID, e.Cols, e.Rows); err != nil {
 			s.termError(e.ID, sid, err)
 			s.mu.Lock()
