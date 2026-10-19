@@ -20,10 +20,10 @@ export function dial(name, token = TOKEN) {
     };
     tick();
   });
+  const send = (x) => ready.then(() => ws.send(x));
   return {
-    ws, received, closed, ready, waitFor,
-    send: (x) => ws.send(x),
-    engine: (started, version = "t") => ws.send(JSON.stringify({ role: "engine", started, version })),
-    phone: () => ws.send(JSON.stringify({ role: "phone" })),
+    ws, received, closed, ready, waitFor, send,
+    engine: (started, version = "t") => send(JSON.stringify({ role: "engine", started, version })),
+    phone: () => send(JSON.stringify({ role: "phone" })),
   };
 }

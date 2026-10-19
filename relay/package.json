@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "deploy": "wrangler deploy",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test --test-force-exit test/*.test.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261019.1",
