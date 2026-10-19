@@ -55,25 +55,25 @@ engine และมือถือ **ต่างก็ dial ออก** ไป�
 ### 4.1 Worker + Durable Object (`relay/`)
 - Worker: route `GET /room/<name>` (WS upgrade) → ส่งต่อไป DO ตัวชื่อ `<name>` (`idFromName`)
 - DO (SQLite-backed ตามข้อบังคับ free plan) ใช้ **Hibernation API** (`state.acceptWebSocket`) เพื่อไม่ burn duration ตอนว่าง
-- DO ถือ 2 บทบาท: `engine` (มีได้ตัวเดียว) และ `phone` (หลายตัวพร้อมกัน เหมือน `Hub` วันนี้)
+- DO ถือ 2 บทบาท: `engine` (ตัวเดียว) และ `phone` (**ตัวเดียวเท่านั้น — ห้ามต่อพร้อมกันหลายเครื่อง**) — phone ที่สองที่ต่อเข้ามา: DO ปิดตัวเก่าด้วย `{"ctl":"superseded-phone"}` แล้วรับตัวใหม่ (กัน lockout จาก socket ค้าง; เป็น call ของผม)
 - Auth: อ่าน `Authorization: Bearer <token>` ตอน handshake → เทียบกับ secret ของ DO (ตั้งด้วย `wrangler secret`); ไม่ตรง = 401
 - Handover: engine ส่ง `{"role":"engine","started":<unix>,"version":"..."}` — DO เก็บ `started`/`version` ล่าสุดใน `state.storage` (รอด hibernation) แล้วเทียบ; ใหม่กว่าชนะ → ส่งตัวเก่า `{"ctl":"superseded"}` แล้วปิด socket; **engine ที่ถูก supersede จะจบโปรเซสเอง** (พฤติกรรมเดียวกับ `newerDaemonRunning` วันนี้) — DO เก็บกวาดช่อง engine เมื่อ socket ตาย
-- Forward: DO ออก `sid` (socket id) ให้ phone แต่ละตัว; frame จาก phone ถูกติด `sid` ก่อนส่งให้ engine, frame จาก engine ระบุ `sid` เพื่อเจาะจง phone (ไม่ระบุ = กระจายทุกตัว) — **ไม่ parse เนื้อใน** ยกเว้น `sid`/`ctl` ที่ DO ใส่เอง; engine มองแต่ละ `sid` เป็น peer แยก
-- Presence: DO ประกาศ `{"ctl":"presence","engine":true|false}` (สำหรับ debug/อนาคต); **จุดเขียว/uptime/version ของแอพ ยังอ่านจาก D1 `daemon/heartbeat|version` เหมือนเดิม** (ลดการแก้ฝั่งแอพ)
+- Forward: DO ส่ง frame ระหว่าง engine ↔ phone (มีคู่เดียว) — **ไม่ parse เนื้อใน** ยกเว้น `ctl` ของ DO เอง; ไม่ต้องมี socket id
+- Presence: `{"ctl":"presence","engine":true|false}` (แค่ดีบัก; สถานะ/uptime/version ของแอพยังมาจาก D1)
 - ขนาด frame: relay ไม่แตก/ไม่ประกอบ; ใช้ message size ที่ DO รองรับ (สูงสุด 32 MiB ตามเอกสาร)
 
 ### 4.2 สัญญาบน WS (ระหว่างแอพกับ engine — DO โปร่ง)
 Envelope บน text frame (JSON):
 ```json
-{"ch":"chat","sid":"<sid>", ...frame ของเดิมจาก io/mobile}
-{"ch":"term","sid":"<sid>","id":"t-...", "k":"json"|"b64", "p":<payload>}
-{"ch":"rpc","sid":"<sid>","rid":"<id>","m":"GET|POST|...","p":"/v1/sessions","b":"<base64 body>","h":{...}}
-{"ch":"rpc","sid":"<sid>","rid":"<id>","s":200,"h":{...},"b":"<base64 body>"}
-{"ch":"ctl","sid":"<sid>","id":"t-...","act":"open|close|bye","cols":100,"rows":30}
+{"ch":"chat", ...frame ของเดิมจาก io/mobile}
+{"ch":"term","id":"t-...", "k":"json"|"b64", "p":<payload>}
+{"ch":"rpc","rid":"<id>","m":"GET|POST|...","p":"/v1/sessions","b":"<base64 body>","h":{...}}
+{"ch":"rpc","rid":"<id>","s":200,"h":{...},"b":"<base64 body>"}
+{"ch":"ctl","id":"t-...","act":"open|close|bye","cols":100,"rows":30}
 ```
 - binary frame = byte ของ terminal ล้วน ๆ นำหน้าด้วย header สั้น `[1B ch][2B streamId][payload]` (กัน base64 บวม); engine↔แอพตกลง layout นี้เป็นคู่ของเราเอง (§8 calls)
-- compatibility: frame ที่ไม่มี `ch` ถือเป็น `chat` (แอพ/engine เก่าคุยกันได้ระหว่างเปลี่ยนผ่าน); `sid` ใส่โดย DO — ฝั่ง engine/แอพไม่ต้องส่งเอง
-- `streamId` = ลำดับ terminal ต่อ `sid` (ไม่ใช้ id แบบ string บน binary hot path)
+- compatibility: frame ที่ไม่มี `ch` ถือเป็น `chat` (แอพ/engine เก่าคุยกันได้ระหว่างเปลี่ยนผ่าน)
+- `streamId` = ลำดับ terminal (มี phone เดียว จึงเป็นลำดับเดียว ไม่ต้องมี socket id)
 - **RPC เป็น one-shot request/response ไม่มี streaming**: ทุก REST call ของแอพวันนี้ไม่ stream (`/v1/sessions*`, `/api/*`, `/restart`, `POST /v1/attachments`) — SSE (`POST /v1/chat/completions`) ไม่ได้ใช้จากแอพ (แชทวิ่งบน `ch:"chat"`) จึงไม่ต้องรองรับ stream ในรอบนี้
 - **อัปโหลดไฟล์ต้องเป็น chunk ไม่ใช่ frame เดียว**: ฝั่ง engine รับถึง 128 MiB (`io/gateway/upload.go:21`, stream ลงดิสก์) → `ch:"rpc"` ของ upload ส่ง body เป็น binary chunk หลาย frame + `end` แทน base64 ก้อนเดียว
 - **phone ปิดแอพ = ส่ง `act:"bye"` ก่อนปิด socket**: engine ไม่เห็น close frame ของ phone อีก จึงต้องมี frame บอกลา เพื่อคงพฤติกรรมเดิม "close = ยกเลิก turn ที่รันอยู่" (`io/mobile/ws.go:211-247`); socket หลุดเฉย ๆ (ไม่มี `bye`) = เหมือน drop วันนี้ (turn รันต่อ คำตอบถูกเก็บ)
@@ -81,8 +81,8 @@ Envelope บน text frame (JSON):
 ### 4.3 ฝั่ง engine
 - package ใหม่ (ชื่อให้ผู้สร้างเลือก) `relay`: dial client (handshake เอง + mask frame), อ่าน loop, reconnect backoff + ping 20–30 วิ, ส่ง `role=engine`
 - router ในเครื่องตาม `ch`:
-  - `chat` → ป้อนเข้า `mobile.Hub` ผ่าน transport interface ใหม่; **1 `sid` = 1 peer** (คงพฤติกรรมหลายเครื่องของ `Hub`) — `bye` ของ `sid` ใด = `cancelSession("")` เฉพาะ peer นั้น
-  - `term`/binary → `terminal.Server` ผ่าน transport interface ใหม่; map `(sid, streamId)` ↔ session + รับ `open`/`close`/`resize`
+  - `chat` → ป้อนเข้า `mobile.Hub` ผ่าน transport interface ใหม่; **phone มีตัวเดียว** → `Hub` มี peer เดียวได้ (แต่ยังใช้ `Hub` เดิมได้เลย) — `bye` = `cancelSession("")`
+  - `term`/binary → `terminal.Server` ผ่าน transport interface ใหม่; map `streamId` ↔ session + รับ `open`/`close`/`resize`
   - `rpc` → สร้าง `httptest.NewRequest(m, p, b)` + คัด header → `gw.ServeHTTP` (ยกเว้น `/ws`,`/terminal` ที่ไม่ผ่าน mux) → ตอบ `{rid,s,h,b}`; body ใหญ่/อัปโหลดรับเป็น chunk ต่อ frame
 - เมื่อได้ `{"ctl":"superseded"}` → จบโปรเซส (เท่า `newerDaemonRunning` วันนี้: คืนจาก `main` → Kaggle ปิด/พุช session)
 - ลบ cloudflared/keeper; **D1 `daemon/url|version|heartbeat` ยังเขียนเหมือนเดิม** — แต่ `daemon/url` = relay URL นิ่ง (จาก env) ไม่ใช่ trycloudflare → แอพ discovery/สถานะเดิมไม่ต้องแก้; handover ตัดสินที่ DO
@@ -138,7 +138,7 @@ Envelope บน text frame (JSON):
 
 - **Envelope + binary header**: text = JSON มี `ch`; binary = `[1B ch][2B streamId][payload]`; ไม่มี `ch` = `chat` (เข้ากันได้ถอยหลัง)
 - **DO ไม่ parse เนื้อ frame** ยกเว้น `sid`/`ctl` ที่ DO ใส่เอง — ฉลาดน้อยสุด ปลอดภัยสุด
-- **รองรับหลาย phone พร้อมกัน** เหมือน `Hub` วันนี้ → DO ให้ `sid` ต่อ socket และ engine มอง 1 `sid` = 1 peer (ถ้าผู้ใช้ใช้เครื่องเดียวจริง บอกได้ จะลดเป็น single-peer ให้ง่ายลง)
+- **phone ต่อได้ทีละเครื่อง (ผู้ใช้กำหนด)**: DO ให้ phone ได้ตัวเดียว; เครื่องที่สองที่ต่อเข้ามาปิดตัวเก่า (`superseded-phone`) แล้วรับตัวใหม่ — engine จึงมี peer เดียว และไม่ต้องมี socket id
 - **engine ที่ถูก supersede จบโปรเซส** (เท่าพฤติกรรมเดิม) และ DO เก็บกวาดช่อง engine เมื่อ socket ตาย → กัน race ด้วยการตัดสินที่ DO จุดเดียว; engine ที่ reconnect/`started` เท่ากันถือว่าเป็นตัวเดียวกัน
 - **handover ตัดสินที่ DO** แต่ **D1 `daemon/url|version|heartbeat` ยังเขียนเหมือนเดิม** (url = relay URL นิ่ง) → แอพ discovery/สถานะไม่ต้องแก้; DO เป็นผู้ตัดสินว่า engine ตัวไหนได้ช่อง relay
 - **RPC one-shot ไม่มี streaming** — ครอบทุก REST call ที่แอพใช้ (`/v1/sessions*`, `/api/*`, `/restart`, uploads); SSE ของ `/v1/chat/completions` ไม่ใช้จากแอพ
@@ -153,7 +153,7 @@ Envelope บน text frame (JSON):
 ## 9. ความเสี่ยง / ค้าง
 
 - **สิทธิ์ Workers ยังไม่พร้อม** — บัญชียังไม่มี Worker/workers.dev subdomain; ตัวแก้: token ใหม่ที่ผู้ใช้ให้มา (`API Tokens Write`) → สร้าง deploy token กลุ่ม `Workers Scripts:Write` แล้วตั้ง subdomain + deploy (§5)
-- **blast radius ของ token**: ถ้าใช้ token ที่มี `Workers Scripts:Write` เป็น **bearer** ที่แอพถือด้วย ใครได้ token = deploy Worker ได้; เสนอแยก **deploy token** (เก็บไว้ deploy เท่านั้น) ออกจาก **bearer/DO secret** (ตัวที่แอพส่ง) — ถ้าผู้ใช้ต้องการ token เดียวจริง บอกได้
+- **blast radius ของ token (ผู้ใช้ตัดสิน: ใช้ token ตัวเดียว)**: token ที่มี `Workers Scripts:Write` ถูกใช้เป็น bearer ที่แอพถือด้วย → ใครได้ token = deploy Worker ได้ ยอมรับความเสี่ยงนี้ (ผู้ใช้เลือก 2026-10-19)
 - **DO frame/message size + hibernation**: ต้องยืนยันว่าขนาด frame terminal (32 KiB/chunk) ผ่าน และ relay ตอน terminal เปิดค้างไม่ทำให้ duration เกิน 13,000 GB-s/วัน
 - **reconnect + state**: terminal ไม่มี reconnect วันนี้ (ตั้งใจ); หลังย้าย transport ต้องคงพฤติกรรมเดิม (قطعแล้ว shell ตาย)
 - **แอพ rewrite ใหญ่**: `HistoryApi` ~25 call → RPC + upload chunking = ความเสี่ยงบั๊กสูงสุดของงานนี้
