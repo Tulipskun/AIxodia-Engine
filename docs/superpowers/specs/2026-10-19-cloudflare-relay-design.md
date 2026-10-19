@@ -110,16 +110,18 @@ Envelope บน text frame (JSON):
 | Worker URL | `wss://<worker>.<account>.workers.dev/room/<room>` (นิ่ง) |
 | ที่มาของ URL | engine เผยแพร่ลง D1 `daemon/url` (เหมือน tunnel วันนี้) → แอพ discovery เดิม |
 | token | CF token เดียวกับวันนี้ (bearer) — **การตั้งค่าแอพเหลือช่องเดียวเหมือนเดิม** |
-| deploy token | สร้างใหม่จากตัวที่ให้มา: กลุ่ม `Workers Scripts:Write` (`e086da7e2179491d91ee5f35b3ca210a`) + `Workers Scripts:Read` — ใช้ตอน deploy เท่านั้น ไม่ ship ไปแอพ |
-| deploy | `wrangler deploy` + ตั้ง workers.dev subdomain (ผ่าน token ใหม่) |
+| deploy token | **สร้างแล้ว 2026-10-19**: `aixodia-relay-deploy` (Workers Scripts Write+Read, Workers Admin, Workers Editor) เก็บค่าไว้ข้างรีโป (`/tmp/opencode/relay.env`, ไม่ commit) — ใช้ตอน deploy เท่านั้น ไม่ ship ไปแอพ |
+| deploy | `wrangler deploy` — subdomain `aixodia` มีอยู่แล้ว → URL = `https://aixodia-relay.aixodia.workers.dev` |
 | DO secret | `RELAY_TOKEN` = bearer token (ตัวเดียวกับที่แอพ/engine ส่ง) |
 | engine env | `AIXODIA_RELAY_URL`, `AIXODIA_ROOM` (ถ้าไม่ตั้ง = โหมดไม่ต่อ relay) |
 
 ## 6. การทดสอบ
 
+> **ข้อจำกัดที่พบจริง (2026-10-19)**: `workerd` รันในเครื่อง dev นี้ไม่ได้เลย — แม้แต่ `workerd --version` ก็ล้มที่ TCMalloc (`MmapAligned() failed ... size=1073741824, alignment=1073741824`; aarch64 + PRoot ไม่ให้ mmap alignment 1 GiB). ลอง `PROOT_NO_SECCOMP=1`, `TCMALLOC_HEAP_LIMIT_MB=0`, `MALLOC_ARENA_MAX=1` แล้วไม่ผ่านทั้งหมด → **`wrangler dev` และ vitest workers-pool ใช้ไม่ได้**. `wrangler deploy` ใช้ได้ (bundle ด้วย esbuild + upload, ไม่พึ่ง workerd)
+
+- relay: ทดสอบกับ **Worker ที่ deploy แล้วจริง** (`https://aixodia-relay.aixodia.workers.dev`) ด้วยสคริปต์ Node (`node --test`, dep เดียวคือ `ws`) dial `wss://.../room/<name>` สอง socket (จำลอง app/engine) → auth 401, pair+forward, handover ตาม `started`, phone ตัวเดียว, presence, frame 32 KiB
 - unit engine: `wsock` client (mask round-trip กับ server ในเครื่อง), router แยก `ch` ถูก, RPC dispatch GET/POST ตรงกับเรียก handler ตรง
 - unit terminal: หลาย session บน transport เดียว (echo, resize, exit)
-- integration ในเครื่อง: รัน engine → ต่อ DO local (`wrangler dev`) → เปิดสอง socket (จำลองแอพ/engine) → แชท/terminal/RPC ผ่านครบ + handover (engine ใหม่แย่งที่แล้วตัวเก่าปิด)
 - ของเดิมต้องเขียว: `go clean -testcache && go build ./... && go vet ./... && gofmt -l . && go test ./...`
 - ฝั่งแอพ: unit `RelaySocket` (route `ch`, rpc timeout), `HistoryApi` บน RPC แทน OkHttp
 - ยิงจริง: Cloudflare DO (deploy แล้ว) + Kaggle session → เปิดแชท, terminal (ปล่อย `yes` 10 วิ ดูโควตา/ความลื่น), อัปไฟล์, restart
@@ -128,7 +130,7 @@ Envelope บน text frame (JSON):
 
 **หลัก: engine รัน tunnel + relay คู่กันไปก่อน จนกว่า APK ใหม่ถูกติดตั้งและ verify แล้ว — ห้ามตัด cloudflared ก่อนแอพอัป**
 
-1. `relay/` (Worker+DO+hibernation+auth+handover+presence) + เทสต์ด้วย `wrangler dev` (ไม่ต้องมีโดเมน/ไม่ต้องมี Kaggle)
+1. `relay/` (Worker+DO+hibernation+auth+handover+presence) + เทสต์ด้วย **deploy จริง + Node WS client** (workerd ในเครื่องใช้ไม่ได้ — §6)
 2. engine: `wsock` client + package relay + transport interface ของ `mobile`/`terminal` + router + RPC dispatch + เทสต์ — **ยังคง cloudflared + publish `daemon/url` เหมือนเดิม** (relay เป็นทางเสริม เปิดด้วย env)
 3. release rolling `engine-latest`; เปิด relay ควบคู่; session ใหม่รันได้ทั้งสองทาง
 4. แอพ: `RelaySocket` + ย้าย `HistoryApi`/terminal/`SettingsStore`/discovery; ปล่อย APK; **ไม่ต้องตั้งค่าในแอพเพิ่ม** (discovery เดิมอ่าน relay URL จาก D1), verify
@@ -152,12 +154,12 @@ Envelope บน text frame (JSON):
 
 ## 9. ความเสี่ยง / ค้าง
 
-- **สิทธิ์ Workers ยังไม่พร้อม** — บัญชียังไม่มี Worker/workers.dev subdomain; ตัวแก้: token ใหม่ที่ผู้ใช้ให้มา (`API Tokens Write`) → สร้าง deploy token กลุ่ม `Workers Scripts:Write` แล้วตั้ง subdomain + deploy (§5)
+- **สิทธิ์ Workers (แก้แล้ว 2026-10-19)** — subdomain `aixodia` มีอยู่แล้ว; สร้าง deploy token `aixodia-relay-deploy` (Workers Scripts Write+Read + Workers Admin/Editor) แล้ว; `wrangler deploy` ผ่านโดยไม่ต้องพึ่ง workerd (พิสูจน์ด้วย `--dry-run`)
 - **blast radius ของ token (ผู้ใช้ตัดสิน: ใช้ token ตัวเดียว)**: token ที่มี `Workers Scripts:Write` ถูกใช้เป็น bearer ที่แอพถือด้วย → ใครได้ token = deploy Worker ได้ ยอมรับความเสี่ยงนี้ (ผู้ใช้เลือก 2026-10-19)
 - **DO frame/message size + hibernation**: ต้องยืนยันว่าขนาด frame terminal (32 KiB/chunk) ผ่าน และ relay ตอน terminal เปิดค้างไม่ทำให้ duration เกิน 13,000 GB-s/วัน
 - **reconnect + state**: terminal ไม่มี reconnect วันนี้ (ตั้งใจ); หลังย้าย transport ต้องคงพฤติกรรมเดิม (قطعแล้ว shell ตาย)
 - **แอพ rewrite ใหญ่**: `HistoryApi` ~25 call → RPC + upload chunking = ความเสี่ยงบั๊กสูงสุดของงานนี้
 - **Supersede ที่ DO**: ต้องกัน two-engine race (ตัดสินที่ DO จุดเดียว + เก็บกวาด slot เมื่อ socket ตาย + reconnect ตัวเดิมไม่ถูกหาว่าเก่า)
 - **ช่วงเปลี่ยนผ่าน**: engine ต้องรัน tunnel คู่ relay จนกว่าแอพอัป (§7) — ถ้าลืม แอพเก่าทุกตัว offline
-- **ทดสอบไม่ได้ offline**: DO ต้อง deploy/`wrangler dev` จริง
+- **ทดสอบ offline ไม่ได้ และ local runtime ก็ไม่ได้**: `workerd` รันในเครื่อง dev ไม่ได้ (PRoot/TCMalloc) → ทุกการทดสอบของ relay = ยิง Worker ที่ deploy แล้วจริงเท่านั้น (§6)
 - revert: ลบ `relay/`, คืน `tunnel.go` + commit เดิม, ปิด env; ไม่มี migration ข้อมูล (ยกเว้นที่ลบ `daemon/url`)
