@@ -4,26 +4,48 @@ export const BASE = process.env.RELAY_URL ?? "https://aixodia-relay.aixodia.work
 export const TOKEN = process.env.RELAY_TOKEN ?? "test-token";
 export const WS_BASE = BASE.replace(/^http/, "ws");
 
-export function dial(name, token = TOKEN) {
-  const ws = new WebSocket(`${WS_BASE}/room/${name}`, { headers: { Authorization: `Bearer ${token}` } });
-  const received = [];
-  ws.on("message", (d) => received.push(d.toString()));
-  const closed = new Promise((r) => ws.on("close", (code, reason) => r({ code, reason: String(reason) })));
-  const ready = new Promise((res, rej) => { ws.on("open", () => res()); ws.on("error", rej); });
-  const waitFor = (sub, ms = 5000) => new Promise((res, rej) => {
-    const t0 = Date.now();
-    const tick = () => {
-      const hit = received.find((m) => (typeof sub === "string" ? m === sub : sub.test(m)));
-      if (hit !== undefined) return res(hit);
-      if (Date.now() - t0 > ms) return rej(new Error(`timeout waiting ${sub}; got ${JSON.stringify(received)}`));
-      setTimeout(tick, 25);
-    };
-    tick();
+export const timed = (p, ms, label) =>
+  Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`timeout: ${label}`)), ms))]);
+
+function openOnce(name, token) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`${WS_BASE}/room/${name}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      family: 4,
+    });
+    const received = [];
+    ws.on("message", (d) => received.push(d.toString()));
+    const closed = new Promise((r) => ws.on("close", (code, reason) => r({ code, reason: String(reason) })));
+    const waitFor = (sub, ms = 5000) => new Promise((res, rej) => {
+      const t0 = Date.now();
+      const tick = () => {
+        const hit = received.find((m) => (typeof sub === "string" ? m === sub : sub.test(m)));
+        if (hit !== undefined) return res(hit);
+        if (Date.now() - t0 > ms) return rej(new Error(`timeout waiting ${sub}; got ${JSON.stringify(received)}`));
+        setTimeout(tick, 25);
+      };
+      tick();
+    });
+    const send = (x) => new Promise((res, rej) => ws.send(x, (e) => (e ? rej(e) : res())));
+    ws.on("open", () => resolve({
+      ws, received, closed, waitFor, send,
+      ready: Promise.resolve(),
+      engine: (started, version = "t") => send(JSON.stringify({ role: "engine", started, version })),
+      phone: () => send(JSON.stringify({ role: "phone" })),
+    }));
+    ws.on("error", reject);
   });
-  const send = (x) => ready.then(() => ws.send(x));
-  return {
-    ws, received, closed, ready, waitFor, send,
-    engine: (started, version = "t") => send(JSON.stringify({ role: "engine", started, version })),
-    phone: () => send(JSON.stringify({ role: "phone" })),
-  };
+}
+
+export async function dial(name, token = TOKEN) {
+  let last;
+  for (let i = 0; i < 3; i++) {
+    try {
+      return await openOnce(name, token);
+    } catch (e) {
+      last = e;
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+  throw last;
 }
