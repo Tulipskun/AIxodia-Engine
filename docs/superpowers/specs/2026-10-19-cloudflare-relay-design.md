@@ -59,7 +59,7 @@ engine และมือถือ **ต่างก็ dial ออก** ไป�
 - Auth: อ่าน `Authorization: Bearer <token>` ตอน handshake → เทียบกับ secret ของ DO (ตั้งด้วย `wrangler secret`); ไม่ตรง = 401
 - Handover: engine ส่ง `{"role":"engine","started":<unix>,"version":"..."}` — DO เก็บ `started`/`version` ล่าสุดใน `state.storage` (รอด hibernation) แล้วเทียบ; ใหม่กว่าชนะ → ส่งตัวเก่า `{"ctl":"superseded"}` แล้วปิด socket; **engine ที่ถูก supersede จะจบโปรเซสเอง** (พฤติกรรมเดียวกับ `newerDaemonRunning` วันนี้) — DO เก็บกวาดช่อง engine เมื่อ socket ตาย
 - Forward: DO ออก `sid` (socket id) ให้ phone แต่ละตัว; frame จาก phone ถูกติด `sid` ก่อนส่งให้ engine, frame จาก engine ระบุ `sid` เพื่อเจาะจง phone (ไม่ระบุ = กระจายทุกตัว) — **ไม่ parse เนื้อใน** ยกเว้น `sid`/`ctl` ที่ DO ใส่เอง; engine มองแต่ละ `sid` เป็น peer แยก
-- Presence: `{"ctl":"presence","engine":true|false,"started":<unix>,"version":"..."}` ให้แอพได้จุดเขียว + uptime/version (แทน `NodeInfo` ที่เคยอ่านจาก D1)
+- Presence: DO ประกาศ `{"ctl":"presence","engine":true|false}` (สำหรับ debug/อนาคต); **จุดเขียว/uptime/version ของแอพ ยังอ่านจาก D1 `daemon/heartbeat|version` เหมือนเดิม** (ลดการแก้ฝั่งแอพ)
 - ขนาด frame: relay ไม่แตก/ไม่ประกอบ; ใช้ message size ที่ DO รองรับ (สูงสุด 32 MiB ตามเอกสาร)
 
 ### 4.2 สัญญาบน WS (ระหว่างแอพกับ engine — DO โปร่ง)
@@ -85,7 +85,7 @@ Envelope บน text frame (JSON):
   - `term`/binary → `terminal.Server` ผ่าน transport interface ใหม่; map `(sid, streamId)` ↔ session + รับ `open`/`close`/`resize`
   - `rpc` → สร้าง `httptest.NewRequest(m, p, b)` + คัด header → `gw.ServeHTTP` (ยกเว้น `/ws`,`/terminal` ที่ไม่ผ่าน mux) → ตอบ `{rid,s,h,b}`; body ใหญ่/อัปโหลดรับเป็น chunk ต่อ frame
 - เมื่อได้ `{"ctl":"superseded"}` → จบโปรเซส (เท่า `newerDaemonRunning` วันนี้: คืนจาก `main` → Kaggle ปิด/พุช session)
-- ลบ cloudflared/keeper; `startHeartbeat`/`daemon/url` เลิกใช้ (presence+handover+uptime อยู่ที่ DO แล้ว)
+- ลบ cloudflared/keeper; **D1 `daemon/url|version|heartbeat` ยังเขียนเหมือนเดิม** — แต่ `daemon/url` = relay URL นิ่ง (จาก env) ไม่ใช่ trycloudflare → แอพ discovery/สถานะเดิมไม่ต้องแก้; handover ตัดสินที่ DO
 - `server` บน `127.0.0.1:8787` ยังอยู่ เพราะ RPC dispatch วิ่งบน mux นี้ (`/healthz` ยังใช้ในเครื่อง)
 
 ### 4.4 ฝั่งแอพ
@@ -93,8 +93,8 @@ Envelope บน text frame (JSON):
 - `HistoryApi` ทุก call → `rpc(rid, m, p, b)` แล้วรอตอบตาม `rid` (timeout เดิมต่อ call); upload = ส่ง body เป็น chunk (`ch:"rpc"` หลาย frame + `end`)
 - terminal: เปิด/ปิด/ย่อขยายผ่าน `ctl` + binary; รองรับหลายหน้าต่างบน socket เดียว
 - **ปิดแอพ/ปิดหน้าต่าง chat → ส่ง `{"ch":"ctl","act":"bye"}` ก่อน close** เพื่อให้ engine ยกเลิก turn เหมือนเดิม
-- `SettingsStore`: เลิกเก็บ/แปลง `daemon_url`/`ws_url` เป็น host ของ tunnel; เก็บ **relay URL + room + token เป็นค่าตั้งค่า (runtime config)** — ไม่ hardcode URL ลง APK (ยึดหลักเดิมของแอพ `SettingsStore.kt:13-24`); migration อ่านค่าเดิมมาเป็น default ของช่องใหม่
-- `DaemonDiscovery`: หยุด adopt URL; จุด "online" + uptime/version มาจาก `presence` ของ DO (และ socket state) แทน `NodeInfo` จาก D1
+- `SettingsStore`: **เหลือการตั้งค่าแค่ CF token เหมือนเดิม ไม่เพิ่มช่อง URL/room**; `daemon_url` ยังถูกเก็บจาก discovery แต่ค่าคือ **relay URL (นิ่ง)** แทน trycloudflare; `wsUrlFor()` ไม่ต้องประกอบ `/ws` อีก (relay base ใช้ตรง ๆ) — เดินตามค่า discovered
+- `DaemonDiscovery`: ยัง poll D1 + adopt URL เหมือนเดิม (URL นิ่งแล้วจึง adopt ครั้งเดียว); online/uptime/version จาก D1 เหมือนเดิม
 - backoff/ping ของ `AiDirectSocket` (1s → 30s + jitter, `pingInterval` 20 วิ) ใช้ต่อ
 
 ### 4.5 ทำไมพอ (หลักฐานจากเอกสาร Cloudflare, ต.ค. 2026)
@@ -107,12 +107,13 @@ Envelope บน text frame (JSON):
 
 | สิ่ง | ค่า |
 |---|---|
-| Worker URL | `wss://<worker>.<account>.workers.dev/room/<room>` |
-| room | ค่าคงที่ต่อผู้ใช้ (เช่น `main`; ตั้งในแอพ + engine ผ่าน env `AIXODIA_ROOM`) |
-| token | `CF_TOKEN` เดิม (bearer) — ทั้ง engine และแอพใช้ตัวเดียวกัน |
-| deploy | `wrangler deploy` (ต้องมี Workers:Edit) + `wrangler secret put RELAY_TOKEN` |
+| Worker URL | `wss://<worker>.<account>.workers.dev/room/<room>` (นิ่ง) |
+| ที่มาของ URL | engine เผยแพร่ลง D1 `daemon/url` (เหมือน tunnel วันนี้) → แอพ discovery เดิม |
+| token | CF token เดียวกับวันนี้ (bearer) — **การตั้งค่าแอพเหลือช่องเดียวเหมือนเดิม** |
+| deploy token | สร้างใหม่จากตัวที่ให้มา: กลุ่ม `Workers Scripts:Write` (`e086da7e2179491d91ee5f35b3ca210a`) + `Workers Scripts:Read` — ใช้ตอน deploy เท่านั้น ไม่ ship ไปแอพ |
+| deploy | `wrangler deploy` + ตั้ง workers.dev subdomain (ผ่าน token ใหม่) |
+| DO secret | `RELAY_TOKEN` = bearer token (ตัวเดียวกับที่แอพ/engine ส่ง) |
 | engine env | `AIXODIA_RELAY_URL`, `AIXODIA_ROOM` (ถ้าไม่ตั้ง = โหมดไม่ต่อ relay) |
-| app config | relay URL + room + token เป็นค่าตั้งค่า (runtime) ไม่ hardcode |
 
 ## 6. การทดสอบ
 
@@ -130,8 +131,8 @@ Envelope บน text frame (JSON):
 1. `relay/` (Worker+DO+hibernation+auth+handover+presence) + เทสต์ด้วย `wrangler dev` (ไม่ต้องมีโดเมน/ไม่ต้องมี Kaggle)
 2. engine: `wsock` client + package relay + transport interface ของ `mobile`/`terminal` + router + RPC dispatch + เทสต์ — **ยังคง cloudflared + publish `daemon/url` เหมือนเดิม** (relay เป็นทางเสริม เปิดด้วย env)
 3. release rolling `engine-latest`; เปิด relay ควบคู่; session ใหม่รันได้ทั้งสองทาง
-4. แอพ: `RelaySocket` + ย้าย `HistoryApi`/terminal/`SettingsStore`/discovery; ปล่อย APK; ตั้งค่า relay URL ในแอพ, verify
-5. verify ปลายทางแล้วจึง **ลบ cloudflared path + `tunnel.go`** และเลิกใช้ `daemon/url`; เก็บ `daemon/heartbeat|version` ไว้เป็น fallback สถานะ (ถ้าผู้ใช้ต้องการ — ดู §8)
+4. แอพ: `RelaySocket` + ย้าย `HistoryApi`/terminal/`SettingsStore`/discovery; ปล่อย APK; **ไม่ต้องตั้งค่าในแอพเพิ่ม** (discovery เดิมอ่าน relay URL จาก D1), verify
+5. verify ปลายทางแล้วจึง **ลบ cloudflared path + `tunnel.go`**; เก็บ D1 `daemon/url|version|heartbeat` ไว้ (url = relay URL นิ่ง)
 
 ## 8. Calls ของผม (ให้ตรวจ)
 
@@ -139,18 +140,20 @@ Envelope บน text frame (JSON):
 - **DO ไม่ parse เนื้อ frame** ยกเว้น `sid`/`ctl` ที่ DO ใส่เอง — ฉลาดน้อยสุด ปลอดภัยสุด
 - **รองรับหลาย phone พร้อมกัน** เหมือน `Hub` วันนี้ → DO ให้ `sid` ต่อ socket และ engine มอง 1 `sid` = 1 peer (ถ้าผู้ใช้ใช้เครื่องเดียวจริง บอกได้ จะลดเป็น single-peer ให้ง่ายลง)
 - **engine ที่ถูก supersede จบโปรเซส** (เท่าพฤติกรรมเดิม) และ DO เก็บกวาดช่อง engine เมื่อ socket ตาย → กัน race ด้วยการตัดสินที่ DO จุดเดียว; engine ที่ reconnect/`started` เท่ากันถือว่าเป็นตัวเดียวกัน
-- **ย้าย handover + presence + uptime/version ไป DO** → ทิ้ง `daemon/url`; เสนอเก็บ `daemon/heartbeat|version` ไว้เป็น fallback สถานะ (ผู้ใช้ตัดสินว่าจะเก็บไหม)
+- **handover ตัดสินที่ DO** แต่ **D1 `daemon/url|version|heartbeat` ยังเขียนเหมือนเดิม** (url = relay URL นิ่ง) → แอพ discovery/สถานะไม่ต้องแก้; DO เป็นผู้ตัดสินว่า engine ตัวไหนได้ช่อง relay
 - **RPC one-shot ไม่มี streaming** — ครอบทุก REST call ที่แอพใช้ (`/v1/sessions*`, `/api/*`, `/restart`, uploads); SSE ของ `/v1/chat/completions` ไม่ใช้จากแอพ
 - **อัปโหลดเป็น chunk/binary** (สูงสุด 128 MiB) ไม่ใช่ base64 frame เดียว
 - **`bye` frame** เพื่อคง "ปิดแอพ = ยกเลิก turn" (engine ไม่เห็น close ของ phone อีก)
 - **REST ผ่าน RPC ที่ dispatch เข้า mux เดิม** — ไม่แตะ handler; `/ws`,`/terminal` ไม่รับผ่าน RPC
 - **Worker/DO อยู่ในรีโป engine ที่ `relay/`** (ไม่ตั้งรีโปใหม่)
 - **ไม่เพิ่ม Go dependency** — เขียน WS client เองใน `wsock`
-- **relay URL/room เป็นค่าตั้งค่า runtime ทั้งสองฝั่ง** — ไม่ hardcode ลง APK/engine
+- **การตั้งค่าแอพ = CF token อย่างเดียวเหมือนเดิม** (ไม่เพิ่มช่อง URL/room); relay URL มาจาก D1 `daemon/url` ผ่าน discovery เดิม; room เป็นค่าคงที่ฝั่ง deploy/engine (`AIXODIA_ROOM`)
+- **ผมแก้ทั้งสองฝั่ง** (engine + `aixodia-app`) และดีพลอย Worker เอง (token ที่ให้มาสร้าง deploy token ได้)
 
 ## 9. ความเสี่ยง / ค้าง
 
-- **ต้องมีสิทธิ์ Workers + workers.dev subdomain** — token ปัจจุบัน (`cfut_...`) อ่าน scripts ได้ แต่ `GET workers/subdomain` ตอบ Authentication error และบัญชี**ยังไม่มี** Worker → ต้องให้ผู้ใช้สร้าง token ที่มี `Workers Scripts:Edit` หรือ `wrangler login` (§5)
+- **สิทธิ์ Workers ยังไม่พร้อม** — บัญชียังไม่มี Worker/workers.dev subdomain; ตัวแก้: token ใหม่ที่ผู้ใช้ให้มา (`API Tokens Write`) → สร้าง deploy token กลุ่ม `Workers Scripts:Write` แล้วตั้ง subdomain + deploy (§5)
+- **blast radius ของ token**: ถ้าใช้ token ที่มี `Workers Scripts:Write` เป็น **bearer** ที่แอพถือด้วย ใครได้ token = deploy Worker ได้; เสนอแยก **deploy token** (เก็บไว้ deploy เท่านั้น) ออกจาก **bearer/DO secret** (ตัวที่แอพส่ง) — ถ้าผู้ใช้ต้องการ token เดียวจริง บอกได้
 - **DO frame/message size + hibernation**: ต้องยืนยันว่าขนาด frame terminal (32 KiB/chunk) ผ่าน และ relay ตอน terminal เปิดค้างไม่ทำให้ duration เกิน 13,000 GB-s/วัน
 - **reconnect + state**: terminal ไม่มี reconnect วันนี้ (ตั้งใจ); หลังย้าย transport ต้องคงพฤติกรรมเดิม (قطعแล้ว shell ตาย)
 - **แอพ rewrite ใหญ่**: `HistoryApi` ~25 call → RPC + upload chunking = ความเสี่ยงบั๊กสูงสุดของงานนี้
