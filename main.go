@@ -176,6 +176,7 @@ func main() {
 		err := relay.Run(ctx, relay.Config{
 			URL:          roomURL,
 			Token:        relayToken,
+			APIToken:     token,
 			Started:      startedAt,
 			Version:      versionString(),
 			Hub:          hub,

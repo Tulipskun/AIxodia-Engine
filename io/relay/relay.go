@@ -34,10 +34,15 @@ var ErrSuperseded = errors.New("relay: superseded by a newer engine")
 
 // Config is what the relay needs from main.
 type Config struct {
-	URL     string // wss://host/room/<name>
-	Token   string
-	Started int64
-	Version string
+	URL string // wss://host/room/<name>
+	// Token is the relay's shared secret, checked by the Worker.
+	Token string
+	// APIToken is what the engine's own mux checks on the in-process request.
+	// They are the same secret by default, but they need not be: the relay
+	// token can be rotated without touching the phone's API token.
+	APIToken string
+	Started  int64
+	Version  string
 
 	Hub  *mobile.Hub
 	Chat mobile.ChatFunc
@@ -459,7 +464,11 @@ func (s *session) rpc(e envelope) {
 	}
 	// The relay already checked the bearer at the phone's handshake; the mux
 	// checks it again, so the token travels with the in-process request.
-	req.Header.Set("Authorization", "Bearer "+s.cfg.Token)
+	apiToken := s.cfg.APIToken
+	if apiToken == "" {
+		apiToken = s.cfg.Token
+	}
+	req.Header.Set("Authorization", "Bearer "+apiToken)
 
 	func() {
 		defer func() {
