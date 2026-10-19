@@ -361,7 +361,14 @@ func TestEngineReconnectsWhenTheRelayDrops(t *testing.T) {
 	if second.hello["role"] != "engine" {
 		t.Fatalf("second hello = %+v", second.hello)
 	}
-	if atomic.LoadInt32(&connects) < 2 {
-		t.Fatalf("connects = %d", connects)
+	// OnConnect runs after the hello is on the wire, so the second connection
+	// can be observed here before the callback has fired. Wait for it instead
+	// of reading the counter the moment the socket appears.
+	deadline := time.Now().Add(3 * time.Second)
+	for atomic.LoadInt32(&connects) < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := atomic.LoadInt32(&connects); n < 2 {
+		t.Fatalf("connects = %d", n)
 	}
 }
