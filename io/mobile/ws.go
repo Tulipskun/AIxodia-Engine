@@ -55,6 +55,15 @@ type ToolEvent struct {
 	// where that round or step stands (waiting/thinking/running/done/error).
 	Round int
 	State string
+	// Usage rides the stage="usage" event: the turn's running token total after
+	// a provider round, so the phone can show the cost climbing while the turn
+	// still runs. They are zero on every other stage.
+	PromptTokens       int
+	CompletionTokens   int
+	CacheReadTokens    int
+	CacheWriteTokens   int
+	ReasoningTokens    int
+	InputIncludesCache bool
 }
 
 type inFrame struct {
@@ -382,6 +391,15 @@ func (p *peer) answer(ctx context.Context, cancel context.CancelFunc, key string
 		case "tool_result":
 			frame.ToolResult = &toolResultJSON{ID: ev.CallID, Name: ev.Name, Text: ev.Text, IsError: ev.IsError}
 			frame.ToolCall = &toolCallJSON{ID: ev.CallID, Name: ev.Name}
+		case "usage":
+			// The turn's running cost, re-stated after each provider round.
+			// No text and no block: this frame moves the strip, not the thread.
+			frame.InputTokens = ev.PromptTokens
+			frame.OutputTokens = ev.CompletionTokens
+			frame.CacheReadTokens = ev.CacheReadTokens
+			frame.CacheWriteTokens = ev.CacheWriteTokens
+			frame.ReasoningTokens = ev.ReasoningTokens
+			frame.InputIncludesCache = ev.InputIncludesCache
 		default:
 			frame.Text = ev.Text
 		}

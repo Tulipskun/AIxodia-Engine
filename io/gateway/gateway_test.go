@@ -395,6 +395,57 @@ func TestStreamPushesCacheUsageAndActualReasoning(t *testing.T) {
 	}
 }
 
+// TestStreamReportsRunningUsageEachRound pins the frame the phone's cost strip
+// climbs on: a stage="usage" event after every provider round, carrying the
+// turn's running total (not the round's own), so a missed frame self-corrects.
+func TestStreamReportsRunningUsageEachRound(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if strings.Contains(string(body), `"tool_call_id"`) {
+			fmt.Fprint(w, "data: "+`{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":120,"completion_tokens":6,"total_tokens":126,"prompt_tokens_details":{"cached_tokens":100},"completion_tokens_details":{"reasoning_tokens":1}}}`+"\n\n")
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		fmt.Fprint(w, "data: "+`{"choices":[{"delta":{"tool_calls":[{"id":"call_1","type":"function","index":0,"function":{"name":"current_time","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_tokens_details":{"cached_tokens":80},"completion_tokens_details":{"reasoning_tokens":2}}}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+	config.Providers = []config.Provider{{ID: "9", Name: "mock", APIURL: upstream.URL, Keys: []string{"test-key"}, Adapter: "openai"}}
+	store := newMemStore()
+	g := New(store, registry.New(), tools.Builtin())
+	postJSON(t, g.Handler(), "/v1/sessions", `{"title":"t","model":"mock/test-model"}`)
+	rec := postJSON(t, g.Handler(), "/v1/chat/completions",
+		`{"session_id":"s1","model":"mock/test-model","messages":[{"role":"user","content":"กี่โมง"}],"stream":true}`)
+	body := rec.Body.String()
+
+	var usages []map[string]any
+	for _, event := range strings.Split(body, "\n\n") {
+		var frame struct {
+			ToolEvent map[string]any `json:"tool_event"`
+		}
+		if json.Unmarshal([]byte(strings.TrimPrefix(event, "data: ")), &frame) != nil || frame.ToolEvent == nil {
+			continue
+		}
+		if frame.ToolEvent["stage"] == "usage" {
+			usages = append(usages, frame.ToolEvent)
+		}
+	}
+	if len(usages) != 2 {
+		t.Fatalf("usage frames = %d, want 2 (one per round):\n%s", len(usages), body)
+	}
+	last := usages[len(usages)-1]
+	if last["prompt_tokens"].(float64) != 220 || last["completion_tokens"].(float64) != 11 || last["cache_read_tokens"].(float64) != 180 {
+		t.Fatalf("running total = %+v, want 220/11/180 (both rounds summed)", last)
+	}
+	if last["input_includes_cache"] != true {
+		t.Fatalf("input_includes_cache not carried: %+v", last)
+	}
+	if _, ok := last["block"]; ok {
+		t.Fatalf("usage frame must carry no thread block: %+v", last)
+	}
+}
+
 func TestRetryStreamIncludesAlreadyRecordedUserWithoutReadingHistoryTwice(t *testing.T) {
 	store := newMemStore()
 	g, _ := newTestGateway(t, store)

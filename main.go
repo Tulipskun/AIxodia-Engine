@@ -341,6 +341,15 @@ func parseToolEvent(data []byte) (mobile.ToolEvent, bool) {
 			DurationMs int64  `json:"duration_ms"`
 			Round      int    `json:"round"`
 			State      string `json:"state"`
+			// Usage rides the stage="usage" event: the turn's running total
+			// after a provider round, so the phone's cost strip climbs with
+			// the rounds instead of jumping once when the turn lands.
+			PromptTokens       int  `json:"prompt_tokens"`
+			CompletionTokens   int  `json:"completion_tokens"`
+			CacheReadTokens    int  `json:"cache_read_tokens"`
+			CacheWriteTokens   int  `json:"cache_write_tokens"`
+			ReasoningTokens    int  `json:"reasoning_tokens"`
+			InputIncludesCache bool `json:"input_includes_cache"`
 		} `json:"tool_event"`
 	}
 	if err := json.Unmarshal(data, &wrapped); err != nil || wrapped.ToolEvent == nil {
@@ -352,6 +361,9 @@ func parseToolEvent(data []byte) (mobile.ToolEvent, bool) {
 		Arguments: te.Arguments, Text: te.Text,
 		IsError: te.IsError, DurationMs: te.DurationMs,
 		Round: te.Round, State: te.State,
+		PromptTokens: te.PromptTokens, CompletionTokens: te.CompletionTokens,
+		CacheReadTokens: te.CacheReadTokens, CacheWriteTokens: te.CacheWriteTokens,
+		ReasoningTokens: te.ReasoningTokens, InputIncludesCache: te.InputIncludesCache,
 	}, true
 }
 

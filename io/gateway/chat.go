@@ -69,6 +69,13 @@ type completionOptions struct {
 	// send timing, which is why every request wore a "Sending…" it never got;
 	// the loop that actually spends the rounds owns them now.
 	onRequest func(round int, state string)
+	// onUsage reports the turn's running token total after every provider round.
+	// A turn that runs tools makes several calls, and the phone shows the
+	// session's cost only when the whole turn lands; this is what lets it climb
+	// with each round instead of jumping once at the end. The figures are the
+	// sum so far, not the round's own, so a watcher that misses one frame still
+	// shows the right total on the next.
+	onUsage func(usage provider.Usage)
 	// onTrail is handed the whole trail so far after every tool round, and trail
 	// is where those steps get stored. Both are nil when nothing is persisted.
 	onTrail     func(trail []provider.Message)
@@ -387,6 +394,21 @@ func (g *Gateway) chatStream(w http.ResponseWriter, r *http.Request, stored *ses
 			"block": session.RequestBlock(round, state),
 		}})
 	}
+	// The running turn total, one frame per provider round. It carries no block:
+	// there is nothing to draw in the thread for a number the strip already
+	// owns, so the phone reads it by stage and leaves the thread alone.
+	options.onUsage = func(usage provider.Usage) {
+		_ = writeSSE(w, flusher, map[string]any{"tool_event": map[string]any{
+			"stage": "usage", "round": openRound,
+			"prompt_tokens":        usage.PromptTokens,
+			"completion_tokens":    usage.CompletionTokens,
+			"total_tokens":         usage.TotalTokens,
+			"cache_read_tokens":    usage.CacheReadTokens,
+			"cache_write_tokens":   usage.CacheWriteTokens,
+			"reasoning_tokens":     usage.ReasoningTokens,
+			"input_includes_cache": usage.InputIncludesCache,
+		}})
+	}
 	options.onToolCall = func(call provider.ToolCall) {
 		_ = writeSSE(w, flusher, map[string]any{"tool_event": map[string]any{
 			"stage": "tool_call", "name": call.Name, "call_id": call.ID, "arguments": call.Arguments,
@@ -631,6 +653,9 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 		final.Content = resp.Content
 		final.ReasoningContent = truncate(resp.ReasoningContent, 32*1024)
 		addUsage(&final.Usage, resp.Usage)
+		if options.onUsage != nil {
+			options.onUsage(final.Usage)
+		}
 		final.FinishReason = resp.FinishReason
 
 		pending = len(resp.ToolCalls) > 0
@@ -729,6 +754,9 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 		final.Content = resp.Content
 		final.ReasoningContent = truncate(resp.ReasoningContent, 32*1024)
 		addUsage(&final.Usage, resp.Usage)
+		if options.onUsage != nil {
+			options.onUsage(final.Usage)
+		}
 		final.FinishReason = resp.FinishReason
 		if options.onRequest != nil {
 			options.onRequest(extraRound, session.StateDone)
