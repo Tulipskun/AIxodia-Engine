@@ -78,6 +78,7 @@ test("the second phone closes the first, and the engine survives", async () => {
 
   assert.match(await p1.waitFor(/superseded-phone/, 8000), /superseded-phone/);
   await timed(p1.closed, 8000, "the first phone must be closed");
+  await p2.waitFor(/"ctl":"presence"/, 8000);
 
   await eng.send("still-here");
   assert.equal(await p2.waitFor("still-here"), "still-here");
@@ -116,6 +117,7 @@ test("relays a 32 KiB binary frame in both directions", async () => {
   await eng.engine(1);
   const ph = await dial("t5sz");
   await ph.phone();
+  await ph.waitFor(/"ctl":"presence"/, 8000);
 
   const up = Buffer.alloc(32 * 1024, 7);
   await eng.send(up);
@@ -138,6 +140,7 @@ test("survives a long idle gap (hibernation) and still routes", async () => {  c
   await eng.engine(1);
   const ph = await dial("t5hiber");
   await ph.phone();
+  await ph.waitFor(/"ctl":"presence"/, 8000);
 
   await ph.send("before-idle");
   assert.equal(await eng.waitFor("before-idle"), "before-idle");
