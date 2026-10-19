@@ -201,11 +201,15 @@ func (s *session) ping(ctx context.Context) {
 }
 
 type envelope struct {
-	Ch   string            `json:"ch"`
-	Ctl  string            `json:"ctl"`
-	RID  string            `json:"rid"`
-	M    string            `json:"m"`
-	P    string            `json:"p"`
+	Ch  string `json:"ch"`
+	Ctl string `json:"ctl"`
+	RID string `json:"rid"`
+	M   string `json:"m"`
+	// P is raw JSON because the two channels use it differently: an rpc
+	// carries a path as a string, a terminal frame carries a control object
+	// ({"type":"resize",...}). A string field cannot hold the second one, and
+	// a frame that does not parse is dropped on the floor.
+	P    json.RawMessage   `json:"p"`
 	B    string            `json:"b"`
 	More bool              `json:"more"`
 	H    map[string]string `json:"h"`
@@ -215,6 +219,21 @@ type envelope struct {
 	Cols int               `json:"cols"`
 	Rows int               `json:"rows"`
 	K    string            `json:"k"`
+}
+
+// pString returns the payload as a string when it was sent as one, and as its
+// raw JSON otherwise.
+func (e envelope) pString() string {
+	if len(e.P) == 0 {
+		return ""
+	}
+	if e.P[0] == '"' {
+		var out string
+		if err := json.Unmarshal(e.P, &out); err == nil {
+			return out
+		}
+	}
+	return string(e.P)
 }
 
 func (s *session) text(payload []byte) error {
@@ -309,7 +328,7 @@ func (s *session) term(e envelope) {
 	}
 	switch e.K {
 	case "b64":
-		raw, err := base64.StdEncoding.DecodeString(e.P)
+		raw, err := base64.StdEncoding.DecodeString(e.pString())
 		if err != nil {
 			return
 		}
@@ -447,7 +466,7 @@ func (s *session) rpc(e envelope) {
 	if method == "" {
 		method = http.MethodGet
 	}
-	path := e.P
+	path := e.pString()
 	if path == "" {
 		path = "/"
 	}

@@ -327,6 +327,55 @@ func TestEngineCarriesTerminalStreams(t *testing.T) {
 	}
 }
 
+func TestEngineResizesTheTerminalOverTheRelay(t *testing.T) {
+	fr := newFakeRelay(t, "tok")
+	term := terminal.NewServer("tok")
+	term.Shell = "/bin/sh"
+	term.PingEvery = time.Minute
+	start(t, Config{
+		URL: fr.url(), Token: "tok",
+		Hub:  mobile.NewHub(),
+		Term: term,
+		Logf: func(string, ...any) {},
+	})
+	wc := fr.accept(t)
+
+	wc.sendText(t, map[string]any{"ch": "ctl", "act": "open", "id": "t1", "sid": 9, "cols": 80, "rows": 24})
+	wc.waitJSON(t, "terminal ready", func(m map[string]any) bool {
+		return m["ch"] == "term" && m["sid"] == float64(9)
+	})
+
+	// The phone sends the resize as a control object, not as a string: the
+	// frame must survive the trip, or the shell keeps the old size and the
+	// screen garbles at the new one.
+	wc.sendText(t, map[string]any{
+		"ch": "term", "sid": 9, "k": "json",
+		"p": map[string]any{"type": "resize", "cols": 100, "rows": 30},
+	})
+	time.Sleep(300 * time.Millisecond)
+
+	wc.sendBinary(t, append([]byte{ChTerm, 0, 9}, []byte("stty size\r")...))
+
+	var out strings.Builder
+	deadline := time.After(10 * time.Second)
+	for !strings.Contains(out.String(), "30 100") {
+		select {
+		case f, ok := <-wc.frames:
+			if !ok {
+				t.Fatalf("socket closed; terminal output so far %q", out.String())
+			}
+			if f.op != wsock.OpBinary || len(f.payload) < 3 || f.payload[0] != ChTerm {
+				continue
+			}
+			if binary.BigEndian.Uint16(f.payload[1:3]) == 9 {
+				out.Write(f.payload[3:])
+			}
+		case <-deadline:
+			t.Fatalf("terminal never reported the new size; output %q", out.String())
+		}
+	}
+}
+
 func TestEngineExitsWhenSuperseded(t *testing.T) {
 	fr := newFakeRelay(t, "tok")
 	ctx, cancel := context.WithCancel(context.Background())
