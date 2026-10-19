@@ -76,6 +76,10 @@ type completionOptions struct {
 	onStored    func([]session.Turn, error)
 	onReasoning func(string) error
 	reusedUser  *session.Turn
+	// window is what the request is measured against. The provider's own count
+	// anchors it when the stored history still carries one, so only the messages
+	// added since that measurement have to be estimated.
+	window session.Window
 }
 
 // trailWriter stores tool steps as each round finishes instead of once the
@@ -223,6 +227,7 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 
 	history, delta := incoming, incoming
 	var savedTurns []session.Turn
+	var saved []provider.Message
 	if stored != nil {
 		var err error
 		savedTurns, err = g.sessions.Turns(stored.ID)
@@ -230,7 +235,7 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, "database_error", err.Error())
 			return
 		}
-		saved := session.MessagesFromTurns(savedTurns)
+		saved = session.MessagesFromTurns(savedTurns)
 		if body.Append {
 			history, delta = appendDelta(saved, incoming)
 		} else {
@@ -258,6 +263,7 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 		stream:      body.Stream,
 		user:        body.User,
 		sessionID:   sessionIDOf(stored),
+		window:      historyWindow(savedTurns, saved, history),
 	}
 	if len(delta) == 0 && len(incoming) == 1 && incoming[0].Role == "user" {
 		for i := len(savedTurns) - 1; i >= 0; i-- {
@@ -542,6 +548,11 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 	current := primary
 	usedFallback := false
 
+	window := options.window
+	if window.Max <= 0 {
+		window.Max = session.DefaultMaxTokens
+	}
+
 	emitted := 0
 	emit := options.emit
 	if emit != nil {
@@ -563,9 +574,11 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 		if options.onRequest != nil {
 			options.onRequest(round+1, session.StateWaiting)
 		}
+		messages := session.Trim(conversation, window)
+		whole := len(messages) == len(conversation)
 		request := &provider.Request{
 			Model:       current.model,
-			Messages:    session.Trim(conversation, session.DefaultMaxTokens),
+			Messages:    messages,
 			MaxTokens:   options.maxTokens,
 			Temperature: options.temperature,
 			TopP:        options.topP,
@@ -595,6 +608,17 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 		round++
 		if served == "" {
 			served = current.prov.Name
+		}
+		// The provider counted exactly the prompt it received. When that prompt
+		// was the whole conversation, the count describes the head of the
+		// conversation and anchors the next round; when it was a trimmed window,
+		// it describes messages that are no longer a prefix, so it is dropped
+		// rather than asked to size something it never saw.
+		switch {
+		case !whole:
+			window = session.Window{Max: window.Max}
+		case resp.Usage.PromptTokens > 0:
+			window = session.Window{Max: window.Max, Usage: resp.Usage.PromptTokens, Messages: len(messages)}
 		}
 
 		final.ID = resp.ID
@@ -684,7 +708,7 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 		}
 		request := &provider.Request{
 			Model:       current.model,
-			Messages:    session.Trim(conversation, session.DefaultMaxTokens),
+			Messages:    session.Trim(conversation, window),
 			MaxTokens:   options.maxTokens,
 			Temperature: options.temperature,
 			TopP:        options.topP,
@@ -993,6 +1017,25 @@ func (g *Gateway) persist(stored *session.Session, delta []provider.Message, res
 		}
 	}
 	return answer
+}
+
+// historyWindow seeds the size of a request from the provider's last
+// measurement of this history. The count is used only while the messages it
+// covered are still the head of what will be sent: a client that rewrote its
+// history has no claim on a count taken for the history it replaced.
+func historyWindow(turns []session.Turn, saved, history []provider.Message) session.Window {
+	window := session.Window{Max: session.DefaultMaxTokens}
+	messages, tokens := session.Anchor(turns)
+	if tokens <= 0 || messages <= 0 || messages > len(saved) || messages > len(history) {
+		return window
+	}
+	for i := 0; i < messages; i++ {
+		if saved[i].Role != history[i].Role || saved[i].Content != history[i].Content {
+			return window
+		}
+	}
+	window.Usage, window.Messages = tokens, messages
+	return window
 }
 
 // mergeHistory matches the client's messages against the stored conversation.

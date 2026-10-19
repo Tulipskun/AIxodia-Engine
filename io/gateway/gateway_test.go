@@ -616,6 +616,36 @@ func TestMergeHistoryKeepsToolStepsBetweenVisibleMessages(t *testing.T) {
 	}
 }
 
+func TestHistoryWindowAnchorsOnTheStoredPrompt(t *testing.T) {
+	turns := []session.Turn{
+		{Role: "user", Text: "q1"},
+		{Role: "assistant", Text: "a1", InputTokens: 40},
+	}
+	saved := session.MessagesFromTurns(turns)
+	history := append(append([]provider.Message(nil), saved...),
+		provider.Message{Role: "user", Content: "q2"})
+
+	window := historyWindow(turns, saved, history)
+	if window.Usage != 40 || window.Messages != 1 {
+		t.Fatalf("window = %+v, want the stored prompt 40 over 1 message", window)
+	}
+	if window.Max != session.DefaultMaxTokens {
+		t.Fatalf("max = %d, want the default %d", window.Max, session.DefaultMaxTokens)
+	}
+
+	// A client that rewrote the history the count was taken for cannot anchor
+	// on it.
+	rewritten := []provider.Message{{Role: "user", Content: "something else"}}
+	if got := historyWindow(turns, saved, rewritten); got.Messages != 0 || got.Usage != 0 {
+		t.Fatalf("rewritten window = %+v, want no anchor", got)
+	}
+
+	// A count that reaches past what is being sent describes something else.
+	if got := historyWindow(turns, saved, saved[:0]); got.Messages != 0 || got.Usage != 0 {
+		t.Fatalf("short window = %+v, want no anchor", got)
+	}
+}
+
 func TestCircuitBreakerPausesThenRecovers(t *testing.T) {
 	gateway := New(newMemStore(), registry.New(), tools.Builtin())
 	now := time.Now()
