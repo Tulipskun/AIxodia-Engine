@@ -39,6 +39,9 @@ type Server struct {
 	sess      map[string]*session
 	Limit     int
 	PingEvery time.Duration
+	// IdleAfter overrides how long an unattached shell is kept before the
+	// reaper ends it. Zero means idleReapAfter.
+	IdleAfter time.Duration
 	Shell     string
 }
 
@@ -80,6 +83,12 @@ func (s *Server) pingEvery() time.Duration {
 	}
 	return defaultPingEvery
 }
+func (s *Server) idleAfter() time.Duration {
+	if s.IdleAfter > 0 {
+		return s.IdleAfter
+	}
+	return idleReapAfter
+}
 func (s *Server) shell() string {
 	if s.Shell != "" {
 		return s.Shell
@@ -90,26 +99,33 @@ func (s *Server) shell() string {
 	return "/bin/sh"
 }
 
-func (s *Server) acquireSession(id string, cols, rows uint16, dir, sh string) (*session, error) {
+// acquireSession reuses a live session id or starts a shell for it. The bool is
+// whether the program should be nudged to repaint: true on a reattach at the
+// size it already had, where the kernel sends no SIGWINCH and a full-screen
+// program would otherwise leave the client with a partial frame from the ring.
+func (s *Server) acquireSession(id string, cols, rows uint16, dir, sh string) (*session, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if sess, ok := s.sess[id]; ok && !sess.dead {
 		sess.lastAct = time.Now()
+		kick := false
 		// A returning client may be a different size than the shell was left
 		// at (rotation, keyboard, another phone). Apply it before the replay:
 		// the pty sends SIGWINCH, a full-screen program repaints, and the bytes
 		// that follow are laid out for the window about to draw them. A zero
 		// dimension means the client does not know its size yet, so the shell
 		// is left as it was rather than shrunk to the placeholder.
+		sess.mu.Lock()
 		if cols > 0 && rows > 0 && (cols != sess.cols || rows != sess.rows) {
-			sess.mu.Lock()
 			sess.cols, sess.rows = cols, rows
 			if !sess.dead {
 				_ = sess.pty.Resize(cols, rows)
 			}
-			sess.mu.Unlock()
+		} else if !sess.dead && sess.modes.altScreen() {
+			kick = true
 		}
-		return sess, nil
+		sess.mu.Unlock()
+		return sess, kick, nil
 	}
 	if cols == 0 {
 		cols = 80
@@ -118,19 +134,19 @@ func (s *Server) acquireSession(id string, cols, rows uint16, dir, sh string) (*
 		rows = 24
 	}
 	if len(s.sess) >= s.limit() {
-		// reap dead ones
-		for k, v := range s.sess {
-			if v.dead {
-				delete(s.sess, k)
-			}
+		s.reapLocked(false)
+		if len(s.sess) >= s.limit() {
+			// Still full: no client has been attached to the oldest shells for
+			// the idle window, so they are abandoned rather than reattachable.
+			s.reapLocked(true)
 		}
 		if len(s.sess) >= s.limit() {
-			return nil, errors.New("too many terminals")
+			return nil, false, errors.New("too many terminals")
 		}
 	}
 	p, err := StartPTY(sh, []string{"-l"}, cols, rows, dir)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	sess := &session{
 		id: id, pty: p, subs: map[*subscriber]struct{}{},
@@ -141,7 +157,40 @@ func (s *Server) acquireSession(id string, cols, rows uint16, dir, sh string) (*
 	s.sess[id] = sess
 	go sess.readLoop()
 	go sess.pingLoop(s.pingEvery())
-	return sess, nil
+	return sess, false, nil
+}
+
+// reapLocked drops finished sessions, and — when makeRoom is set — sessions no
+// client has attached to for idleReapAfter. Without the second case a session
+// the phone stopped tracking (a closed tab whose close never arrived, an app
+// that was cleared) keeps its shell and its slot for the life of the engine.
+// The caller holds s.mu; the session lock is taken underneath, never above.
+func (s *Server) reapLocked(makeRoom bool) {
+	now := time.Now()
+	for id, sess := range s.sess {
+		sess.mu.Lock()
+		reap := sess.dead ||
+			(makeRoom && len(sess.subs) == 0 && now.Sub(sess.lastAct) > s.idleAfter())
+		sess.mu.Unlock()
+		if !reap {
+			continue
+		}
+		delete(s.sess, id)
+		// A dead session's master is still open until this closes it; the shell
+		// itself is already gone.
+		_ = sess.pty.Close()
+	}
+}
+
+// drop ends a session for good: it leaves the map and its shell is hung up.
+// Used when the phone says the session is closed, not merely that the window is.
+func (s *Server) drop(id string, sess *session) {
+	s.mu.Lock()
+	if s.sess[id] == sess {
+		delete(s.sess, id)
+	}
+	s.mu.Unlock()
+	_ = sess.pty.Close()
 }
 
 func (s *Server) Handler() http.Handler {
@@ -155,24 +204,25 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		cols, rows := wantedSize(r)
+		id := strings.TrimSpace(r.URL.Query().Get("id"))
+		if id == "" {
+			id = newID()
+		}
 		// Slot check before the handshake so a full engine answers 503 as an HTTP
 		// status instead of upgrading first. Shell-start failures are handled
 		// after the upgrade (serve), where they can carry an error frame.
+		//
+		// Reattaching to a shell that is already running needs no slot. Counting
+		// it as one made the last working tab fail to reopen on a full engine,
+		// which is exactly when the phone retries.
 		s.mu.Lock()
-		for k, v := range s.sess {
-			if v.dead {
-				delete(s.sess, k)
-			}
-		}
-		full := len(s.sess) >= s.limit()
+		s.reapLocked(false)
+		_, existing := s.sess[id]
+		full := !existing && len(s.sess) >= s.limit()
 		s.mu.Unlock()
 		if full {
 			http.Error(w, "too many terminals", http.StatusServiceUnavailable)
 			return
-		}
-		id := strings.TrimSpace(r.URL.Query().Get("id"))
-		if id == "" {
-			id = newID()
 		}
 		dir := termDir()
 		sh := s.shell()
@@ -180,13 +230,13 @@ func (s *Server) Handler() http.Handler {
 		if err != nil {
 			return
 		}
-		sess, err := s.acquireSession(id, cols, rows, dir, sh)
+		sess, kick, err := s.acquireSession(id, cols, rows, dir, sh)
 		if err != nil {
 			_ = wsock.WriteFrame(conn, wsock.OpText, mustJSON(map[string]any{"type": "error", "error": err.Error()}))
 			conn.Close()
 			return
 		}
-		s.serve(conn, br, r, sess, id, cols, rows, dir, sh)
+		s.serve(conn, br, r, sess, id, cols, rows, dir, sh, kick)
 	})
 }
 
@@ -195,17 +245,6 @@ func (s *Server) Handler() http.Handler {
 // streams that arrive over its single socket; the handshake and bearer check
 // belong to the relay's socket, not here.
 func (s *Server) Attach(conn net.Conn, id string, cols, rows int) error {
-	s.mu.Lock()
-	for k, v := range s.sess {
-		if v.dead {
-			delete(s.sess, k)
-		}
-	}
-	full := len(s.sess) >= s.limit()
-	s.mu.Unlock()
-	if full {
-		return errors.New("too many terminals")
-	}
 	if id == "" {
 		id = newID()
 	}
@@ -221,7 +260,9 @@ func (s *Server) Attach(conn net.Conn, id string, cols, rows int) error {
 		r = uint16(clamp(rows))
 	}
 	dir, sh := termDir(), s.shell()
-	sess, err := s.acquireSession(id, c, r, dir, sh)
+	// acquireSession is where the slot is checked, and it exempts an id that is
+	// already alive: reattaching does not need a new one.
+	sess, kick, err := s.acquireSession(id, c, r, dir, sh)
 	if err != nil {
 		return err
 	}
@@ -230,20 +271,25 @@ func (s *Server) Attach(conn net.Conn, id string, cols, rows int) error {
 	sess.mu.Lock()
 	effC, effR := sess.cols, sess.rows
 	sess.mu.Unlock()
-	go s.serve(conn, bufio.NewReader(conn), nil, sess, id, effC, effR, dir, sh)
+	go s.serve(conn, bufio.NewReader(conn), nil, sess, id, effC, effR, dir, sh, kick)
 	return nil
 }
 
-func (s *Server) serve(conn net.Conn, br *bufio.Reader, r *http.Request, sess *session, id string, cols, rows uint16, dir, sh string) {
+func (s *Server) serve(conn net.Conn, br *bufio.Reader, r *http.Request, sess *session, id string, cols, rows uint16, dir, sh string, kick bool) {
 	// attach
 	sub := &subscriber{conn: conn}
+	// The replay and the registration have to be one ordered step. Registering
+	// first lets a chunk read off the pty land between the ring snapshot and
+	// the replay: the client draws it, then RIS and the older ring paint over
+	// it, and that chunk is gone until the program writes again. Holding the
+	// session lock across both keeps readLoop from taking its subscriber
+	// snapshot in that window, so anything newer than the ring is delivered
+	// after it.
 	sess.mu.Lock()
-	sess.subs[sub] = struct{}{}
+	ring := append([]byte(nil), sess.ring...)
 	// replay ring buffer, preceded by the modes the program set before the
 	// ring began (mouse reporting, alternate screen, cursor keys)
-	ring := append([]byte(nil), sess.ring...)
 	modes := sess.modes.replay()
-	sess.mu.Unlock()
 	// send ready
 	_ = wsock.WriteFrame(conn, wsock.OpText, mustJSON(map[string]any{
 		"type": "ready", "shell": sh, "cwd": dir, "cols": cols, "rows": rows, "id": id,
@@ -262,6 +308,14 @@ func (s *Server) serve(conn net.Conn, br *bufio.Reader, r *http.Request, sess *s
 	if len(replay) > 0 {
 		_ = wsock.WriteFrame(conn, wsock.OpBinary, replay)
 	}
+	sess.subs[sub] = struct{}{}
+	sess.mu.Unlock()
+	// A reattach at the size the shell already had leaves the kernel nothing to
+	// signal, so a full-screen program would keep only the slice of its last
+	// frame that fits in the ring. Ask it to redraw the whole screen.
+	if kick {
+		_ = sess.pty.Kick()
+	}
 	// read loop
 	for {
 		op, payload, err := wsock.ReadFrame(br)
@@ -276,13 +330,19 @@ func (s *Server) serve(conn net.Conn, br *bufio.Reader, r *http.Request, sess *s
 			}
 			sess.mu.Unlock()
 		case wsock.OpText:
-			// resize
 			var in struct {
 				Type string `json:"type"`
 				Cols *int   `json:"cols"`
 				Rows *int   `json:"rows"`
 			}
-			if json.Unmarshal(payload, &in) == nil && in.Type == "resize" && in.Cols != nil && in.Rows != nil {
+			if json.Unmarshal(payload, &in) != nil {
+				break
+			}
+			switch in.Type {
+			case "resize":
+				if in.Cols == nil || in.Rows == nil {
+					break
+				}
 				c, rr := uint16(clamp(*in.Cols)), uint16(clamp(*in.Rows))
 				sess.mu.Lock()
 				sess.cols, sess.rows = c, rr
@@ -290,6 +350,14 @@ func (s *Server) serve(conn net.Conn, br *bufio.Reader, r *http.Request, sess *s
 					_ = sess.pty.Resize(c, rr)
 				}
 				sess.mu.Unlock()
+			case "close":
+				// The phone closed the session, not just the window: end the
+				// shell and free its slot now rather than leaving it for the
+				// idle reaper.
+				sess.detach(sub)
+				s.drop(id, sess)
+				conn.Close()
+				return
 			}
 		case wsock.OpPing:
 			sub.mu.Lock()

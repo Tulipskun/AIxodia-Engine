@@ -71,3 +71,25 @@ func TestModeTrackerDoesNotReplayDefaults(t *testing.T) {
 		t.Fatalf("default modes replayed: %q", got)
 	}
 }
+
+// Only a program on the alternate screen needs the repaint nudge: a shell
+// prompt is fully described by its ring, and signalling it would draw the line
+// being edited a second time.
+func TestModeTrackerKnowsTheAlternateScreen(t *testing.T) {
+	tr := newModeTracker()
+	if tr.altScreen() {
+		t.Fatal("a fresh tracker is on the normal screen")
+	}
+	tr.scan([]byte("\x1b[?1049h"))
+	if !tr.altScreen() {
+		t.Fatal("1049h did not enter the alternate screen")
+	}
+	tr.scan([]byte("\x1b[?1049l"))
+	if tr.altScreen() {
+		t.Fatal("1049l did not leave the alternate screen")
+	}
+	tr.scan([]byte("\x1b[?47h"))
+	if !tr.altScreen() {
+		t.Fatal("47h did not enter the alternate screen")
+	}
+}

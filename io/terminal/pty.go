@@ -87,6 +87,25 @@ func (p *PTY) Resize(cols, rows uint16) error {
 	return unix.IoctlSetWinsize(int(p.master.Fd()), unix.TIOCSWINSZ, &unix.Winsize{Row: rows, Col: cols})
 }
 
+// Kick asks the foreground job to redraw at the current size.
+//
+// A client that reattaches at the size the shell already had changes nothing
+// the kernel can see, so TIOCSWINSZ above sends no SIGWINCH. The replay is only
+// the tail of the output, so a full-screen program's frame would arrive cut in
+// half at the top and stay that way. The signal goes to the terminal's
+// foreground process group — the program, not just the shell — which is the
+// group the kernel would have signalled.
+func (p *PTY) Kick() error {
+	pgrp, err := unix.IoctlGetInt(int(p.master.Fd()), unix.TIOCGPGRP)
+	if err != nil {
+		return err
+	}
+	if pgrp <= 0 {
+		return nil
+	}
+	return syscall.Kill(-pgrp, syscall.SIGWINCH)
+}
+
 // Wait reaps the shell and returns its exit code, or -1 when a signal killed
 // it. It is safe to call before or after Close, and more than once.
 func (p *PTY) Wait() int {

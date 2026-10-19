@@ -130,6 +130,13 @@ func (t *modeTracker) finishCSI(final byte) {
 	}
 }
 
+// altScreen reports whether the program is drawing on the alternate screen.
+// That is the case that needs a repaint on reattach: a shell prompt only needs
+// the ring, and nudging it would duplicate the line it is editing.
+func (t *modeTracker) altScreen() bool {
+	return t.on[1049] || t.on[1047] || t.on[47]
+}
+
 // replay returns the escape sequences that put a fresh emulator into the modes
 // the program has left on. Only non-default states need saying: a fresh
 // terminal is already visible, wrapping and on the normal screen.

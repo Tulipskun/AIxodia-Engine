@@ -297,14 +297,14 @@ func TestTrimRingCutsAtAParserBoundary(t *testing.T) {
 
 func TestAcquireSessionKeepsSizeWhenUnknown(t *testing.T) {
 	s := testServer(t)
-	sess, err := s.acquireSession("keep", 100, 30, termDir(), "/bin/sh")
+	sess, _, err := s.acquireSession("keep", 100, 30, termDir(), "/bin/sh")
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
 	t.Cleanup(func() { _ = sess.pty.Close() })
 
 	// Zero is "the client has not been laid out yet": keep 100x30.
-	same, err := s.acquireSession("keep", 0, 0, termDir(), "/bin/sh")
+	same, _, err := s.acquireSession("keep", 0, 0, termDir(), "/bin/sh")
 	if err != nil {
 		t.Fatalf("re-acquire: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestAcquireSessionKeepsSizeWhenUnknown(t *testing.T) {
 	}
 
 	// A real size does apply.
-	changed, err := s.acquireSession("keep", 120, 40, termDir(), "/bin/sh")
+	changed, _, err := s.acquireSession("keep", 120, 40, termDir(), "/bin/sh")
 	if err != nil {
 		t.Fatalf("re-acquire sized: %v", err)
 	}
@@ -382,6 +382,92 @@ func TestTerminalLimitReturns503(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	_ = conn.Close()
+}
+
+// A full engine must still let a client back into the shell it already has:
+// reattaching needs no slot. The slot check ran before the id lookup, so the
+// last working tab failed to reopen exactly when every slot was taken.
+func TestTerminalReattachAtFullHouseIsAllowed(t *testing.T) {
+	s := testServer(t)
+	s.Limit = 1
+	srv := serveTerminal(t, s)
+
+	conn, br := dialTerminal(t, srv.URL, testToken, "?id=full")
+	_ = nextTextFrame(t, conn, br, 10*time.Second)
+	defer conn.Close()
+
+	conn2, br2 := dialTerminal(t, srv.URL, testToken, "?id=full")
+	ready := nextTextFrame(t, conn2, br2, 10*time.Second)
+	if ready["id"] != "full" {
+		t.Fatalf("reattach ready = %v, want id full", ready)
+	}
+	_ = conn2.Close()
+}
+
+// "Close session" on the phone ends the shell. Hanging up alone left it — and
+// its slot — running, so a few closes filled the engine and every new terminal
+// answered "too many terminals".
+func TestTerminalCloseControlEndsTheShell(t *testing.T) {
+	s := testServer(t)
+	s.Limit = 1
+	srv := serveTerminal(t, s)
+
+	conn, br := dialTerminal(t, srv.URL, testToken, "?id=close-me")
+	_ = nextTextFrame(t, conn, br, 10*time.Second)
+	if err := wsock.WriteFrame(conn, wsock.OpText, []byte(`{"type":"close"}`)); err != nil {
+		t.Fatalf("send close: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.mu.Lock()
+		_, still := s.sess["close-me"]
+		s.mu.Unlock()
+		if !still {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the session stayed after the close frame")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// The slot is free now: a different id can open.
+	conn2, br2 := dialTerminal(t, srv.URL, testToken, "?id=fresh")
+	_ = nextTextFrame(t, conn2, br2, 10*time.Second)
+	_ = conn2.Close()
+	_ = conn.Close()
+}
+
+// A shell no client has attached to for the idle window is abandoned, not
+// reattachable, and it must give its slot up instead of failing forever.
+func TestIdleShellsAreReapedToMakeRoom(t *testing.T) {
+	s := testServer(t)
+	s.Limit = 1
+	s.IdleAfter = 10 * time.Millisecond
+
+	idle, _, err := s.acquireSession("idle", 80, 24, termDir(), "/bin/sh")
+	if err != nil {
+		t.Fatalf("acquire idle: %v", err)
+	}
+	// No subscriber, and its clock is long past the idle window. Backdating it
+	// avoids racing the prompt the shell writes when it starts.
+	idle.mu.Lock()
+	idle.lastAct = time.Now().Add(-time.Hour)
+	idle.mu.Unlock()
+
+	next, _, err := s.acquireSession("fresh", 80, 24, termDir(), "/bin/sh")
+	if err != nil {
+		t.Fatalf("acquire after idle: %v", err)
+	}
+	t.Cleanup(func() { _ = next.pty.Close() })
+
+	s.mu.Lock()
+	_, old := s.sess["idle"]
+	s.mu.Unlock()
+	if old {
+		t.Fatal("an idle shell was not reaped")
+	}
 }
 
 func TestTerminalPingsWhileIdle(t *testing.T) {
