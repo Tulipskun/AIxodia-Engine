@@ -79,10 +79,13 @@ func main() {
 	storeDB = handle
 	store := session.NewSQLite(handle)
 	sessionStore = store
-	// Providers — with the API keys that exist nowhere else — live in that same
-	// file. D1's copy is read once by the reloader below, and only while the
-	// store holds none.
-	config.SetStore(config.NewStore(storeDB))
+	// Providers — with the API keys that exist nowhere else — live in D1, not in
+	// this file: a fresh session still has to find them. The table was dropped
+	// while providers lived locally, so it is put back before the first read.
+	config.SetStore(config.NewStore(db.Query))
+	if err := config.EnsureStore(); err != nil {
+		log.Printf("config: %v", err)
+	}
 
 	startConfigReloader(ctx)
 
@@ -251,14 +254,18 @@ func startKaggleSession(ctx context.Context, stop context.CancelFunc) {
 
 func startConfigReloader(ctx context.Context) {
 	loadProviders := func() {
-		// ImportLegacyProviders does nothing once the store holds a provider,
-		// which is what makes it the retry for a boot whose read of D1 failed:
-		// a provider set is never half-carried.
-		if _, err := config.ImportLegacyProviders(db.Query); err != nil {
-			log.Printf("config: %v", err)
-		}
 		if err := config.LoadConfig(); err != nil {
 			log.Printf("config: %v", err)
+			// A boot whose CREATE failed would otherwise never recover: retry
+			// the schema before the next read. D1 being down fails here too,
+			// and the next tick tries again.
+			if err := config.EnsureStore(); err != nil {
+				log.Printf("config: %v", err)
+				return
+			}
+			if err := config.LoadConfig(); err != nil {
+				log.Printf("config: %v", err)
+			}
 		}
 	}
 	loadProviders()

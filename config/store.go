@@ -1,22 +1,25 @@
 package config
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 )
 
-// Store keeps the providers in the engine's own SQLite file. An API key is the
-// one thing here that cannot be recreated from anywhere else, which is why the
-// providers hold a table of their own rather than a settings blob.
+// QueryFunc runs one SQL statement against D1. It is db.Query in production and
+// a fake in tests, so the store can be exercised without a network.
+type QueryFunc func(sql string, params ...any) ([]map[string]any, error)
+
+// Store keeps the providers in D1. An API key is the one thing here that cannot
+// be recreated from anywhere else, so it lives in a table of its own rather
+// than in a settings blob - and in D1 rather than on this machine, so a fresh
+// session still finds it.
 type Store struct {
-	handle *sql.DB
+	query QueryFunc
 }
 
-func NewStore(handle *sql.DB) *Store {
-	return &Store{handle: handle}
+func NewStore(query QueryFunc) *Store {
+	return &Store{query: query}
 }
 
 var store *Store
@@ -33,75 +36,89 @@ func current() (*Store, error) {
 	return store, nil
 }
 
-// List returns the providers in the order the store holds them, which is the
-// order the phone sees.
+// Ensure creates the provider table if it is missing. D1 dropped it in the
+// local-store period, so the first boot after that has to put it back before
+// anything can be read or written.
+func (s *Store) Ensure() error {
+	return write(s.query, `CREATE TABLE IF NOT EXISTS llm_providers (
+		idx INTEGER PRIMARY KEY AUTOINCREMENT,
+		provider TEXT NOT NULL UNIQUE,
+		endpoint TEXT NOT NULL DEFAULT '',
+		keys TEXT NOT NULL DEFAULT '[]',
+		adapter TEXT NOT NULL DEFAULT ''
+	)`)
+}
+
+// List returns the providers in the order D1 holds them, which is the order the
+// phone sees. D1's column is called `index`, which SQLite only accepts quoted.
 func (s *Store) List() ([]Provider, error) {
-	rows, err := s.handle.Query(`SELECT idx, provider, endpoint, keys, adapter FROM llm_providers ORDER BY idx`)
+	rows, err := s.query(`SELECT "index" AS idx, provider, endpoint, keys, adapter FROM llm_providers ORDER BY "index"`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
-	providers := make([]Provider, 0)
-	for rows.Next() {
-		var provider Provider
-		var id int64
-		var keys string
-		if err := rows.Scan(&id, &provider.Name, &provider.APIURL, &keys, &provider.Adapter); err != nil {
-			return nil, err
-		}
-		provider.ID = strconv.FormatInt(id, 10)
-		provider.Keys = parseKeys(keys)
-		providers = append(providers, provider)
+	providers := make([]Provider, 0, len(rows))
+	for _, row := range rows {
+		providers = append(providers, Provider{
+			ID:      intString(row["idx"]),
+			Name:    stringValue(row["provider"]),
+			APIURL:  stringValue(row["endpoint"]),
+			Keys:    parseKeys(row["keys"]),
+			Adapter: stringValue(row["adapter"]),
+		})
 	}
-	return providers, rows.Err()
+	return providers, nil
 }
 
 func (s *Store) Count() (int, error) {
-	var count int
-	err := s.handle.QueryRow(`SELECT COUNT(*) FROM llm_providers`).Scan(&count)
-	return count, err
-}
-
-// Add writes a provider and lets SQLite assign its ID.
-func (s *Store) Add(provider Provider) error {
-	_, err := s.handle.Exec(`INSERT INTO llm_providers (provider, endpoint, keys, adapter) VALUES (?,?,?,?)`,
-		provider.Name, provider.APIURL, encodeKeys(provider.Keys), provider.Adapter)
-	return err
-}
-
-// Import writes providers with the IDs they already carry, in one transaction:
-// a half-imported store would hold providers, pass the "is it empty" gate and
-// never be retried.
-func (s *Store) Import(providers []Provider) error {
-	tx, err := s.handle.Begin()
+	rows, err := s.query(`SELECT COUNT(*) AS n FROM llm_providers`)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	defer tx.Rollback()
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	switch value := rows[0]["n"].(type) {
+	case float64:
+		return int(value), nil
+	case int:
+		return value, nil
+	case int64:
+		return int(value), nil
+	default:
+		return 0, fmt.Errorf("config: unexpected count %v", rows[0]["n"])
+	}
+}
 
-	for _, provider := range providers {
-		if _, err := tx.Exec(`INSERT INTO llm_providers (idx, provider, endpoint, keys, adapter) VALUES (?,?,?,?,?)`,
-			provider.ID, provider.Name, provider.APIURL, encodeKeys(provider.Keys), provider.Adapter); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
+// Add writes a provider and lets D1 assign its ID.
+func (s *Store) Add(provider Provider) error {
+	return write(s.query, `INSERT INTO llm_providers (provider, endpoint, keys, adapter) VALUES (?,?,?,?)`,
+		provider.Name, provider.APIURL, encodeKeys(provider.Keys), provider.Adapter)
 }
 
 func (s *Store) Remove(name string) error {
-	_, err := s.handle.Exec(`DELETE FROM llm_providers WHERE provider=?`, name)
-	return err
+	return write(s.query, `DELETE FROM llm_providers WHERE provider=?`, name)
 }
 
 func (s *Store) SetKeys(name string, keys []string) error {
-	_, err := s.handle.Exec(`UPDATE llm_providers SET keys=? WHERE provider=?`, encodeKeys(keys), name)
-	return err
+	return write(s.query, `UPDATE llm_providers SET keys=? WHERE provider=?`, encodeKeys(keys), name)
+}
+
+// EnsureStore creates the provider table through the store set at boot.
+func EnsureStore() error {
+	s, err := current()
+	if err != nil {
+		return err
+	}
+	return s.Ensure()
 }
 
 // AddProvider writes a provider for the API. The caller reloads the list
 // afterwards and reads the new provider back, so the ID is never guessed here.
 func AddProvider(name, endpoint, adapter string, keys []string) error {
+	if IsBuiltin(name) {
+		return fmt.Errorf("config: %s is a built-in provider and cannot be added", name)
+	}
 	s, err := current()
 	if err != nil {
 		return err
@@ -110,6 +127,9 @@ func AddProvider(name, endpoint, adapter string, keys []string) error {
 }
 
 func RemoveProvider(name string) error {
+	if IsBuiltin(name) {
+		return fmt.Errorf("config: %s is a built-in provider and cannot be removed", name)
+	}
 	s, err := current()
 	if err != nil {
 		return err
@@ -118,11 +138,22 @@ func RemoveProvider(name string) error {
 }
 
 func SetProviderKeys(name string, keys []string) error {
+	if IsBuiltin(name) {
+		return fmt.Errorf("config: %s is a built-in provider and cannot be changed", name)
+	}
 	s, err := current()
 	if err != nil {
 		return err
 	}
 	return s.SetKeys(name, keys)
+}
+
+// write runs a statement whose rows nobody reads. D1 reports failures in the
+// response body rather than the status, and db.Query turns those into an error,
+// so success is simply the call not failing.
+func write(query QueryFunc, sql string, params ...any) error {
+	_, err := query(sql, params...)
+	return err
 }
 
 // encodeKeys stores the key list as JSON: order is the rotation order, and a

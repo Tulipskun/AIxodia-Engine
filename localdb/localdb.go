@@ -95,15 +95,6 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated ON chat_sessions(updated_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_chat_turns_session_seq ON chat_turns(session_id, seq)`,
-	// idx is D1's `index` column, which the engine reads as a provider's ID.
-	// The name is the one SQLite accepts as a column without quoting.
-	`CREATE TABLE IF NOT EXISTS llm_providers (
-		idx INTEGER PRIMARY KEY AUTOINCREMENT,
-		provider TEXT NOT NULL UNIQUE,
-		endpoint TEXT NOT NULL DEFAULT '',
-		keys TEXT NOT NULL DEFAULT '[]',
-		adapter TEXT NOT NULL DEFAULT ''
-	)`,
 	// One key/value table for engine settings and the daemon's own notes: they
 	// are written once and read whole, and D1's reasons for a column each
 	// (queryability, a row per setting) do not apply to a file on this machine.

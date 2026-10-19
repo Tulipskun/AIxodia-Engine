@@ -1,28 +1,89 @@
 package config
 
 import (
-	"errors"
-	"path/filepath"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
-
-	"aixodia-engine/localdb"
 )
 
-func testStore(t *testing.T) *Store {
-	t.Helper()
-	handle, err := localdb.Open(filepath.Join(t.TempDir(), "aixodia.db"))
-	if err != nil {
-		t.Fatal(err)
+// fakeD1 answers the handful of statements the store sends, keeping the rows in
+// memory. It is the shape of D1 that matters here: values come back as
+// []map[string]any with numbers as float64, because that is what the real
+// client decodes.
+type fakeD1 struct {
+	rows   []map[string]any
+	nextID int
+	err    error
+	seen   []string
+}
+
+func (f *fakeD1) query(sql string, params ...any) ([]map[string]any, error) {
+	f.seen = append(f.seen, strings.Fields(sql)[0])
+	if f.err != nil {
+		return nil, f.err
 	}
-	t.Cleanup(func() { handle.Close() })
-	return NewStore(handle)
+	switch {
+	case strings.HasPrefix(sql, "SELECT \"index\""):
+		return f.rows, nil
+	case strings.HasPrefix(sql, "SELECT COUNT(*)"):
+		return []map[string]any{{"n": float64(len(f.rows))}}, nil
+	case strings.HasPrefix(sql, "INSERT INTO llm_providers"):
+		f.nextID++
+		f.rows = append(f.rows, map[string]any{
+			"idx":      float64(f.nextID),
+			"provider": params[0],
+			"endpoint": params[1],
+			"keys":     params[2],
+			"adapter":  params[3],
+		})
+		return nil, nil
+	case strings.HasPrefix(sql, "DELETE FROM llm_providers"):
+		name := params[0].(string)
+		kept := f.rows[:0]
+		for _, row := range f.rows {
+			if row["provider"] != name {
+				kept = append(kept, row)
+			}
+		}
+		f.rows = kept
+		return nil, nil
+	case strings.HasPrefix(sql, "UPDATE llm_providers"):
+		name := params[1].(string)
+		for _, row := range f.rows {
+			if row["provider"] == name {
+				row["keys"] = params[0]
+			}
+		}
+		return nil, nil
+	case strings.HasPrefix(sql, "CREATE TABLE"):
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("fakeD1: unexpected SQL %q", sql)
+	}
+}
+
+func testStore(t *testing.T) (*Store, *fakeD1) {
+	t.Helper()
+	fake := &fakeD1{}
+	store := NewStore(fake.query)
+	SetStore(store)
+	mu.Lock()
+	Providers = nil
+	mu.Unlock()
+	t.Cleanup(func() {
+		SetStore(nil)
+		mu.Lock()
+		Providers = nil
+		mu.Unlock()
+	})
+	return store, fake
 }
 
 // A provider is a name, an endpoint, an adapter and its keys. Losing any of
 // them loses the ability to talk to that upstream.
 func TestStoreRoundTrip(t *testing.T) {
-	store := testStore(t)
+	store, _ := testStore(t)
 	if err := store.Add(Provider{Name: "Alpha", APIURL: "https://alpha.test", Adapter: "openai", Keys: []string{"k1", "k2"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +115,7 @@ func TestStoreRoundTrip(t *testing.T) {
 }
 
 func TestStoreSetKeysReplacesThem(t *testing.T) {
-	store := testStore(t)
+	store, _ := testStore(t)
 	if err := store.Add(Provider{Name: "Alpha", APIURL: "https://alpha.test", Adapter: "openai", Keys: []string{"old"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -70,194 +131,86 @@ func TestStoreSetKeysReplacesThem(t *testing.T) {
 	}
 }
 
-// The ID is D1's index column, and rows carried over keep theirs: a phone that
-// remembers provider 3 must find provider 3.
-func TestStoreImportKeepsTheIDsItIsGiven(t *testing.T) {
-	store := testStore(t)
-	if err := store.Import([]Provider{{ID: "7", Name: "Alpha", APIURL: "https://alpha.test", Adapter: "openai", Keys: []string{"k"}}}); err != nil {
+func TestStoreCount(t *testing.T) {
+	store, _ := testStore(t)
+	count, err := store.Count()
+	if err != nil || count != 0 {
+		t.Fatalf("Count = %d, err = %v; want 0, nil", count, err)
+	}
+	if err := store.Add(Provider{Name: "Alpha", APIURL: "https://alpha.test", Adapter: "openai"}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := store.List()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].ID != "7" {
-		t.Fatalf("List = %+v, want provider with ID 7", got)
+	if count, err = store.Count(); err != nil || count != 1 {
+		t.Fatalf("Count = %d, err = %v; want 1, nil", count, err)
 	}
 }
 
-func TestLoadConfigReadsTheStore(t *testing.T) {
-	store := testStore(t)
-	SetStore(store)
-	t.Cleanup(func() { SetStore(nil) })
-
-	if err := store.Add(Provider{Name: "Alpha", APIURL: "https://alpha.test", Adapter: "openai", Keys: []string{"k"}}); err != nil {
+func TestStoreEnsureCreatesTheTable(t *testing.T) {
+	_, fake := testStore(t)
+	if err := EnsureStore(); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Add(Provider{Name: "Beta", APIURL: "https://beta.test", Adapter: "anthropic"}); err != nil {
+	if len(fake.seen) == 0 || fake.seen[0] != "CREATE" {
+		t.Fatalf("statements = %v, want CREATE first", fake.seen)
+	}
+}
+
+// The engine carries the opencode free tier itself, so a phone with no D1 rows
+// still has a provider - and it is read-only.
+func TestLoadConfigAlwaysAddsTheBuiltin(t *testing.T) {
+	store, _ := testStore(t)
+	if err := store.Add(Provider{Name: "Alpha", APIURL: "https://alpha.test", Adapter: "openai", Keys: []string{"k"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := LoadConfig(); err != nil {
 		t.Fatal(err)
 	}
 	got := GetProviders()
-	if len(got) != 2 || got[0].Name != "Alpha" || got[1].Name != "Beta" {
-		t.Fatalf("GetProviders = %+v, want Alpha then Beta", got)
+	if len(got) != 2 || got[0].Name != "Alpha" || got[1].Name != "Opencode" {
+		t.Fatalf("GetProviders = %+v, want Alpha then the built-in Opencode", got)
 	}
-	if _, ok := GetProviderByName("Beta"); !ok {
-		t.Fatal("GetProviderByName(Beta) not found")
-	}
-}
-
-// D1 still holds the keys until its table is dropped. The import is the one
-// read the engine makes, and it must not run over a store that has providers.
-func TestImportLegacyProvidersSkipsAStoreThatHasProviders(t *testing.T) {
-	store := testStore(t)
-	SetStore(store)
-	t.Cleanup(func() { SetStore(nil) })
-	if err := store.Add(Provider{Name: "Local", APIURL: "https://local.test", Adapter: "openai"}); err != nil {
-		t.Fatal(err)
-	}
-
-	called := false
-	imported, err := ImportLegacyProviders(func(string, ...any) ([]map[string]any, error) {
-		called = true
-		return nil, errors.New("must not be read")
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if called || imported != 0 {
-		t.Fatalf("imported %d, read D1 = %v; want 0 and no read", imported, called)
+	if _, ok := GetProviderByName("Opencode"); !ok {
+		t.Fatal("GetProviderByName(Opencode) not found")
 	}
 }
 
-func TestImportLegacyProvidersCopiesD1Rows(t *testing.T) {
-	store := testStore(t)
-	SetStore(store)
-	t.Cleanup(func() { SetStore(nil) })
-
-	rows := []map[string]any{
-		{"index": float64(1), "provider": "Opencode", "endpoint": "https://opencode.test", "keys": `["sk-one"]`, "adapter": "opencode"},
-		{"index": float64(2), "provider": "Anthropic", "endpoint": "https://anthropic.test", "keys": `["sk-two","sk-three"]`, "adapter": "anthropic"},
+func TestBuiltinProviderCannotBeChanged(t *testing.T) {
+	testStore(t)
+	if !IsBuiltin("Opencode") || !IsBuiltin("opencode") {
+		t.Fatal("the built-in provider must be recognised by name, case-insensitively")
 	}
-	reads := 0
-	query := func(string, ...any) ([]map[string]any, error) {
-		reads++
-		return rows, nil
+	if err := AddProvider("Opencode", "https://elsewhere.test", "openai", []string{"k"}); err == nil {
+		t.Fatal("AddProvider over a built-in must be refused")
 	}
-
-	imported, err := ImportLegacyProviders(query)
-	if err != nil {
-		t.Fatal(err)
+	if err := RemoveProvider("Opencode"); err == nil {
+		t.Fatal("RemoveProvider over a built-in must be refused")
 	}
-	if imported != 2 {
-		t.Fatalf("imported = %d, want 2", imported)
-	}
-	got, err := store.List()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 2 || got[0].ID != "1" || got[0].Name != "Opencode" || got[1].ID != "2" {
-		t.Fatalf("List = %+v, want the two D1 rows with their IDs", got)
-	}
-	if !reflect.DeepEqual(got[1].Keys, []string{"sk-two", "sk-three"}) {
-		t.Fatalf("keys = %v, want the D1 keys", got[1].Keys)
-	}
-
-	// A second boot finds the store populated and reads nothing.
-	imported, err = ImportLegacyProviders(query)
-	if err != nil || imported != 0 || reads != 1 {
-		t.Fatalf("second import = %d, reads = %d, err = %v; want 0, 1, nil", imported, reads, err)
+	if err := SetProviderKeys("Opencode", []string{"k"}); err == nil {
+		t.Fatal("SetProviderKeys over a built-in must be refused")
 	}
 }
 
-// Once D1's table is dropped the read fails with "no such table". That is the
-// expected end state, not an error worth a log line every minute.
-func TestImportLegacyProvidersIgnoresAMissingTable(t *testing.T) {
-	store := testStore(t)
-	SetStore(store)
-	t.Cleanup(func() { SetStore(nil) })
-
-	imported, err := ImportLegacyProviders(func(string, ...any) ([]map[string]any, error) {
-		return nil, errors.New("db: D1 query failed: no such table: llm_providers")
-	})
-	if err != nil || imported != 0 {
-		t.Fatalf("import = %d, err = %v; want 0, nil", imported, err)
+func TestStoreReportsD1Failures(t *testing.T) {
+	store, fake := testStore(t)
+	fake.err = fmt.Errorf("db: D1 query failed: HTTP 502")
+	if _, err := store.List(); err == nil {
+		t.Fatal("List must report a D1 failure")
 	}
-
-	// And it stops reading D1: the table is gone for good.
-	reads := 0
-	imported, err = ImportLegacyProviders(func(string, ...any) ([]map[string]any, error) {
-		reads++
-		return nil, nil
-	})
-	if err != nil || imported != 0 || reads != 0 {
-		t.Fatalf("second import = %d, reads = %d, err = %v; want 0, 0, nil", imported, reads, err)
+	if err := store.Add(Provider{Name: "Alpha", APIURL: "https://alpha.test", Adapter: "openai"}); err == nil {
+		t.Fatal("Add must report a D1 failure")
 	}
 }
 
-// A phone that removes its last provider means it. While D1 still holds the
-// table, the import must not hand them back.
-func TestImportLegacyProvidersDoesNotResurrectRemovedProviders(t *testing.T) {
-	store := testStore(t)
-	SetStore(store)
-	t.Cleanup(func() { SetStore(nil) })
-
-	rows := []map[string]any{{"index": float64(1), "provider": "Opencode", "endpoint": "https://opencode.test", "keys": `["sk-one"]`, "adapter": "opencode"}}
-	if _, err := ImportLegacyProviders(func(string, ...any) ([]map[string]any, error) { return rows, nil }); err != nil {
-		t.Fatal(err)
+// A boot that cannot reach D1 still has the free provider: it is carried by the
+// engine, not by the store.
+func TestLoadConfigKeepsTheBuiltinWhenD1Fails(t *testing.T) {
+	_, fake := testStore(t)
+	fake.err = fmt.Errorf("db: D1 query failed: HTTP 502")
+	if err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig must report the D1 failure")
 	}
-	if err := store.Remove("Opencode"); err != nil {
-		t.Fatal(err)
-	}
-
-	reads := 0
-	imported, err := ImportLegacyProviders(func(string, ...any) ([]map[string]any, error) {
-		reads++
-		return rows, nil
-	})
-	if err != nil || imported != 0 || reads != 0 {
-		t.Fatalf("import after removing everything = %d, reads = %d, err = %v; want 0, 0, nil", imported, reads, err)
-	}
-}
-
-// D1's table can also be there but empty: that is the end of the copy too.
-func TestImportLegacyProvidersStopsOnAnEmptyD1Table(t *testing.T) {
-	store := testStore(t)
-	SetStore(store)
-	t.Cleanup(func() { SetStore(nil) })
-
-	if _, err := ImportLegacyProviders(func(string, ...any) ([]map[string]any, error) { return nil, nil }); err != nil {
-		t.Fatal(err)
-	}
-	reads := 0
-	imported, err := ImportLegacyProviders(func(string, ...any) ([]map[string]any, error) {
-		reads++
-		return nil, nil
-	})
-	if err != nil || imported != 0 || reads != 0 {
-		t.Fatalf("second import = %d, reads = %d, err = %v; want 0, 0, nil", imported, reads, err)
-	}
-}
-
-// A read that failed is the one case that has to be tried again: the keys are
-// still in D1 and the phone has none.
-func TestImportLegacyProvidersRetriesWhileTheReadFails(t *testing.T) {
-	store := testStore(t)
-	SetStore(store)
-	t.Cleanup(func() { SetStore(nil) })
-
-	imported, err := ImportLegacyProviders(func(string, ...any) ([]map[string]any, error) {
-		return nil, errors.New("db: D1 query failed: HTTP 502")
-	})
-	if err == nil || imported != 0 {
-		t.Fatalf("import = %d, err = %v; want the failure reported", imported, err)
-	}
-
-	rows := []map[string]any{{"index": float64(3), "provider": "Opencode", "endpoint": "https://opencode.test", "keys": `["sk-one"]`, "adapter": "opencode"}}
-	imported, err = ImportLegacyProviders(func(string, ...any) ([]map[string]any, error) { return rows, nil })
-	if err != nil || imported != 1 {
-		t.Fatalf("second import = %d, err = %v; want 1, nil", imported, err)
+	got := GetProviders()
+	if len(got) != 1 || got[0].Name != "Opencode" {
+		t.Fatalf("GetProviders = %+v, want the built-in only", got)
 	}
 }

@@ -9,7 +9,7 @@ import (
 
 // Everything the engine owns lives in one file, so every table has to exist the
 // moment it is opened: a missing one would surface later as a failing request
-// instead of a failed boot.
+// instead of a failed boot. Providers are not here: they live in D1.
 func TestOpenCreatesEveryTableTheEngineUses(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "aixodia.db"))
 	if err != nil {
@@ -17,7 +17,7 @@ func TestOpenCreatesEveryTableTheEngineUses(t *testing.T) {
 	}
 	defer store.Close()
 
-	for _, table := range []string{"chat_sessions", "chat_turns", "llm_providers", "state"} {
+	for _, table := range []string{"chat_sessions", "chat_turns", "state"} {
 		var name string
 		if err := store.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name); err != nil {
 			t.Errorf("table %s: %v", table, err)

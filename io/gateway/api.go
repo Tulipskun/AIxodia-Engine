@@ -103,6 +103,7 @@ func providerStatusJSON(cfg config.Provider, probe probeResult) map[string]any {
 		"probed":        probe.Probed,
 		"working_model": probe.WorkingModel,
 		"last_error":    probe.LastError,
+		"builtin":       config.IsBuiltin(cfg.Name),
 	}
 }
 
