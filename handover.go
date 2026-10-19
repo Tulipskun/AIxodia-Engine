@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
-	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"aixodia-engine/localdb"
@@ -28,9 +26,8 @@ type Handover struct {
 	Instance string `json:"instance"`
 	Tunnel   string `json:"tunnel"`
 	Version  string `json:"version"`
-	// KernelStarted is when the notebook began, in unix seconds. It is what
-	// uptime is measured from: the engine restarts itself on every update, so its
-	// own start time is not the session's age. Zero when the notebook did not say.
+	// KernelStarted is when this session began, in unix seconds. A session ends
+	// when its engine ends, so the engine's own start is the session's start.
 	KernelStarted int64 `json:"kernel_started"`
 	EngineStarted int64 `json:"engine_started"`
 	At            int64 `json:"at"`
@@ -47,7 +44,7 @@ func publishHandover(ctx context.Context, tunnelURL string) {
 		Instance:      "daemon-" + strconv.FormatInt(startedAt, 10),
 		Tunnel:        tunnelURL,
 		Version:       versionString(),
-		KernelStarted: kernelStarted(),
+		KernelStarted: startedAt,
 		EngineStarted: startedAt,
 		At:            time.Now().Unix(),
 	}
@@ -79,30 +76,5 @@ func publishHandover(ctx context.Context, tunnelURL string) {
 			log.Printf("handover:   %s seq %d: %s", turn.SessionID, turn.Seq, turn.Text)
 		}
 	}
-	log.Printf("handover: note written (kernel age %s)", kernelAge())
-}
-
-// kernelStarted is when the notebook began, reported by the notebook through the
-// environment. The engine cannot read it from anywhere else: the notebook is the
-// only thing that knows, and the engine restarts itself without the session
-// ending.
-func kernelStarted() int64 {
-	raw := strings.TrimSpace(os.Getenv("AIXODIA_KERNEL_STARTED"))
-	if raw == "" {
-		return 0
-	}
-	seconds, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || seconds <= 0 {
-		return 0
-	}
-	return seconds
-}
-
-func kernelAge() string {
-	started := kernelStarted()
-	if started <= 0 {
-		return "unknown"
-	}
-	age := time.Since(time.Unix(started, 0))
-	return age.Truncate(time.Minute).String()
+	log.Printf("handover: note written (uptime %s)", time.Since(time.Unix(startedAt, 0)).Truncate(time.Minute))
 }

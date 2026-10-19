@@ -28,6 +28,7 @@ import tarfile
 import tempfile
 import threading
 import time
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -35,25 +36,38 @@ from pathlib import Path
 REPOS = ("kyomu53n/kgat-snapshot-a", "kyomu53n/kgat-snapshot-b")
 
 
-def _secret(name, *envs):
-    """A credential from the environment, else from ~/.aixodia/<name>.
+# Configuration and credentials live in D1, in the engine's system_state table:
+# the notebook and this machine carry nothing but CF_TOKEN.
+D1_ACCOUNT = "3b953d1cbb784b3424c27798931bc37b"
+D1_DATABASE = "e8e746ea-691e-43bf-9fe2-c4e4016f29a1"
+D1_URL = ("https://api.cloudflare.com/client/v4/accounts/"
+          f"{D1_ACCOUNT}/d1/database/{D1_DATABASE}/query")
+_CONFIG = {}
 
-    Secrets are never in this file: the notebook that starts the engine holds
-    them, exports them to the restore process and leaves them in ~/.aixodia so
-    a backup started by the engine (which inherits only the engine's own
-    environment) can read them.
-    """
-    for key in envs:
-        v = os.environ.get(key, "").strip()
-        if v:
-            return v
+
+def config(key):
+    """One system_state value from D1, read once per process."""
+    if key in _CONFIG:
+        return _CONFIG[key]
+    token = os.environ.get("CF_TOKEN", "").strip()
+    if not token:
+        raise RuntimeError("CF_TOKEN is not set - it is the only credential needed")
+    body = json.dumps({"sql": "SELECT value FROM system_state WHERE key=?",
+                       "params": [key]}).encode()
+    req = urllib.request.Request(D1_URL, data=body, headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    })
     try:
-        return (Path.home() / ".aixodia" / name).read_text().strip()
-    except OSError:
-        return ""
-
-
-HF_TOKEN = _secret("hf_token", "HF_TOKEN", "AIXODIA_HF_TOKEN")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            out = json.load(resp)
+    except Exception as ex:
+        raise RuntimeError(f"D1 read {key} failed: {ex}") from ex
+    if not out.get("success"):
+        raise RuntimeError(f"D1 read {key} failed: {out.get('errors')}")
+    rows = (out.get("result") or [{}])[0].get("results") or []
+    _CONFIG[key] = rows[0].get("value", "") if rows else ""
+    return _CONFIG[key]
 ARCHIVE = "env_backup.part"
 MANIFEST = "manifest.json"
 INDEX = "image_index.json.gz"
@@ -344,8 +358,9 @@ def _unpack(archive):
 
 
 def _hf():
-    if not HF_TOKEN:
-        raise RuntimeError("no Hugging Face token: export HF_TOKEN or write ~/.aixodia/hf_token")
+    token = config("kaggle/hf_token")
+    if not token:
+        raise RuntimeError("kaggle/hf_token is not set in D1")
     try:
         from huggingface_hub import HfApi
     except ImportError:
@@ -353,7 +368,7 @@ def _hf():
 
         subprocess.run([sys.executable, "-m", "pip", "install", "-q", "huggingface_hub"], check=True)
         from huggingface_hub import HfApi
-    return HfApi(token=HF_TOKEN)
+    return HfApi(token=config("kaggle/hf_token"))
 
 
 def _current():
@@ -375,7 +390,7 @@ def _download(repo, tmp):
     from huggingface_hub import snapshot_download
 
     return snapshot_download(
-        repo, repo_type="dataset", local_dir=tmp, token=HF_TOKEN,
+        repo, repo_type="dataset", local_dir=tmp, token=config("kaggle/hf_token"),
         allow_patterns=[ARCHIVE + "*.tar.zst", MANIFEST, INDEX],
     )
 
@@ -520,8 +535,7 @@ def backup(force=False):
 # ---------------------------------------------------------------------------
 # Entry points used by the engine and the notebook.
 
-KERNEL = os.environ.get("AIXODIA_KERNEL", "kyomusen/aixodia-engine")
-KAGGLE_TOKEN = _secret("kaggle_token", "AIXODIA_KAGGLE_TOKEN", "KAGGLE_API_TOKEN")
+KERNEL = "kyomusen/aixodia-engine"
 
 
 def load_state():
@@ -545,12 +559,12 @@ def load_state():
 
     with tempfile.TemporaryDirectory() as tmp:
         try:
-            hf_hub_download(repo, MANIFEST, repo_type="dataset", local_dir=tmp, token=HF_TOKEN)
+            hf_hub_download(repo, MANIFEST, repo_type="dataset", local_dir=tmp, token=config("kaggle/hf_token"))
         except Exception as ex:
             raise RuntimeError(f"{repo} has no readable {MANIFEST} ({type(ex).__name__}) - "
                                "refusing to overwrite the snapshot") from ex
         try:
-            hf_hub_download(repo, INDEX, repo_type="dataset", local_dir=tmp, token=HF_TOKEN)
+            hf_hub_download(repo, INDEX, repo_type="dataset", local_dir=tmp, token=config("kaggle/hf_token"))
         except Exception as ex:
             print(f"[sync] no {INDEX} in the snapshot ({type(ex).__name__})")
         _PREV = json.loads(Path(tmp, MANIFEST).read_text())
@@ -568,9 +582,10 @@ def restart():
     """Push a fresh version of this notebook; Kaggle starts it as a new session."""
     env = dict(os.environ)
     env.pop("KAGGLE_API_V1_TOKEN", None)
-    if KAGGLE_TOKEN:
-        env["KAGGLE_API_TOKEN"] = KAGGLE_TOKEN
-    where = os.environ.get("AIXODIA_RESTART_DIR", "/kaggle/working/restart")
+    token = config("kaggle/kaggle_token")
+    if token:
+        env["KAGGLE_API_TOKEN"] = token
+    where = "/kaggle/working/restart"
     Path(where).mkdir(parents=True, exist_ok=True)
     for argv in (["kaggle", "kernels", "pull", "-m", "-p", where, KERNEL],
                  ["kaggle", "kernels", "push", "-p", where]):

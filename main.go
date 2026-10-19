@@ -91,18 +91,10 @@ func main() {
 	g.SetStartedAt(startedAt)
 	g.SetLogReader(recentLogs)
 	// Attachments land here; the agent reads them from these paths. Kaggle's
-	// /kaggle/working is the writable directory, and the env can point it
-	// somewhere else (or to nothing, which disables uploads).
-	uploads := strings.TrimSpace(os.Getenv("AIXODIA_UPLOADS"))
-	if uploads == "" {
-		uploads = "/kaggle/working/uploads"
-	}
-	g.SetUploadDir(uploads)
+	// /kaggle/working is the writable directory of the session.
+	g.SetUploadDir("/kaggle/working/uploads")
 	gw := g.Handler()
-	model := strings.TrimSpace(os.Getenv("AIXODIA_MODEL"))
-	if model == "" {
-		model = "Opencode/big-pickle"
-	}
+	const model = "Opencode/big-pickle"
 	// One hub for every phone socket.
 	hub := mobile.NewHub()
 	mux := http.NewServeMux()
@@ -123,22 +115,13 @@ func main() {
 		}
 	}()
 
-	publishing := os.Getenv("AIXODIA_PUBLISH") != "0"
-
 	// The public address is the relay room, not a tunnel this process starts:
 	// the engine dials out, so it needs no inbound port and no cloudflared.
-	relayBase := strings.TrimSpace(os.Getenv("AIXODIA_RELAY"))
-	if relayBase == "" {
+	const (
 		relayBase = "wss://aixodia-relay.aixodia.workers.dev"
-	}
-	room := strings.TrimSpace(os.Getenv("AIXODIA_ROOM"))
-	if room == "" {
-		room = "aixodia"
-	}
-	relayToken := strings.TrimSpace(os.Getenv("AIXODIA_RELAY_TOKEN"))
-	if relayToken == "" {
-		relayToken = token
-	}
+		room      = "aixodia"
+	)
+	relayToken := token
 	roomPath := "/room/" + url.PathEscape(room)
 	roomURL := strings.TrimRight(relayBase, "/") + roomPath
 	publicURL := strings.Replace(strings.Replace(roomURL, "wss://", "https://", 1), "ws://", "http://", 1)
@@ -148,10 +131,6 @@ func main() {
 	onConnect := func() {
 		relayUp.Store(true)
 		log.Print("relay: connected")
-		if !publishing {
-			log.Print("local test mode: relay not published to D1")
-			return
-		}
 		if err := db.SaveDaemon(publicURL, versionString(), time.Now().Unix()); err != nil {
 			log.Printf("save daemon: %v", err)
 			return
@@ -193,9 +172,7 @@ func main() {
 			stop()
 		}
 	}()
-	if publishing {
-		go startHeartbeat(ctx, stop, relayUp.Load)
-	}
+	go startHeartbeat(ctx, stop, relayUp.Load)
 
 	// The notebook that runs this engine on Kaggle only restores the machine,
 	// starts the engine and waits for it to exit. The session itself belongs
@@ -216,34 +193,42 @@ func main() {
 // startKaggleSession hands the notebook's lifetime to the engine. It does
 // nothing unless AIXODIA_SESSION is set, so a local run can never snapshot and
 // restart somebody's Kaggle notebook.
+// startKaggleSession hands the notebook's lifetime to the engine.
+//
+// It is Kaggle only, and it says so by looking at the machine rather than at an
+// environment variable: /kaggle/working is where the notebook works, and
+// kgat_sync.py is installed next to the engine by install.sh. Anywhere else
+// this returns at once, so a local run can never snapshot and restart somebody's
+// notebook.
 func startKaggleSession(ctx context.Context, stop context.CancelFunc) {
-	if !truthy(os.Getenv("AIXODIA_SESSION")) {
-		return
-	}
-	script := strings.TrimSpace(os.Getenv("AIXODIA_SESSION_SCRIPT"))
-	if script == "" {
+	const (
 		script = "/usr/local/bin/kgat_sync.py"
+		// Kaggle stops a session at 12 h; the backup and the push need room,
+		// so the engine closes its own session half an hour early.
+		limit = 41400 * time.Second
+	)
+	if _, err := os.Stat("/kaggle/working"); err != nil {
+		return
 	}
 	if _, err := os.Stat(script); err != nil {
 		log.Printf("session: %s is missing; this session will not restart itself", script)
 		return
 	}
+	home, _ := os.UserHomeDir()
+	exitFile := filepath.Join(home, ".exit")
+	// The marker tells the notebook's wait loop that the session was closed on
+	// purpose. It is cleared first: ~/.aixodia is restored from the previous
+	// snapshot, so a stale marker would end this session at once.
+	done := filepath.Join(home, ".aixodia", "session-closed")
+	os.Remove(done)
+
 	cfg := kaggle.Config{
 		Script:   script,
-		ExitFile: strings.TrimSpace(os.Getenv("AIXODIA_EXIT_FILE")),
-		Limit:    durationEnv("AIXODIA_SESSION_LIMIT", 41400*time.Second),
+		ExitFile: exitFile,
+		Limit:    limit,
 		Logf:     log.Printf,
 	}
-	// The marker is what tells the notebook's wait loop that the session was
-	// closed on purpose. It is cleared first: ~/.aixodia is restored from the
-	// previous snapshot, so a stale marker would end this session at once.
-	done := strings.TrimSpace(os.Getenv("AIXODIA_SESSION_DONE"))
-	if done == "" {
-		home, _ := os.UserHomeDir()
-		done = filepath.Join(home, ".aixodia", "session-closed")
-	}
-	os.Remove(done)
-	log.Printf("session: controlling this notebook session (limit %s)", cfg.Limit)
+	log.Printf("session: controlling this notebook session (limit %s)", limit)
 	go func() {
 		res, err := cfg.Run(ctx)
 		if err != nil {
@@ -262,30 +247,6 @@ func startKaggleSession(ctx context.Context, stop context.CancelFunc) {
 		log.Printf("session: closed after %s; stopping so the notebook can end", res.Reason)
 		stop()
 	}()
-}
-
-func truthy(v string) bool {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "1", "true", "yes", "on":
-		return true
-	}
-	return false
-}
-
-// durationEnv reads a duration from the environment: a bare number is seconds
-// (the notebook budget is quoted in seconds), "90m" is accepted too.
-func durationEnv(key string, def time.Duration) time.Duration {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		return def
-	}
-	if n, err := strconv.Atoi(v); err == nil {
-		return time.Duration(n) * time.Second
-	}
-	if d, err := time.ParseDuration(v); err == nil {
-		return d
-	}
-	return def
 }
 
 func startConfigReloader(ctx context.Context) {

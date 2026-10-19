@@ -39,26 +39,24 @@ func TestOpenCreatesTheParentDirectory(t *testing.T) {
 	}
 }
 
-// AIXODIA_DB_PATH is how a machine says where the store lives.
-func TestPathUsesTheEnvironmentFirst(t *testing.T) {
-	want := filepath.Join(t.TempDir(), "chosen.db")
-	t.Setenv("AIXODIA_DB_PATH", want)
-	if got := Path(); got != want {
-		t.Fatalf("Path() = %q, want %q", got, want)
-	}
-}
-
-// Without the environment there is still one answer, and it names the store.
+// There is still one answer, and it names the store.
 func TestPathAlwaysNamesTheStore(t *testing.T) {
-	t.Setenv("AIXODIA_DB_PATH", "")
 	if got := Path(); !strings.HasSuffix(got, "aixodia.db") {
 		t.Fatalf("Path() = %q, want a path ending in aixodia.db", got)
 	}
 }
 
 func TestOpenWithoutAPathUsesPath(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "env.db")
-	t.Setenv("AIXODIA_DB_PATH", path)
+	dir := t.TempDir()
+	was, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(was) })
+	path := Path()
 	store, err := Open("")
 	if err != nil {
 		t.Fatal(err)

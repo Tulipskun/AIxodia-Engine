@@ -32,9 +32,6 @@ var (
 )
 
 func logDBPath() string {
-	if p := strings.TrimSpace(os.Getenv("AIXODIA_LOG_DB_PATH")); p != "" {
-		return p
-	}
 	if st, err := os.Stat("/kaggle/working"); err == nil && st.IsDir() {
 		return "/kaggle/working/aixodia-logs.db"
 	}

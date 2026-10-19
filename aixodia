@@ -63,11 +63,7 @@ cmd_start() {
   # The engine picks the database itself: /kaggle/working/aixodia.db where that
   # directory exists - the session's durable directory, and where history moved
   # off D1 already lives - and ./aixodia.db everywhere else, which is this
-  # directory because the engine starts here. Setting AIXODIA_DB_PATH by hand
-  # still wins.
-  export AIXODIA_UPLOADS="${AIXODIA_UPLOADS:-$AIXODIA_HOME/uploads}"
-  export AIXODIA_KERNEL_STARTED="${AIXODIA_KERNEL_STARTED:-$(date +%s)}"
-
+  # directory because the engine starts here.
   cd "$AIXODIA_HOME" || die "cannot enter $AIXODIA_HOME"
   nohup "$resolved" >>"$LOG_FILE" 2>&1 &
   pid=$!

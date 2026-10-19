@@ -17,12 +17,9 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Path is where the store lives. AIXODIA_DB_PATH wins; Kaggle's writable
-// directory is /kaggle/working; a development checkout keeps it beside itself.
+// Path is where the store lives: Kaggle's writable directory is
+// /kaggle/working, and a development checkout keeps it beside itself.
 func Path() string {
-	if path := strings.TrimSpace(os.Getenv("AIXODIA_DB_PATH")); path != "" {
-		return path
-	}
 	if st, err := os.Stat("/kaggle/working"); err == nil && st.IsDir() {
 		return "/kaggle/working/aixodia.db"
 	}

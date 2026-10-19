@@ -25,7 +25,9 @@ func TestPublishHandoverWritesTheLocalNote(t *testing.T) {
 		storeDB = nil
 		sessionStore = nil
 	})
-	t.Setenv("AIXODIA_KERNEL_STARTED", "1700000000")
+	was := startedAt
+	startedAt = 1700000000
+	t.Cleanup(func() { startedAt = was })
 
 	created, err := sessionStore.Create(session.NewSession{Title: "ค้างไว้"})
 	if err != nil {
