@@ -99,3 +99,91 @@ test("the phone is told when the engine attaches and when it leaves", async () =
 
   p.ws.close();
 });
+
+const waitRaw = (c, n, ms = 8000) => timed(new Promise((res) => {
+  const t0 = Date.now();
+  const tick = () => {
+    const hit = c.raw.find((b) => b.length === n);
+    if (hit) return res(hit);
+    if (Date.now() - t0 > ms) return res(undefined);
+    setTimeout(tick, 25);
+  };
+  tick();
+}), ms + 1000, "binary frame");
+
+test("relays a 32 KiB binary frame in both directions", async () => {
+  const eng = await dial("t5sz");
+  await eng.engine(1);
+  const ph = await dial("t5sz");
+  await ph.phone();
+
+  const up = Buffer.alloc(32 * 1024, 7);
+  await eng.send(up);
+  const gotUp = await waitRaw(ph, up.length);
+  assert.ok(gotUp, "engine->phone binary frame");
+  assert.equal(gotUp.length, up.length);
+  assert.equal(gotUp[0], 7);
+
+  const down = Buffer.alloc(32 * 1024, 9);
+  await ph.send(down);
+  const gotDown = await waitRaw(eng, down.length);
+  assert.ok(gotDown, "phone->engine binary frame");
+  assert.equal(gotDown[down.length - 1], 9);
+
+  eng.ws.close();
+  ph.ws.close();
+});
+
+test("survives a long idle gap (hibernation) and still routes", async () => {  const eng = await dial("t5hiber");
+  await eng.engine(1);
+  const ph = await dial("t5hiber");
+  await ph.phone();
+
+  await ph.send("before-idle");
+  assert.equal(await eng.waitFor("before-idle"), "before-idle");
+
+  await new Promise((r) => setTimeout(r, 35000));
+
+  await ph.send("after-idle");
+  assert.equal(await eng.waitFor("after-idle", 10000), "after-idle");
+
+  await eng.send("engine-after-idle");
+  assert.equal(await ph.waitFor("engine-after-idle", 10000), "engine-after-idle");
+
+  eng.ws.close();
+  ph.ws.close();
+});
+
+test("a frame sent before the role hello is never forwarded", async () => {
+  const eng = await dial("t5norole");
+  await eng.engine(1);
+  const ph = await dial("t5norole");
+  await ph.phone();
+
+  const ghost = await dial("t5norole");
+  await ghost.send("no-role-here");
+  await new Promise((r) => setTimeout(r, 800));
+  assert.ok(!eng.received.includes("no-role-here"), `engine saw ${JSON.stringify(eng.received)}`);
+
+  ghost.ws.close();
+  eng.ws.close();
+  ph.ws.close();
+});
+
+test("an unknown role hello is ignored and gets no traffic", async () => {
+  const eng = await dial("t5badrole");
+  await eng.engine(1);
+  const ph = await dial("t5badrole");
+  await ph.phone();
+
+  const weird = await dial("t5badrole");
+  await weird.send(JSON.stringify({ role: "router" }));
+  await weird.send("after-bad-role");
+  await new Promise((r) => setTimeout(r, 800));
+  assert.equal(weird.received.length, 0, `stranger saw ${JSON.stringify(weird.received)}`);
+  assert.ok(!eng.received.includes("after-bad-role"));
+
+  weird.ws.close();
+  eng.ws.close();
+  ph.ws.close();
+});

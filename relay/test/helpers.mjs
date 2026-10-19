@@ -14,7 +14,8 @@ function openOnce(name, token) {
       family: 4,
     });
     const received = [];
-    ws.on("message", (d) => received.push(d.toString()));
+    const raw = [];
+    ws.on("message", (d) => { received.push(d.toString()); raw.push(d); });
     const closed = new Promise((r) => ws.on("close", (code, reason) => r({ code, reason: String(reason) })));
     const waitFor = (sub, ms = 5000) => new Promise((res, rej) => {
       const t0 = Date.now();
@@ -28,7 +29,7 @@ function openOnce(name, token) {
     });
     const send = (x) => new Promise((res, rej) => ws.send(x, (e) => (e ? rej(e) : res())));
     ws.on("open", () => resolve({
-      ws, received, closed, waitFor, send,
+      ws, received, raw, closed, waitFor, send,
       ready: Promise.resolve(),
       engine: (started, version = "t") => send(JSON.stringify({ role: "engine", started, version })),
       phone: () => send(JSON.stringify({ role: "phone" })),
