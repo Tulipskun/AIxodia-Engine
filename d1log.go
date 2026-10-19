@@ -32,8 +32,8 @@ var (
 )
 
 func logDBPath() string {
-	if st, err := os.Stat("/kaggle/working"); err == nil && st.IsDir() {
-		return "/kaggle/working/aixodia-logs.db"
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".aixodia", "aixodia-logs.db")
 	}
 	return "./aixodia-logs.db"
 }

@@ -21,6 +21,7 @@ import os
 import queue
 import random
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -78,6 +79,21 @@ TAR = shutil.which("tar")
 FIND = shutil.which("find")
 
 ROOTS = ["/root", "/opt", "/etc", "/var", "/usr"]
+
+# The engine keeps its stores under ~/.aixodia, which is inside the snapshot.
+# They are staged into DB_SNAPSHOT with SQLite's backup API (see _stage_dbs)
+# because packing a database while the engine writes to it is not safe; the
+# live files and their sidecars are left out of the scan.
+DB_DIR = Path.home() / ".aixodia"
+DB_SNAPSHOT = DB_DIR / "snapshot"
+DB_NAMES = ("aixodia.db", "aixodia-logs.db")
+LEGACY_DB_DIR = Path("/kaggle/working")  # pre-~/.aixodia sessions
+_DB_SKIP = tuple(
+    str(DB_DIR / name) + suffix
+    for name in DB_NAMES
+    for suffix in ("", "-journal", "-wal", "-shm")
+) + tuple(str(DB_SNAPSHOT / f".{name}.tmp") for name in DB_NAMES)
+
 SKIP = (
     "/proc", "/sys", "/dev", "/run", "/tmp", "/mnt", "/media", "/kaggle/input",
     "/var/cache", "/var/log", "/var/lib/docker", "/root/.cache", "/root/.npm",
@@ -85,7 +101,7 @@ SKIP = (
     "/etc/mtab", "/etc/secrets", "/kaggle/src", "/kaggle/nbdev", "/kaggle/huggingface",
     "/kaggle/lib", "/root/.julia", "/root/.gradle",
     "/usr/local/lib", "/usr/local/go", "/usr/local/share",
-)
+) + _DB_SKIP
 SKIP_NAMES = {"__pycache__"}
 
 _BASE = None
@@ -395,6 +411,60 @@ def _download(repo, tmp):
     )
 
 
+def _stage_dbs():
+    """Copy the engine's live SQLite stores into DB_SNAPSHOT.
+
+    The engine keeps them under ~/.aixodia, inside the snapshot, but it may be
+    writing while backup() runs: packing the live file would capture a torn
+    page. SQLite's backup API produces a consistent copy (and retries when the
+    engine commits mid-copy); the live files are excluded from the scan above.
+    A session that predates the move still has its stores in /kaggle/working,
+    so fall back to those once - restore() then puts them in the new place.
+    """
+    DB_SNAPSHOT.mkdir(parents=True, exist_ok=True)
+    staged = []
+    for name in DB_NAMES:
+        src = DB_DIR / name
+        if not src.exists():
+            legacy = LEGACY_DB_DIR / name
+            if not legacy.exists():
+                continue
+            src = legacy
+        dst = DB_SNAPSHOT / name
+        tmp = DB_SNAPSHOT / f".{name}.tmp"
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        source = target = None
+        try:
+            source = sqlite3.connect(str(src), timeout=60)
+            target = sqlite3.connect(str(tmp))
+            source.backup(target)
+        finally:
+            if target is not None:
+                target.close()
+            if source is not None:
+                source.close()
+        os.replace(tmp, dst)
+        staged.append(name)
+    if staged:
+        print(f"[sync] staged {', '.join(staged)} for the snapshot")
+    return staged
+
+
+def _restore_dbs():
+    """Put the staged stores where the engine now expects them."""
+    for name in DB_NAMES:
+        src = DB_SNAPSHOT / name
+        if not src.exists():
+            continue
+        dst = DB_DIR / name
+        tmp = DB_DIR / f".{name}.tmp"
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dst)
+
+
 def restore():
     global _PREV, _EXISTS, _SCAN, _BASE, _FRESH_BASE, _BASE_SOURCE, _IMG, _REPO
     t0 = time.time()
@@ -460,6 +530,8 @@ def restore():
                     if f.is_file() and not f.name.endswith(".pub"):
                         os.chmod(f, 0o600)
 
+            _restore_dbs()
+
             print(
                 f"[sync] restore ready in {time.time() - t0:.1f}s "
                 f"({total} files from {len(parts)} archive(s); download {gone:.1f}s + extract {extract:.1f}s; "
@@ -481,6 +553,7 @@ def backup(force=False):
             "index, which is how backup() knows what not to upload"
         )
 
+    _stage_dbs()
     cur = _scan()
     changed, carried = _snapshot_files(cur, _BASE, _PREV)
     user = dict(carried)
