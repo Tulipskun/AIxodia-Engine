@@ -63,7 +63,9 @@ func (c Config) logf(format string, args ...any) {
 }
 
 // Run dials the relay and keeps it dialled until ctx ends or a newer engine
-// takes the room. Reconnects back off from one second to thirty.
+// takes the room. Reconnects back off from one second to ten: the handshake to
+// the relay takes seconds on a phone network, and every second of backoff is a
+// second in which the phone has an open room but no engine in it.
 func Run(ctx context.Context, cfg Config) error {
 	backoff := time.Second
 	for {
@@ -86,7 +88,7 @@ func Run(ctx context.Context, cfg Config) error {
 			return nil
 		case <-time.After(backoff):
 		}
-		if backoff < 30*time.Second {
+		if backoff < 10*time.Second {
 			backoff *= 2
 		}
 	}
