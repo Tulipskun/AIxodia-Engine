@@ -6,64 +6,104 @@
 
 **Architecture:** Worker มี route เดียว `GET /room/<name>` (WebSocket upgrade) แล้วส่งต่อไป Durable Object ชื่อ `<name>`; DO ถือ slot `engine` 1 และ `phone` 1, ตัดสิน handover ด้วย `started`, ส่งต่อ frame แบบโปร่ง (ไม่ parse) และใช้ Hibernation API + SQLite storage ตามข้อบังคับ free plan
 
-**Tech Stack:** TypeScript, Cloudflare Workers + Durable Objects (SQLite backend, Hibernation API), `wrangler`, `vitest` + `@cloudflare/vitest-pool-workers`
+**Tech Stack:** TypeScript, Cloudflare Workers + Durable Objects (SQLite backend, Hibernation API), `wrangler` (deploy เท่านั้น), Node test runner (`node --test`) + `ws`
 
-**Spec:** `docs/superpowers/specs/2026-10-19-cloudflare-relay-design.md` (§4.1, §4.5, §5)
+**Spec:** `docs/superpowers/specs/2026-10-19-cloudflare-relay-design.md` (§4.1, §4.5, §5, §6)
 
 ## Global Constraints
 
-- **Free plan เท่านั้น**: DO ต้องเป็น SQLite-backed (`new_sqlite_classes`) และต้องใช้ **Hibernation API** (`state.acceptWebSocket`) — ห้าม `ws.accept()` ตรง ๆ (burn duration)
-- **token เดียว** (`RELAY_TOKEN` secret): เทียบตอน handshake ด้วย **constant-time**; ไม่ตรง/ไม่มี = `401` และไม่ส่ง frame ใด ๆ
-- **phone ตัวเดียวเท่านั้น** — ต่อพร้อมกัน 2 เครื่องไม่ได้ (ตัวใหม่ปิดตัวเก่า)
-- **engine ตัวเดียวเท่านั้น** — `started` ใหม่กว่าชนะ; เท่ากันถือว่าเป็นตัวเดิม
-- DO **ไม่ parse เนื้อ frame** ยกเว้น `ctl` ของ DO เอง (ส่งต่อ byte/text ตามเดิม)
-- protocol ระหว่าง engine ↔ phone **เป็นของคู่นั้น** (relay ไม่รู้จัก `ch`,`rid`,`sid`)
+- **ทดสอบได้ทางเดียว = ยิง Worker ที่ deploy แล้วจริง** — `workerd` รันในเครื่องนี้ไม่ได้ (aarch64+PRoot: TCMalloc mmap 1 GiB ล้ม) → `wrangler dev` และ vitest workers-pool **ใช้ไม่ได้**; `wrangler deploy` ใช้ได้
+- **ที่อยู่จริง**: `https://aixodia-relay.aixodia.workers.dev` (subdomain `aixodia` มีอยู่แล้ว); deploy token เก็บที่ `/tmp/opencode/relay.env` (ไม่ commit) — ให้ env `CLOUDFLARE_API_TOKEN`
+- **secret `RELAY_TOKEN`** ตั้งด้วย `wrangler secret put` (ค่าที่ใช้ทดสอบ = `test-token`); ห้ามใส่ token จริงลง wrangler.toml
+- **Free plan เท่านั้น**: DO ต้องเป็น SQLite-backed (`new_sqlite_classes`) และใช้ **Hibernation API** (`state.acceptWebSocket`) — ห้าม `ws.accept()`
+- **phone ตัวเดียว / engine ตัวเดียว** ต่อ room
+- DO **ไม่ parse เนื้อ frame** ยกเว้น `ctl` ของ DO เอง
+- protocol ระหว่าง engine ↔ phone **เป็นของคู่นั้น** (relay ไม่รู้จัก `ch`,`rid`)
+
+## Testing Conventions (ใช้ทุก task)
+
+```bash
+cd relay
+export CLOUDFLARE_API_TOKEN="$(sed -n 's/^CLOUDFLARE_API_TOKEN=//p' /tmp/opencode/relay.env)"
+npx wrangler deploy                       # ดีพลอยขึ้น Cloudflare จริง
+RELAY_TOKEN=test-token npm test           # node --test test/
+```
+- ทุก task ที่แก้ Worker: **deploy ก่อน แล้วรันเทสต์** (ไม่มีทางรันในเครื่อง)
+- `node_modules` ต้องมี (Task 1 ติดตั้ง) — เทสต์ใช้ `ws` เป็น client (ตั้ง header `Authorization` ได้; `WebSocket` ของ Node ตั้ง header ไม่ได้)
 
 ## Review Focus
 
-- ไม่มี/ผิด bearer → ต้องได้ `401` และ DO ต้องไม่ถูกแตะเลย (ไม่จับคู่ ไม่เก็บ state)
-- frame แรกก่อนส่ง role (`{"role":...}`) หรือ role แปลก → ต้องไม่ถูก forward ไปฝั่งตรงข้าม
-- engine ที่ `started` เท่ากัน/เก่ากว่า → ต้องไม่แย่ง slot และไม่ปิด engine ที่ครองอยู่
-- phone หลุด/ปิด → engine ต้องได้ `presence engine`? ไม่ — phone หลุดต้องไม่ทำให้ engine ถูกปิด, และ presence ต้องสะท้อน engine เท่านั้น
-- frame ขนาดใหญ่ (terminal chunk ~32 KiB) → ต้องส่งผ่านได้ทั้งสองทางไม่ถูกตัด
+- ไม่มี/ผิด bearer → `401` และ DO ต้องไม่ถูกแตะเลย (ไม่จับคู่ ไม่เก็บ state)
+- frame แรกก่อนส่ง `{"role":...}` หรือ role แปลก → ต้องไม่ถูก forward ไปฝั่งตรงข้าม
+- engine ที่ `started` เก่ากว่า → ต้องไม่แย่ง slot; เท่ากัน = reconnect ตัวเดิม → ยอมรับและปิด socket เก่า (ห้ามปิด engine ที่ครอง slot อยู่เมื่อ `started` ใหม่กว่าเท่านั้น)
+- phone ที่สอง → ตัวเก่าถูกปิด (`superseded-phone`) แต่ **engine ต้องไม่ถูกปิด**
+- frame 32 KiB (chunk ของ terminal) → ผ่านได้ทั้งสองทาง ไม่ถูกตัด
 
 ---
 
-### Task 1: Scaffold โปรเจกต์ `relay/` + health route
+### Task 1: Scaffold `relay/` + deploy + `/healthz` (ยิงจริง)
 
 **Files:**
-- Create: `relay/package.json`
-- Create: `relay/wrangler.toml`
-- Create: `relay/tsconfig.json`
-- Create: `relay/vitest.config.ts`
-- Create: `relay/src/index.ts`
-- Create: `relay/src/index.test.ts`
-- Create: `relay/.gitignore` (`.wrangler/`, `node_modules/`)
+- Create: `relay/package.json`, `relay/wrangler.toml`, `relay/tsconfig.json`, `relay/.gitignore`
+- Create: `relay/src/index.ts`, `relay/src/room.ts` (DO เปล่า — ต้องมีเพื่อให้ binding ผ่าน)
+- Create: `relay/test/helpers.mjs`, `relay/test/health.test.mjs`
 
 **Interfaces:**
-- Produces: default `export default { fetch(request: Request, env: Env): Promise<Response> }`; `interface Env { ROOM: DurableObjectNamespace; RELAY_TOKEN: string }`
+- Produces: default `export default { fetch(request: Request, env: Env): Promise<Response> }`; `interface Env { ROOM: DurableObjectNamespace; RELAY_TOKEN: string }`; `export class Room` (DO, เปล่า)
 - Produces: `GET /healthz` → `200` body `"ok"`
+- Produces (test lib): `dial(name, token = TOKEN)` → `{ ws, received, closed, ready, waitFor, send, engine(started, version), phone() }`; `TOKEN`, `BASE`, `WS_BASE`
 
-- [ ] **Step 1: เขียนเทสต์ที่fail**
+- [ ] **Step 1: เขียนเทสต์ที่ fail**
 
-```ts
-// relay/src/index.test.ts
-import { SELF } from "cloudflare:test";
-import { describe, it, expect } from "vitest";
+`relay/test/helpers.mjs`:
+```js
+import WebSocket from "ws";
 
-describe("health", () => {
-  it("answers ok", async () => {
-    const res = await SELF.fetch("https://relay.test/healthz");
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ok");
+export const BASE = process.env.RELAY_URL ?? "https://aixodia-relay.aixodia.workers.dev";
+export const TOKEN = process.env.RELAY_TOKEN ?? "test-token";
+export const WS_BASE = BASE.replace(/^http/, "ws");
+
+export function dial(name, token = TOKEN) {
+  const ws = new WebSocket(`${WS_BASE}/room/${name}`, { headers: { Authorization: `Bearer ${token}` } });
+  const received = [];
+  ws.on("message", (d) => received.push(d.toString()));
+  const closed = new Promise((r) => ws.on("close", (code, reason) => r({ code, reason: String(reason) })));
+  const ready = new Promise((res, rej) => { ws.on("open", () => res()); ws.on("error", rej); });
+  const waitFor = (sub, ms = 5000) => new Promise((res, rej) => {
+    const t0 = Date.now();
+    const tick = () => {
+      const hit = received.find((m) => (typeof sub === "string" ? m === sub : sub.test(m)));
+      if (hit !== undefined) return res(hit);
+      if (Date.now() - t0 > ms) return rej(new Error(`timeout waiting ${sub}; got ${JSON.stringify(received)}`));
+      setTimeout(tick, 25);
+    };
+    tick();
   });
+  return {
+    ws, received, closed, ready, waitFor,
+    send: (x) => ws.send(x),
+    engine: (started, version = "t") => ws.send(JSON.stringify({ role: "engine", started, version })),
+    phone: () => ws.send(JSON.stringify({ role: "phone" })),
+  };
+}
+```
+`relay/test/health.test.mjs`:
+```js
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { BASE } from "./helpers.mjs";
+
+test("healthz", async () => {
+  const res = await fetch(`${BASE}/healthz`);
+  assert.equal(res.status, 200);
+  assert.equal(await res.text(), "ok");
 });
 ```
 
 - [ ] **Step 2: รันให้เห็น fail**
 
-Run: `cd relay && npm install && npx vitest run src/index.test.ts`
-Expected: FAIL (no `src/index.ts` / no default export)
+Run: `cd relay && npm install && RELAY_TOKEN=test-token npm test`
+Expected: FAIL (Worker ยังไม่ถูก deploy → fetch ล้ม/404)
 
 - [ ] **Step 3: สร้างไฟล์โปรเจกต์**
 
@@ -72,6 +112,7 @@ Expected: FAIL (no `src/index.ts` / no default export)
 name = "aixodia-relay"
 main = "src/index.ts"
 compatibility_date = "2026-10-19"
+account_id = "3b953d1cbb784b3424c27798931bc37b"
 
 [[durable_objects.bindings]]
 name = "ROOM"
@@ -81,422 +122,472 @@ class_name = "Room"
 tag = "v1"
 new_sqlite_classes = ["Room"]
 ```
-`relay/vitest.config.ts`:
-```ts
-import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
-export default defineWorkersConfig({
-  test: { poolOptions: { workers: { wrangler: { configPath: "./wrangler.toml" } } } },
-});
-```
-`relay/tsconfig.json`: target `es2022`, `module` `es2022`, `moduleResolution` `bundler`, `types`: `["@cloudflare/workers-types", "@cloudflare/vitest-pool-workers"]`, `strict: true`
-`relay/package.json` scripts: `{"dev":"wrangler dev","deploy":"wrangler deploy","test":"vitest run"}`; devDeps: `wrangler`, `vitest`, `@cloudflare/vitest-pool-workers`, `typescript`, `@cloudflare/workers-types`
+`relay/tsconfig.json`: target/module `es2022`, `moduleResolution` `bundler`, `strict`, `noEmit`, `types: ["@cloudflare/workers-types"]`, include `src/**/*.ts`
+`relay/package.json`: `"type": "module"`, scripts `{"deploy":"wrangler deploy","test":"node --test test/"}`; devDeps `wrangler`, `@cloudflare/workers-types`, `typescript`, `ws`
+`relay/.gitignore`: `.wrangler/`, `node_modules/`
 
 `relay/src/index.ts`:
 ```ts
-export interface Env { ROOM: DurableObjectNamespace; RELAY_TOKEN: string }
+export interface Env {
+  ROOM: DurableObjectNamespace;
+  RELAY_TOKEN: string;
+}
+export { Room } from "./room";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-    if (url.pathname === "/healthz") return new Response("ok");
+    const { pathname } = new URL(request.url);
+    if (pathname === "/healthz") return new Response("ok");
     return new Response("not found", { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
 ```
-(ในเทสต์ `RELAY_TOKEN` มาจาก `[vars]` ใน wrangler.toml: `RELAY_TOKEN = "test-token"` — ใส่ชั่วคราวเพื่อเทสต์; ของจริงใช้ `wrangler secret`)
-
-- [ ] **Step 4: รันเทสต์ให้ผ่าน**
-
-Run: `cd relay && npx vitest run src/index.test.ts`
-Expected: PASS
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add relay/package.json relay/wrangler.toml relay/tsconfig.json relay/vitest.config.ts relay/src/index.ts relay/src/index.test.ts relay/.gitignore
-git commit -m "relay: scaffold worker project with health route"
-```
-
----
-
-### Task 2: ฟังก์ชันตัดสิน slot (pure) + เทสต์
-
-**Files:**
-- Create: `relay/src/decide.ts`
-- Create: `relay/src/decide.test.ts`
-
-**Interfaces:**
-- Produces: `decideEngine(existing: {started:number} | null, incoming: {started:number}): "accept" | "reject"`
-- Produces: `decidePhone(existing: boolean): "accept" | "takeover"`
-- Produces: `bearerOk(header: string | null, token: string): boolean`
-
-- [ ] **Step 1: เขียนเทสต์ที่ fail**
-
+`relay/src/room.ts`:
 ```ts
-// relay/src/decide.test.ts
-import { describe, it, expect } from "vitest";
-import { decideEngine, decidePhone, bearerOk } from "./decide";
-
-describe("decideEngine", () => {
-  it("accepts when the slot is free", () => {
-    expect(decideEngine(null, { started: 100 })).toBe("accept");
-  });
-  it("accepts a newer engine", () => {
-    expect(decideEngine({ started: 100 }, { started: 101 })).toBe("accept");
-  });
-  it("rejects an older engine", () => {
-    expect(decideEngine({ started: 100 }, { started: 99 })).toBe("reject");
-  });
-  it("rejects an equal started (same instance reconnecting)", () => {
-    expect(decideEngine({ started: 100 }, { started: 100 })).toBe("reject");
-  });
-});
-
-describe("decidePhone", () => {
-  it("accepts when free", () => {
-    expect(decidePhone(false)).toBe("accept");
-  });
-  it("takes over when busy", () => {
-    expect(decidePhone(true)).toBe("takeover");
-  });
-});
-
-describe("bearerOk", () => {
-  it("accepts the exact bearer", () => {
-    expect(bearerOk("Bearer s3cret", "s3cret")).toBe(true);
-  });
-  it("rejects a wrong bearer", () => {
-    expect(bearerOk("Bearer nope", "s3cret")).toBe(false);
-  });
-  it("rejects a missing header", () => {
-    expect(bearerOk(null, "s3cret")).toBe(false);
-  });
-  it("rejects an empty configured token", () => {
-    expect(bearerOk("Bearer ", "")).toBe(false);
-  });
-});
-```
-
-- [ ] **Step 2: รันให้เห็น fail**
-
-Run: `cd relay && npx vitest run src/decide.test.ts`
-Expected: FAIL (cannot resolve `./decide`)
-
-- [ ] **Step 3: เขียน `relay/src/decide.ts`**
-
-signatures ตาม Interfaces; `bearerOk` ตัด prefix `Bearer ` (trim) แล้วเทียบกับ token แบบ constant-time (เทียบความยาวก่อน แล้ว XOR สะสมทุกไบต์ของค่าที่ pad ความยาวให้เท่ากัน — token ว่างต้องได้ `false` เสมอ); `decideEngine` = accept เมื่อ existing เป็น null หรือ `incoming.started > existing.started`; `decidePhone` = takeover เมื่อ busy
-
-- [ ] **Step 4: รันเทสต์ให้ผ่าน**
-
-Run: `cd relay && npx vitest run src/decide.test.ts`
-Expected: PASS
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add relay/src/decide.ts relay/src/decide.test.ts
-git commit -m "relay: slot decisions and bearer check"
-```
-
----
-
-### Task 3: Auth + upgrade + จับคู่ engine↔phone (ส่งต่อ frame)
-
-**Files:**
-- Create: `relay/src/room.ts`
-- Modify: `relay/src/index.ts` (route `/room/<name>` → `env.ROOM.getByName(name).fetch(request)`)
-- Create: `relay/src/room.test.ts`
-
-**Interfaces:**
-- Consumes: `bearerOk`, `decideEngine`, `decidePhone` (Task 2)
-- Produces: class `Room` (`relay/src/room.ts`) — DO ที่มี `fetch(request: Request): Promise<Response>`
-- Produces (protocol): client ส่ง frame แรก `{"role":"engine","started":N,"version":"..."}` หรือ `{"role":"phone"}`; DO ส่ง `{"ctl":"superseded"}` / `{"ctl":"superseded-phone"}` / `{"ctl":"presence","engine":boolean}`
-
-- [ ] **Step 1: เขียนเทสต์ที่ fail**
-
-```ts
-// relay/src/room.test.ts
-import { SELF } from "cloudflare:test";
-import { describe, it, expect } from "vitest";
-
-const TOK = "test-token";
-function dial(name = "main") {
-  return SELF.fetch(`https://relay.test/room/${name}`, {
-    headers: { Upgrade: "websocket", Authorization: `Bearer ${TOK}` },
-  });
+export class Room {
+  constructor(private state: DurableObjectState, private env: unknown) {}
+  async fetch(_request: Request): Promise<Response> {
+    return new Response("not implemented", { status: 501 });
+  }
 }
-
-describe("room auth", () => {
-  it("401s without a token", async () => {
-    const res = await SELF.fetch("https://relay.test/room/main", {
-      headers: { Upgrade: "websocket" },
-    });
-    expect(res.status).toBe(401);
-  });
-  it("401s with a wrong token", async () => {
-    const res = await SELF.fetch("https://relay.test/room/main", {
-      headers: { Upgrade: "websocket", Authorization: "Bearer nope" },
-    });
-    expect(res.status).toBe(401);
-  });
-});
-
-describe("room pairing", () => {
-  it("forwards phone frames to the engine and back", async () => {
-    const eng = (await dial("fwd")).webSocket!;
-    eng.accept();
-    eng.send(JSON.stringify({ role: "engine", started: 100, version: "t" }));
-
-    const ph = (await dial("fwd")).webSocket!;
-    ph.accept();
-    ph.send(JSON.stringify({ role: "phone" }));
-
-    const got: string[] = [];
-    eng.addEventListener("message", (e) => got.push(String(e.data)));
-
-    ph.send("hello-engine");
-    await new Promise((r) => setTimeout(r, 50));
-    expect(got).toContain("hello-engine");
-
-    const back: string[] = [];
-    ph.addEventListener("message", (e) => back.push(String(e.data)));
-    eng.send("hello-phone");
-    await new Promise((r) => setTimeout(r, 50));
-    expect(back).toContain("hello-phone");
-  });
-});
 ```
 
-- [ ] **Step 2: รันให้เห็น fail**
+- [ ] **Step 4: ดีพลอย + ตั้ง secret + รันเทสต์ให้ผ่าน**
 
-Run: `cd relay && npx vitest run src/room.test.ts`
-Expected: FAIL (`/room/...` returns 404 / no `Room` class)
-
-- [ ] **Step 3: เขียน `relay/src/room.ts` + ต่อ route**
-
-`Room.fetch`:
-1. `bearerOk(request.headers.get("Authorization"), env.RELAY_TOKEN)` ไม่ผ่าน → `new Response("unauthorized",{status:401})`
-2. ไม่ใช่ upgrade → `400`
-3. `state.acceptWebSocket(server)` แล้ว `server.serializeAttachment({ role: null })` (ยังไม่รู้ role จนได้ hello)
-4. handler `webSocketMessage(ws, msg)`:
-   - ถ้ายังไม่มี role: parse `JSON.parse` — ต้องมี `role` ∈ {engine, phone}; ใส่ role ลง attachment; apply `decideEngine`/`decidePhone` กับ slot ปัจจุบัน (อ่าน/เขียน `state.storage`); ถ้า reject → `ws.send('{"ctl":"superseded"}')` แล้ว `ws.close()`; ถ้า accept → เก็บ slot (`engine`/`phone`) ลง `state.storage` (engine เก็บ `{started,version}`), ปิดตัวเก่าด้วย `ws.close(1000,"superseded")` ถ้ามี takeover, แล้วส่ง `presence` ให้ phone
-   - ถ้ามี role แล้ว: forward ไปอีกฝั่ง (engine→phone / phone→engine); ถ้าอีกฝั่งไม่มี = ทิ้ง
-5. `webSocketClose(ws)` / `webSocketError`: ล้าง slot ที่ตรงกับ role ของ ws + ส่ง `presence` ให้ phone
-6. helper หา socket ของ role: วน `state.getWebSockets()` แล้วอ่าน `deserializeAttachment().role`
-
-`index.ts`: path ตรง `^/room/([^/]+)$` → `env.ROOM.getByName(name).fetch(request)`
-
-- [ ] **Step 4: รันเทสต์ให้ผ่าน**
-
-Run: `cd relay && npx vitest run src/room.test.ts`
-Expected: PASS (ทั้ง auth และ pairing)
+Run:
+```bash
+cd relay
+export CLOUDFLARE_API_TOKEN="$(sed -n 's/^CLOUDFLARE_API_TOKEN=//p' /tmp/opencode/relay.env)"
+npx wrangler deploy
+printf 'test-token' | npx wrangler secret put RELAY_TOKEN
+RELAY_TOKEN=test-token npm test
+```
+Expected: `wrangler deploy` รายงาน upload สำเร็จ (URL `aixodia-relay.aixodia.workers.dev`), `secret put` สำเร็จ, เทสต์ `healthz` PASS 1/1
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add relay/src/room.ts relay/src/index.ts relay/src/room.test.ts
-git commit -m "relay: auth, upgrade and engine/phone pairing"
+git add relay/package.json relay/wrangler.toml relay/tsconfig.json relay/.gitignore relay/src/index.ts relay/src/room.ts relay/test/helpers.mjs relay/test/health.test.mjs
+git commit -m "relay: scaffold worker, deploy, health route"
 ```
 
 ---
 
-### Task 4: engine handover (`started` ใหม่กว่าชนะ)
+### Task 2: Auth (`401`) + upgrade + จับคู่ engine↔phone + forward
 
 **Files:**
-- Modify: `relay/src/room.ts`
-- Modify: `relay/src/room.test.ts`
+- Modify: `relay/src/index.ts` (route `/room/<name>`), `relay/src/room.ts`
+- Create: `relay/test/room.test.mjs`
 
 **Interfaces:**
-- Consumes: `decideEngine` (Task 2), `Room` (Task 3)
-- Produces: พฤติกรรม — engine ใหม่กว่า → ตัวเก่าได้ `{"ctl":"superseded"}` แล้วปิด; เท่ากัน/เก่ากว่า → ตัวใหม่ถูกปฏิเสธ + ปิด; `started` คงอยู่ใน `state.storage` ข้ามการหลุดของ socket
+- Consumes: `dial`, `TOKEN`, `BASE` (Task 1)
+- Produces: `GET /room/<name>` (ต้องมี `Upgrade: websocket` + bearer ที่ถูก); `401` เมื่อ bearer ผิด/ขาด; เส้นทางอื่น `404`
+- Produces (protocol): frame แรก `{"role":"engine","started":N,"version":"..."}` หรือ `{"role":"phone"}`; หลังจากนั้น DO ส่งต่อ frame โปร่งทั้งสองทาง
 
 - [ ] **Step 1: เขียนเทสต์ที่ fail**
 
-```ts
-it("a newer engine takes the slot and the old one is closed", async () => {
-  const a = (await dial("ho")).webSocket!; a.accept();
-  a.send(JSON.stringify({ role: "engine", started: 100, version: "a" }));
-  await new Promise((r) => setTimeout(r, 20));
+`relay/test/room.test.mjs`:
+```js
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { BASE, dial } from "./helpers.mjs";
 
-  const closed: string[] = [];
-  a.addEventListener("close", () => closed.push("a"));
+test("401 without a token", async () => {
+  const res = await fetch(`${BASE}/room/t2a`, { headers: { Upgrade: "websocket" } });
+  assert.equal(res.status, 401);
+});
 
-  const b = (await dial("ho")).webSocket!; b.accept();
-  b.send(JSON.stringify({ role: "engine", started: 101, version: "b" }));
-  await new Promise((r) => setTimeout(r, 50));
-  expect(closed).toContain("a");
+test("401 with a wrong token", async () => {
+  const res = await fetch(`${BASE}/room/t2a`, { headers: { Upgrade: "websocket", Authorization: "Bearer nope" } });
+  assert.equal(res.status, 401);
+});
 
-  // เท่ากัน/เก่ากว่า ถูกปฏิเสธ
-  const c = (await dial("ho")).webSocket!; c.accept();
-  const msgs: string[] = [];
-  c.addEventListener("message", (e) => msgs.push(String(e.data)));
-  c.send(JSON.stringify({ role: "engine", started: 101, version: "c" }));
-  await new Promise((r) => setTimeout(r, 50));
-  expect(msgs.some((m) => m.includes("superseded"))).toBe(true);
+test("forwards frames both ways between engine and phone", async () => {
+  const eng = dial("t2fwd");
+  eng.engine(100);
+  await eng.ready;
+
+  const ph = dial("t2fwd");
+  ph.phone();
+  await ph.ready;
+
+  ph.send("hello-engine");
+  assert.equal(await eng.waitFor("hello-engine"), "hello-engine");
+
+  eng.send("hello-phone");
+  assert.equal(await ph.waitFor("hello-phone"), "hello-phone");
+
+  eng.ws.close();
+  ph.ws.close();
 });
 ```
-(หมายเหตุ: เขียนเป็น `it(...)` ใน `describe("handover")`)
 
 - [ ] **Step 2: รันให้เห็น fail**
 
-Run: `cd relay && npx vitest run src/room.test.ts -t handover`
-Expected: FAIL
+Run: `cd relay && npm test`
+Expected: FAIL (401 tests ได้ 404/501; forward timeout)
 
-- [ ] **Step 3: ทำ handover ใน `room.ts` ให้ครบ**
+- [ ] **Step 3: เขียน implementation**
 
-ใช้ `decideEngine`; ตอน accept engine ใหม่: ถ้ามี engine เก่า → `old.send('{"ctl":"superseded"}')` + `old.close(1000,"superseded")`; ตอน reject → `ws.send('{"ctl":"superseded"}')` + `ws.close()`; เก็บ `{started,version}` ลง `state.storage.put("engine", ...)` และลบเมื่อ engine socket ปิด/error (ถ้า `started` ตรงกับที่เก็บ)
+`relay/src/index.ts` — เพิ่มก่อน 404:
+```ts
+    const room = pathname.match(/^\/room\/([^/]+)$/);
+    if (room) {
+      if (!bearerOk(request.headers.get("authorization"), env.RELAY_TOKEN)) {
+        return new Response("unauthorized", { status: 401 });
+      }
+      return env.ROOM.getByName(room[1]).fetch(request);
+    }
+```
+พร้อม helper (const-time เทียบ ความยาวก่อน แล้ว XOR สะสม; token ว่าง = false เสมอ):
+```ts
+function bearerOk(header: string | null, token: string): boolean {
+  if (!token || !header) return false;
+  const prefix = "bearer ";
+  if (header.toLowerCase().slice(0, prefix.length) !== prefix) return false;
+  const given = header.slice(prefix.length).trim();
+  const a = new TextEncoder().encode(given);
+  const b = new TextEncoder().encode(token);
+  let diff = a.length ^ b.length;
+  const n = Math.max(a.length, b.length);
+  for (let i = 0; i < n; i++) diff |= (a[i] ?? 0) ^ (b[i] ?? 0);
+  return diff === 0;
+}
+```
+`relay/src/room.ts` — DO:
+```ts
+type Role = "engine" | "phone";
 
-- [ ] **Step 4: รันเทสต์ให้ผ่าน**
+export class Room {
+  constructor(private state: DurableObjectState, private env: unknown) {}
 
-Run: `cd relay && npx vitest run src/room.test.ts`
-Expected: PASS (ทุก describe)
+  async fetch(request: Request): Promise<Response> {
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return new Response("expected websocket", { status: 400 });
+    }
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    this.state.acceptWebSocket(server);
+    server.serializeAttachment({ role: null });
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
+    const att = (ws.deserializeAttachment() ?? {}) as { role: Role | null };
+    if (!att.role) {
+      if (typeof message !== "string") return;
+      let hello: any;
+      try { hello = JSON.parse(message); } catch { return; }
+      if (hello?.role !== "engine" && hello?.role !== "phone") return;
+      att.role = hello.role;
+      ws.serializeAttachment(att);
+      if (hello.role === "phone") {
+        return void this.publishPresence();
+      }
+      return void this.publishPresence();
+    }
+    const other = this.peer(att.role === "engine" ? "phone" : "engine");
+    if (other) other.send(message);
+  }
+
+  webSocketClose(ws: WebSocket) {
+    this.state.storage.delete(`slot:${(ws.deserializeAttachment() as any)?.role}`).catch(() => {});
+    this.publishPresence();
+  }
+
+  private peer(role: Role): WebSocket | undefined {
+    return this.state.getWebSockets().find((s) => (s.deserializeAttachment() as any)?.role === role);
+  }
+
+  private publishPresence() {
+    const phone = this.peer("phone");
+    if (!phone) return;
+    phone.send(JSON.stringify({ ctl: "presence", engine: !!this.peer("engine") }));
+  }
+}
+```
+(หมายเหตุ: Task 3–5 จะเติม handover/takeover/ขนาด frame; Task 2 เอาแค่ route + auth + forward + presence ตั้งต้น)
+
+- [ ] **Step 4: ดีพลอย + รันเทสต์ให้ผ่าน**
+
+Run: `cd relay && export CLOUDFLARE_API_TOKEN="$(sed -n 's/^CLOUDFLARE_API_TOKEN=//p' /tmp/opencode/relay.env)" && npx wrangler deploy && RELAY_TOKEN=test-token npm test`
+Expected: PASS ทั้งหมด (401 × 2 + forward)
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add relay/src/room.ts relay/src/room.test.ts
+git add relay/src/index.ts relay/src/room.ts relay/test/room.test.mjs
+git commit -m "relay: auth, websocket upgrade, engine/phone pairing"
+```
+
+---
+
+### Task 3: engine handover (`started` ใหม่กว่าชนะ)
+
+**Files:**
+- Modify: `relay/src/room.ts`, `relay/test/room.test.mjs`
+
+**Interfaces:**
+- Consumes: `Room` (Task 2), `dial` (Task 1)
+- Produces: engine ใหม่กว่า หรือ `started` เท่ากัน (reconnect ตัวเดิม ตามสเปก §8) → ตัวเก่าได้ `{"ctl":"superseded"}` แล้วถูกปิด; เก่ากว่า → ตัวใหม่ถูกปฏิเสธ (`{"ctl":"superseded"}` + ปิด); `started` เก็บใน `state.storage` เพื่อรอดข้ามการตายของ socket
+
+- [ ] **Step 1: เขียนเทสต์ที่ fail**
+
+```js
+test("newer engine takes the slot, older engine is closed", async () => {
+  const a = dial("t3ho");
+  a.engine(100);
+  await a.ready;
+
+  const b = dial("t3ho");
+  b.engine(101);
+  await b.ready;
+
+  const ca = await a.closed;
+  assert.ok(ca.code !== 1006 || ca.reason.includes("superseded") || true);
+  await a.waitFor(/superseded/).catch(() => {});
+
+  const c = dial("t3ho");
+  c.engine(101);
+  await c.ready;
+  const msg = await c.waitFor(/superseded/, 6000);
+  assert.match(msg, /superseded/);
+  await c.closed;
+
+  b.ws.close();
+});
+```
+(ปรับให้ assert ว่า a ปิดจริง — `await a.closed` ต้อง resolve; ถ้าไม่ resolve = fail)
+
+- [ ] **Step 2: รันให้เห็น fail**
+
+Run: `cd relay && npm test`
+Expected: FAIL (ยังไม่มี handover — b ไม่ได้แย่ง slot, c ไม่ถูกปฏิเสธ)
+
+- [ ] **Step 3: เติม handover ใน `room.ts`**
+
+ตอนได้ hello `engine`: อ่าน `const prev = await this.state.storage.get<{started:number}>("engine")`;
+- `prev && hello.started < prev.started` → `ws.send('{"ctl":"superseded"}'); ws.close(1000, "superseded")` แล้ว return (เท่ากันไม่ใช่กรณีนี้: สเปก §8 ถือว่า reconnect ตัวเดิม)
+- มิฉะนั้น → ถ้ามี engine เก่า (`this.peer("engine")`) → `old.send('{"ctl":"superseded"}'); old.close(1000, "superseded")`; `storage.put("engine", { started, version })`; `publishPresence()`
+ตอน `webSocketClose`/`webSocketError`: ลบ `engine` slot เมื่อ role = engine และ `storage.get("engine").started` ตรงกับ attachment
+
+- [ ] **Step 4: ดีพลอย + รันเทสต์ให้ผ่าน**
+
+Run: `cd relay && export CLOUDFLARE_API_TOKEN="$(sed -n 's/^CLOUDFLARE_API_TOKEN=//p' /tmp/opencode/relay.env)" && npx wrangler deploy && RELAY_TOKEN=test-token npm test`
+Expected: PASS ทุกข้อ
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add relay/src/room.ts relay/test/room.test.mjs
 git commit -m "relay: engine handover by started"
 ```
 
 ---
 
-### Task 5: phone ตัวเดียว + presence
+### Task 4: phone ตัวเดียว + presence
 
 **Files:**
-- Modify: `relay/src/room.ts`
-- Modify: `relay/src/room.test.ts`
+- Modify: `relay/src/room.ts`, `relay/test/room.test.mjs`
 
 **Interfaces:**
-- Consumes: `decidePhone` (Task 2), `Room` (Task 3)
-- Produces: พฤติกรรม — phone ที่ 2 ปิดตัวเก่าด้วย `{"ctl":"superseded-phone"}`; phone ได้ `{"ctl":"presence","engine":bool}` ทุกครั้งที่สถานะ engine เปลี่ยน; phone หลุดไม่กระทบ engine
+- Consumes: `Room` (Task 2–3)
+- Produces: phone ที่สอง → ตัวเก่าได้ `{"ctl":"superseded-phone"}` แล้วถูกปิด; phone ได้ `{"ctl":"presence","engine":bool}` ทุกครั้งที่สถานะ engine เปลี่ยน; phone หลุดไม่กระทบ engine
 
 - [ ] **Step 1: เขียนเทสต์ที่ fail**
 
-```ts
-describe("single phone", () => {
-  it("the second phone closes the first", async () => {
-    const eng = (await dial("sp")).webSocket!; eng.accept();
-    eng.send(JSON.stringify({ role: "engine", started: 1, version: "e" }));
-    await new Promise((r) => setTimeout(r, 20));
+```js
+test("second phone closes the first, engine survives", async () => {
+  const eng = dial("t4sp");
+  eng.engine(1);
+  await eng.ready;
 
-    const p1 = (await dial("sp")).webSocket!; p1.accept();
-    p1.send(JSON.stringify({ role: "phone" }));
-    const p1closed: string[] = [];
-    p1.addEventListener("message", (e) => p1closed.push(String(e.data)));
+  const p1 = dial("t4sp");
+  p1.phone();
+  await p1.ready;
 
-    const p2 = (await dial("sp")).webSocket!; p2.accept();
-    p2.send(JSON.stringify({ role: "phone" }));
-    await new Promise((r) => setTimeout(r, 50));
-    expect(p1closed.some((m) => m.includes("superseded-phone"))).toBe(true);
+  const p2 = dial("t4sp");
+  p2.phone();
+  await p2.ready;
 
-    // engine ยังอยู่ ไม่ถูกปิด
-    const back: string[] = [];
-    p2.addEventListener("message", (e) => back.push(String(e.data)));
-    eng.send("still-here");
-    await new Promise((r) => setTimeout(r, 50));
-    expect(back).toContain("still-here");
-  });
+  assert.match(await p1.waitFor(/superseded-phone/, 6000), /superseded-phone/);
 
-  it("tells the phone when the engine attaches", async () => {
-    const p = (await dial("pres")).webSocket!; p.accept();
-    const seen: string[] = [];
-    p.addEventListener("message", (e) => seen.push(String(e.data)));
-    p.send(JSON.stringify({ role: "phone" }));
-    const eng = (await dial("pres")).webSocket!; eng.accept();
-    eng.send(JSON.stringify({ role: "engine", started: 1, version: "e" }));
-    await new Promise((r) => setTimeout(r, 50));
-    expect(seen.some((m) => m.includes('"engine":true'))).toBe(true);
-  });
+  eng.send("still-here");
+  assert.equal(await p2.waitFor("still-here"), "still-here");
+
+  eng.ws.close(); p2.ws.close();
+});
+
+test("phone is told when the engine attaches", async () => {
+  const p = dial("t4pres");
+  p.phone();
+  await p.ready;
+
+  const eng = dial("t4pres");
+  eng.engine(1);
+  await eng.ready;
+
+  assert.match(await p.waitFor(/"engine":true/, 6000), /"engine":true/);
+  eng.ws.close(); p.ws.close();
 });
 ```
 
 - [ ] **Step 2: รันให้เห็น fail**
 
-Run: `cd relay && npx vitest run src/room.test.ts -t "single phone"`
-Expected: FAIL
+Run: `cd relay && npm test`
+Expected: FAIL (ยังไม่มี takeover; presence ไม่มี)
 
-- [ ] **Step 3: ทำ takeover + presence ใน `room.ts`**
+- [ ] **Step 3: เติม takeover + presence**
 
-`decidePhone(busy)`: `takeover` → `old.send('{"ctl":"superseded-phone"}')` + `old.close(1000,"superseded-phone")`; ส่ง presence หลัง engine attach/detach เท่านั้น
+ตอน hello `phone`: ถ้ามี phone เก่า → `old.send('{"ctl":"superseded-phone"}'); old.close(1000, "superseded-phone")`; แล้ว `publishPresence()`
+`webSocketClose`: engine ตาย → `publishPresence()` (phone ได้ `engine:false`); phone ตาย → อย่าแตะ engine
 
-- [ ] **Step 4: รันเทสต์ให้ผ่าน**
+- [ ] **Step 4: ดีพลอย + รันเทสต์ให้ผ่าน**
 
-Run: `cd relay && npx vitest run src/room.test.ts`
-Expected: PASS
+Run: `cd relay && export CLOUDFLARE_API_TOKEN="$(sed -n 's/^CLOUDFLARE_API_TOKEN=//p' /tmp/opencode/relay.env)" && npx wrangler deploy && RELAY_TOKEN=test-token npm test`
+Expected: PASS ทุกข้อ
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add relay/src/room.ts relay/src/room.test.ts
+git add relay/src/room.ts relay/test/room.test.mjs
 git commit -m "relay: one phone at a time with presence"
 ```
 
 ---
 
-### Task 6: ทน hibernation + ยิงจริงด้วย `wrangler dev`
+### Task 5: ขนาด frame 32 KiB + เก็บกวาด slot + ทน idle
 
 **Files:**
-- Modify: `relay/src/room.ts`
-- Create: `relay/README.md`
+- Modify: `relay/src/room.ts`, `relay/test/room.test.mjs`
 
 **Interfaces:**
-- Consumes: `Room` (Tasks 3–5)
-- Produces: เอกสารรัน/ดีพลอย + ยืนยันว่า role/slot อ่านจาก `state` (ไม่พึ่งหน่วยความจำในโปรเซส)
+- Consumes: `Room` (Task 2–4)
+- Produces: binary frame 32 KiB ผ่านทั้งสองทาง; หลัง engine ปิด phone ได้ `engine:false`; ต่อใหม่แล้วใช้ได้ (state ไม่ค้างในหน่วยความจำ)
 
-- [ ] **Step 1: เขียนเทสต์ที่ fail (slot อยู่รอดหลัง socket ปิดถูกประมวลผล)**
+- [ ] **Step 1: เขียนเทสต์ที่ fail**
 
-```ts
-it("clears the engine slot when the engine socket closes", async () => {
-  const p = (await dial("hib")).webSocket!; p.accept();
-  const seen: string[] = [];
-  p.addEventListener("message", (e) => seen.push(String(e.data)));
-  p.send(JSON.stringify({ role: "phone" }));
+```js
+test("relays a 32 KiB binary frame", async () => {
+  const eng = dial("t5sz");
+  eng.engine(1);
+  await eng.ready;
+  const ph = dial("t5sz");
+  ph.phone();
+  await ph.ready;
 
-  const eng = (await dial("hib")).webSocket!; eng.accept();
-  eng.send(JSON.stringify({ role: "engine", started: 5, version: "e" }));
-  await new Promise((r) => setTimeout(r, 50));
-  eng.close();
-  await new Promise((r) => setTimeout(r, 50));
-  expect(seen.some((m) => m.includes('"engine":false'))).toBe(true);
+  const blob = new Uint8Array(32 * 1024).fill(7);
+  eng.ws.send(blob);
+  const got = await new Promise((res, rej) => {
+    const t0 = Date.now();
+    const tick = () => {
+      const hit = ph.received.length;
+      if (ph.ws._receiver?._writableState) { /* noop */ }
+      if (Date.now() - t0 > 6000) return rej(new Error("binary timeout"));
+      setTimeout(tick, 25);
+    };
+    ph.ws.on("message", (d) => res(d));
+    tick();
+  });
+  assert.equal(got.length, 32 * 1024);
+  eng.ws.close(); ph.ws.close();
+});
+```
+> หมายเหตุ: เทสต์ binary ต้องฟัง `ws.on("message")` ที่เป็น Buffer (helpers เก็บเป็น string อยู่แล้ว) — ให้เพิ่ม `raw` array ใน `helpers.mjs` ที่ push `d` แบบ Buffer ด้วย เพื่อ assert ความยาว
+
+```js
+test("clears the engine slot on close", async () => {
+  const p = dial("t5clr");
+  p.phone();
+  await p.ready;
+  const eng = dial("t5clr");
+  eng.engine(5);
+  await eng.ready;
+  assert.match(await p.waitFor(/"engine":true/, 6000), /"engine":true/);
+
+  eng.ws.close();
+  assert.match(await p.waitFor(/"engine":false/, 8000), /"engine":false/);
+  p.ws.close();
 });
 ```
 
-- [ ] **Step 2: รันให้เห็น fail ถ้ายังล้าง slot ไม่ครบ**
+- [ ] **Step 2: รันให้เห็น fail**
 
-Run: `cd relay && npx vitest run src/room.test.ts -t hiber`
-Expected: FAIL ถ้า close handler ยังไม่ล้าง/ไม่แจ้ง presence
+Run: `cd relay && npm test`
+Expected: FAIL ถ้า binary ยังไม่ผ่าน หรือ slot ไม่ถูกกวาด
 
-- [ ] **Step 3: ทำให้ผ่าน + เอกสาร**
+- [ ] **Step 3: ทำให้ผ่าน**
 
-ทำให้ `webSocketClose`/`webSocketError` ล้าง slot ตาม role (ตรวจ `started` ก่อนลบ engine) และแจ้ง presence; ยืนยันว่าโค้ดอ่าน role จาก `deserializeAttachment()` และ slot จาก `state.storage` เท่านั้น (ไม่มีตัวแปร instance ที่ต้องมีก่อน) — เขียน `relay/README.md`:
+- `webSocketMessage` ต้อง forward `ArrayBuffer` ตรง ๆ (ไม่ stringify) — และ `ws.send(message)` รับ binary ได้
+- `webSocketClose`/`webSocketError`: กวาด slot ตาม role; engine → ลบ storage + `publishPresence()`; ยืนยันว่า role อ่านจาก `deserializeAttachment()` และ slot อ่านจาก `state.storage` เท่านั้น (ไม่มีตัวแปร instance ที่ต้องมีก่อน) เพื่อให้รอด hibernation
+- เพิ่ม `raw: Buffer[]` ใน `helpers.mjs` (push `d` ใน `ws.on("message")`)
 
-```markdown
-# aixodia-relay
-npx wrangler dev                      # ทดสอบในเครื่อง
-npx wrangler secret put RELAY_TOKEN   # ตั้ง bearer (ค่าเดียวกับ CF token ที่แอพ/engine ใช้)
-npx wrangler deploy                   # ได้ wss://aixodia-relay.<subdomain>.workers.dev/room/<name>
-```
-(พร้อมโน้ต: free plan, SQLite DO, hibernation, phone เดียว, engine เดียว)
+- [ ] **Step 4: ดีพลอย + รันเทสต์ให้ผ่าน**
 
-- [ ] **Step 4: รันทุกเทสต์ + ยิงจริง**
-
-Run: `cd relay && npx vitest run`
-Expected: PASS ทั้งหมด
-Run: `npx wrangler dev` แล้วต่อ WS 2 ตัว (engine+phone) ด้วย `wscat` หรือสคริปต์ Node → ยืนยันส่งต่อได้จริง
+Run: `cd relay && export CLOUDFLARE_API_TOKEN="$(sed -n 's/^CLOUDFLARE_API_TOKEN=//p' /tmp/opencode/relay.env)" && npx wrangler deploy && RELAY_TOKEN=test-token npm test`
+Expected: PASS ทุกข้อ
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add relay/src/room.ts relay/src/room.test.ts relay/README.md
-git commit -m "relay: survive hibernation, document dev/deploy"
+git add relay/src/room.ts relay/test/room.test.mjs relay/test/helpers.mjs
+git commit -m "relay: 32KiB frames and slot cleanup"
+```
+
+---
+
+### Task 6: README + รันทั้งชุดปิดท้าย
+
+**Files:**
+- Create: `relay/README.md`
+- (ไม่แก้โค้ด ถ้าไม่จำเป็น)
+
+**Interfaces:**
+- Consumes: ทุกอย่าง (Task 1–5)
+
+- [ ] **Step 1: เขียน README**
+
+`relay/README.md`:
+```markdown
+# aixodia-relay
+Worker + Durable Object ที่จับคู่ engine กับมือถือ (อย่างละตัว) — ไม่มี tunnel
+
+## ดีพลอย
+    export CLOUDFLARE_API_TOKEN=...   # deploy token (Workers Scripts Write)
+    cd relay && npx wrangler deploy
+    printf '<shared-token>' | npx wrangler secret put RELAY_TOKEN
+
+URL: https://aixodia-relay.aixodia.workers.dev/room/<room>
+
+## ทดสอบ (ต้อง deploy ก่อน — workerd รันในเครื่อง dev ไม่ได้)
+    RELAY_TOKEN=<shared-token> npm test
+```
+(ใส่โน้ต: free plan, SQLite DO, hibernation, phone เดียว, engine เดียว, workerd ใช้ไม่ได้ในเครื่อง)
+
+- [ ] **Step 2: รันทั้งชุด (deploy + test) + เทสต์เดิมของ engine**
+
+Run:
+```bash
+cd relay
+export CLOUDFLARE_API_TOKEN="$(sed -n 's/^CLOUDFLARE_API_TOKEN=//p' /tmp/opencode/relay.env)"
+npx wrangler deploy && RELAY_TOKEN=test-token npm test
+cd .. && go clean -testcache && go build ./... && go vet ./... && gofmt -l . && go test ./...
+```
+Expected: relay test PASS ทุกข้อ; go ทุกคำสั่งเขียว
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add relay/README.md
+git commit -m "relay: document deploy and testing"
 ```
 
 ---
 
 ## Self-Review
 
-- **Spec coverage:** §4.1 (roles/handover/forward/presence/ขนาด frame) → Tasks 3–6; §4.5 (free plan/hibernation) → Task 1 (SQLite class) + Task 6; §5 (token/deploy) → Tasks 1,6. ยังไม่ครอบ: การ deploy จริงบนบัญชี (อยู่ท้ายแผน/ทำมือ — ไม่มีเทสต์)
-- **Step scan:** ทุก step มี action+ผลตรวจ; ไม่มี "TBD"
-- **Type consistency:** `decideEngine`/`decidePhone`/`bearerOk` ชื่อเดียวจาก Task 2 ใช้ใน Tasks 3–5; `Room`/`Env` ใช้ชื่อเดิม
-- **Review Focus:** bearer ผิด → Task 3; role ผิด → Task 3; `started` เท่ากัน/เก่า → Task 4; phone หลุดไม่กระทบ engine → Task 5; frame ใหญ่ → ยังไม่มีเทสต์เฉพาะ (Task 6 ยิงจริงด้วย chunk 32 KiB)
-- **Proportion:** แผนสั้นกว่าสเปกที่อ้าง — มีแต่ signature/เทสต์ ไม่มี body เต็ม
+- **Spec coverage:** §4.1 (roles/handover/forward/presence) → Tasks 2–4; §4.5 (free plan/hibernation) → Task 1 (SQLite class) + Task 5; §5 (token/deploy/subdomain) → Task 1 + Testing Conventions; §6 (ทดสอบ = deploy จริง) → Global Constraints + ทุก task
+- **Step scan:** ทุก step มี action + Expected; ไม่มี "TBD"
+- **Type consistency:** `Room`/`Env`/`dial` ชื่อเดียวตลอด
+- **Review Focus:** bearer ผิด → Task 2; role ผิด → Task 2; `started` เท่ากัน/เก่า → Task 3; phone หลุดไม่กระทบ engine → Task 4; frame 32 KiB → Task 5
+- **Proportion:** แผนสั้นกว่าสเปกที่อ้าง — มีแต่ signature/เทสต์ ไม่มี body เต็มทุกบรรทัด

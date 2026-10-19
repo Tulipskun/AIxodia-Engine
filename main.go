@@ -10,12 +10,13 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"aixodia-engine/db"
 	"aixodia-engine/io/gateway"
 	"aixodia-engine/io/mobile"
+	"aixodia-engine/io/relay"
 	"aixodia-engine/io/terminal"
 	"aixodia-engine/localdb"
 	"aixodia-engine/provider/registry"
@@ -105,7 +107,8 @@ func main() {
 	mux.Handle("/ws", hub.Handler(token, chatViaGateway(gw, model)))
 	// The terminal checks the token itself: a pattern this specific wins over
 	// the "/" catch-all below, so RequireToken never sees this path.
-	mux.Handle("/terminal", terminal.NewServer(token).Handler())
+	termSrv := terminal.NewServer(token)
+	mux.Handle("/terminal", termSrv.Handler())
 	mux.Handle("/", gateway.RequireToken(token, gw))
 	server := &http.Server{
 		Addr:    "127.0.0.1:8787",
@@ -118,32 +121,78 @@ func main() {
 		}
 	}()
 
-	path, err := exec.LookPath("cloudflared")
-	if err != nil {
-		log.Fatalf("tunnel: %v", err)
-	}
 	publishing := os.Getenv("AIXODIA_PUBLISH") != "0"
+
+	// The public address is the relay room, not a tunnel this process starts:
+	// the engine dials out, so it needs no inbound port and no cloudflared.
+	relayBase := strings.TrimSpace(os.Getenv("AIXODIA_RELAY"))
+	if relayBase == "" {
+		relayBase = "wss://aixodia-relay.aixodia.workers.dev"
+	}
+	room := strings.TrimSpace(os.Getenv("AIXODIA_ROOM"))
+	if room == "" {
+		room = "aixodia"
+	}
+	relayToken := strings.TrimSpace(os.Getenv("AIXODIA_RELAY_TOKEN"))
+	if relayToken == "" {
+		relayToken = token
+	}
+	roomPath := "/room/" + url.PathEscape(room)
+	roomURL := strings.TrimRight(relayBase, "/") + roomPath
+	publicURL := strings.Replace(strings.Replace(roomURL, "wss://", "https://", 1), "ws://", "http://", 1)
+
+	var relayUp atomic.Bool
 	noted := false
-	daemon := newKeeper(path, func(url string) {
+	onConnect := func() {
+		relayUp.Store(true)
+		log.Print("relay: connected")
 		if !publishing {
-			log.Print("local test mode: tunnel not published to D1")
+			log.Print("local test mode: relay not published to D1")
 			return
 		}
-		if err := db.SaveDaemon(url, versionString(), time.Now().Unix()); err != nil {
+		if err := db.SaveDaemon(publicURL, versionString(), time.Now().Unix()); err != nil {
 			log.Printf("save daemon: %v", err)
 			return
 		}
 		log.Print("daemon url saved")
-		// The note names a URL that is already reachable, so it is written after
-		// the daemon keys; it is written once per process, not on every restart.
+		// The note names an address that is already reachable, so it is written
+		// after the daemon keys; it is written once per process, not on every
+		// reconnect.
 		if !noted {
 			noted = true
-			publishHandover(ctx, url)
+			publishHandover(ctx, publicURL)
 		}
-	})
-	go daemon.run(ctx)
+	}
+	onDisconnect := func() { relayUp.Store(false) }
+
+	// RPC requests come from a socket the relay already authenticated, so the
+	// gateway is served whole. The phone and terminal sockets are deliberately
+	// absent: they are transport, and the relay owns that transport already.
+	rpcMux := http.NewServeMux()
+	rpcMux.Handle("/", gateway.RequireToken(token, gw))
+
+	log.Printf("relay: dialling %s", roomURL)
+	go func() {
+		err := relay.Run(ctx, relay.Config{
+			URL:          roomURL,
+			Token:        relayToken,
+			APIToken:     token,
+			Started:      startedAt,
+			Version:      versionString(),
+			Hub:          hub,
+			Chat:         chatViaGateway(gw, model),
+			API:          rpcMux,
+			Term:         termSrv,
+			OnConnect:    onConnect,
+			OnDisconnect: onDisconnect,
+		})
+		if errors.Is(err, relay.ErrSuperseded) {
+			log.Print("relay: a newer engine took the room; exiting")
+			stop()
+		}
+	}()
 	if publishing {
-		go startHeartbeat(ctx, stop, daemon.alive)
+		go startHeartbeat(ctx, stop, relayUp.Load)
 	}
 
 	<-ctx.Done()
@@ -399,7 +448,7 @@ type heartbeatDeps struct {
 // tunnel is exactly what makes the phone adopt a URL it cannot dial.
 func heartbeatOnce(started int64, alive func() bool, deps heartbeatDeps) bool {
 	if !alive() {
-		log.Print("heartbeat: tunnel is down; not refreshing the daemon keys")
+		log.Print("heartbeat: relay is down; not refreshing the daemon keys")
 		return true
 	}
 	newer, err := deps.newer(started)
