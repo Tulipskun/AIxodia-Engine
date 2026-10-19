@@ -208,6 +208,13 @@ func (p *peer) send(f outFrame) error {
 	return wsock.WriteFrame(p.conn, wsock.OpText, data)
 }
 
+// ServeConn serves an already-established connection: the relay hands it the
+// virtual connection that carries the phone's frames, so the socket policy
+// (bearer, upgrade) has happened elsewhere and the hub only speaks frames.
+func (h *Hub) ServeConn(conn net.Conn, chat ChatFunc) {
+	h.serve(conn, bufio.NewReader(conn), chat)
+}
+
 func (h *Hub) serve(conn net.Conn, r *bufio.Reader, chat ChatFunc) {
 	p := &peer{conn: conn, cancels: map[string]activeTurn{}}
 	h.add(p)

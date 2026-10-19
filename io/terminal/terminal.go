@@ -165,6 +165,41 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 
+// Attach serves an already-established connection as terminal session id,
+// creating the session when the id is new. The relay uses it for terminal
+// streams that arrive over its single socket; the handshake and bearer check
+// belong to the relay's socket, not here.
+func (s *Server) Attach(conn net.Conn, id string, cols, rows int) error {
+	s.mu.Lock()
+	for k, v := range s.sess {
+		if v.dead {
+			delete(s.sess, k)
+		}
+	}
+	full := len(s.sess) >= s.limit()
+	s.mu.Unlock()
+	if full {
+		return errors.New("too many terminals")
+	}
+	if id == "" {
+		id = newID()
+	}
+	if cols <= 0 {
+		cols = 80
+	}
+	if rows <= 0 {
+		rows = 24
+	}
+	c, r := uint16(clamp(cols)), uint16(clamp(rows))
+	dir, sh := termDir(), s.shell()
+	sess, err := s.acquireSession(id, c, r, dir, sh)
+	if err != nil {
+		return err
+	}
+	go s.serve(conn, bufio.NewReader(conn), nil, sess, id, c, r, dir, sh)
+	return nil
+}
+
 func (s *Server) serve(conn net.Conn, br *bufio.Reader, r *http.Request, sess *session, id string, cols, rows uint16, dir, sh string) {
 	// attach
 	sub := &subscriber{conn: conn}
