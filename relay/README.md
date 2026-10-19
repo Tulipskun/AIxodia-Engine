@@ -34,3 +34,20 @@ RELAY_TOKEN=<shared-token> npm test
 - `src/index.ts` — Worker: `/healthz`, auth, route `/room/<name>`
 - `src/room.ts` — Durable Object: slot engine/phone, handover, presence, forward
 - `test/` — Node test runner + `ws` client
+
+## ฝั่ง engine และแอพ
+
+engine ต่อออกมาที่ห้องเดียวและถือ socket ไว้ตลอด; แอพถืออีกฝั่งของห้องเดียวกัน
+ทุกอย่างจึงผ่าน WS เส้นเดียว ไม่มี inbound port และไม่มี cloudflared
+
+| ตัวแปร | ค่าเริ่มต้น | ความหมาย |
+|---|---|---|
+| `AIXODIA_RELAY` | `wss://aixodia-relay.aixodia.workers.dev` | base ของ Worker |
+| `AIXODIA_ROOM` | `aixodia` | ชื่อห้อง (Durable Object) |
+| `AIXODIA_RELAY_TOKEN` | ค่าของ `CF_TOKEN` | bearer ที่ engine ส่งให้ Worker |
+
+Worker ต้องตั้ง `RELAY_TOKEN` ให้ตรงกับค่านี้ ถ้าใช้ค่าเริ่มต้น (CF token)
+ก็ `printf '<CF_TOKEN>' | npx wrangler secret put RELAY_TOKEN` ครั้งเดียว
+
+engine เขียน `daemon/url` ใน D1 เป็น `https://<worker>/room/<room>` ตอนเชื่อมต่อได้
+และหยุดเขียน heartbeat ตอนหลุด แอพจึงรู้ว่า online/offline เหมือนเดิม
