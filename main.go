@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
@@ -119,24 +118,32 @@ func main() {
 		}
 	}()
 
-	url, err := startTunnel(ctx)
+	path, err := exec.LookPath("cloudflared")
 	if err != nil {
 		log.Fatalf("tunnel: %v", err)
 	}
-	log.Printf("tunnel url: %s", url)
-
-	if os.Getenv("AIXODIA_PUBLISH") == "0" {
-		log.Printf("local test mode: tunnel not published to D1")
-	} else {
+	publishing := os.Getenv("AIXODIA_PUBLISH") != "0"
+	noted := false
+	daemon := newKeeper(path, func(url string) {
+		if !publishing {
+			log.Print("local test mode: tunnel not published to D1")
+			return
+		}
 		if err := db.SaveDaemon(url, versionString(), time.Now().Unix()); err != nil {
-			log.Fatalf("save daemon: %v", err)
+			log.Printf("save daemon: %v", err)
+			return
 		}
 		log.Print("daemon url saved")
-		// The note is written after the daemon keys so it names a URL that is
-		// already reachable, and before the heartbeat so the record of this
-		// session exists even if the next line fails.
-		publishHandover(ctx, url)
-		go startHeartbeat(ctx, stop)
+		// The note names a URL that is already reachable, so it is written after
+		// the daemon keys; it is written once per process, not on every restart.
+		if !noted {
+			noted = true
+			publishHandover(ctx, url)
+		}
+	})
+	go daemon.run(ctx)
+	if publishing {
+		go startHeartbeat(ctx, stop, daemon.alive)
 	}
 
 	<-ctx.Done()
@@ -173,57 +180,6 @@ func startConfigReloader(ctx context.Context) {
 			}
 		}
 	}()
-}
-
-var tunnelURL = regexp.MustCompile(`https://[A-Za-z0-9.-]+\.trycloudflare\.com`)
-
-// startTunnel publishes localhost:8787 through a Cloudflare quick tunnel
-// and returns the random public URL. It needs the cloudflared binary.
-func startTunnel(ctx context.Context) (string, error) {
-	path, err := exec.LookPath("cloudflared")
-	if err != nil {
-		return "", errors.New("cloudflared not found in PATH")
-	}
-	child := context.Background()
-	cmd := exec.CommandContext(child, path, "tunnel", "--no-autoupdate",
-		"--metrics", "127.0.0.1:0", "--url", "http://127.0.0.1:8787")
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return "", err
-	}
-	if err := cmd.Start(); err != nil {
-		return "", err
-	}
-	found := make(chan string, 1)
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		scanner.Buffer(make([]byte, 64*1024), 64*1024)
-		for scanner.Scan() {
-			if match := tunnelURL.FindString(scanner.Text()); match != "" {
-				select {
-				case found <- match:
-				default:
-				}
-			}
-		}
-	}()
-	select {
-	case url := <-found:
-		go func() {
-			<-ctx.Done()
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-		}()
-		return url, nil
-	case <-time.After(45 * time.Second):
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return "", fmt.Errorf("timed out waiting for the trycloudflare URL")
-	case <-ctx.Done():
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return "", ctx.Err()
-	}
 }
 
 // chatViaGateway answers one message by calling the HTTP chat route in-process
@@ -429,25 +385,52 @@ var startedAt = time.Now().Unix()
 
 const versionTag = "aixodia-engine/1.1"
 
-// startHeartbeat keeps the daemon keys current so the app can find
-// this daemon and read its uptime. Before each write it checks whether a newer
-// engine has taken them; if so it calls stop so this older instance shuts
-// down.
-func startHeartbeat(ctx context.Context, stop context.CancelFunc) {
-	beat := func() bool {
-		newer, err := newerDaemonRunning(startedAt)
-		if err != nil {
-			log.Printf("heartbeat guard: %v", err)
-		}
-		if newer {
-			log.Print("heartbeat: a newer aixodia-engine took over; stopping")
-			stop()
-			return false
-		}
-		if err := db.TouchDaemon(versionString(), time.Now().Unix()); err != nil {
-			log.Printf("heartbeat: %v", err)
-		}
+// heartbeatDeps are the daemon-key calls a heartbeat makes. They are a struct so
+// a test can watch the write without D1.
+type heartbeatDeps struct {
+	newer func(started int64) (bool, error)
+	touch func(version string, at int64) error
+	now   func() int64
+}
+
+// heartbeatOnce performs one heartbeat and reports whether this engine should
+// keep running. While the tunnel is down it stops refreshing daemon/heartbeat:
+// the app reads a fresh heartbeat as "online", so touching it with a dead
+// tunnel is exactly what makes the phone adopt a URL it cannot dial.
+func heartbeatOnce(started int64, alive func() bool, deps heartbeatDeps) bool {
+	if !alive() {
+		log.Print("heartbeat: tunnel is down; not refreshing the daemon keys")
 		return true
+	}
+	newer, err := deps.newer(started)
+	if err != nil {
+		log.Printf("heartbeat guard: %v", err)
+	}
+	if newer {
+		log.Print("heartbeat: a newer aixodia-engine took over; stopping")
+		return false
+	}
+	if err := deps.touch(versionString(), deps.now()); err != nil {
+		log.Printf("heartbeat: %v", err)
+	}
+	return true
+}
+
+// startHeartbeat keeps the daemon keys current so the app can find
+// this daemon and read its uptime. It only writes while the tunnel is alive,
+// and it stops this instance when a newer engine has taken the keys.
+func startHeartbeat(ctx context.Context, stop context.CancelFunc, alive func() bool) {
+	deps := heartbeatDeps{
+		newer: newerDaemonRunning,
+		touch: db.TouchDaemon,
+		now:   func() int64 { return time.Now().Unix() },
+	}
+	beat := func() bool {
+		if heartbeatOnce(startedAt, alive, deps) {
+			return true
+		}
+		stop()
+		return false
 	}
 	if !beat() {
 		return
