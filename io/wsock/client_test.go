@@ -234,7 +234,10 @@ func TestClientLivenessSurvivesPongs(t *testing.T) {
 			}
 			if op == OpText {
 				_ = WriteFrame(conn, OpText, payload)
-				return
+				// Keep reading instead of returning: the client still has
+				// pings queued and answers them with pongs, and a close here
+				// would reset the connection while those are in flight.
+				continue
 			}
 		}
 	}))
