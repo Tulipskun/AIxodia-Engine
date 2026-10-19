@@ -65,3 +65,37 @@ test("an engine with an older started never takes the slot", async () => {
 
   a.ws.close();
 });
+
+test("the second phone closes the first, and the engine survives", async () => {
+  const eng = await dial("t4sp");
+  await eng.engine(1);
+
+  const p1 = await dial("t4sp");
+  await p1.phone();
+
+  const p2 = await dial("t4sp");
+  await p2.phone();
+
+  assert.match(await p1.waitFor(/superseded-phone/, 8000), /superseded-phone/);
+  await timed(p1.closed, 8000, "the first phone must be closed");
+
+  await eng.send("still-here");
+  assert.equal(await p2.waitFor("still-here"), "still-here");
+
+  eng.ws.close();
+  p2.ws.close();
+});
+
+test("the phone is told when the engine attaches and when it leaves", async () => {
+  const p = await dial("t4pres");
+  await p.phone();
+
+  const eng = await dial("t4pres");
+  await eng.engine(1);
+  assert.match(await p.waitFor(/"engine":true/, 8000), /"engine":true/);
+
+  eng.ws.close();
+  assert.match(await p.waitFor(/"engine":false/, 8000), /"engine":false/);
+
+  p.ws.close();
+});

@@ -53,6 +53,8 @@ export class Room {
       }
 
       if (role === "phone") {
+        const old = this.peer("phone");
+        if (old && old !== ws) this.reject(old, "superseded-phone");
         att.role = "phone";
         ws.serializeAttachment(att);
         this.publishPresence();
