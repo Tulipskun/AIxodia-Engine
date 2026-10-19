@@ -57,7 +57,7 @@ engine และมือถือ **ต่างก็ dial ออก** ไป�
 - DO (SQLite-backed ตามข้อบังคับ free plan) ใช้ **Hibernation API** (`state.acceptWebSocket`) เพื่อไม่ burn duration ตอนว่าง
 - DO ถือ 2 บทบาท: `engine` (ตัวเดียว) และ `phone` (**ตัวเดียวเท่านั้น — ห้ามต่อพร้อมกันหลายเครื่อง**) — phone ที่สองที่ต่อเข้ามา: DO ปิดตัวเก่าด้วย `{"ctl":"superseded-phone"}` แล้วรับตัวใหม่ (กัน lockout จาก socket ค้าง; เป็น call ของผม)
 - Auth: อ่าน `Authorization: Bearer <token>` ตอน handshake → เทียบกับ secret ของ DO (ตั้งด้วย `wrangler secret`); ไม่ตรง = 401
-- Handover: engine ส่ง `{"role":"engine","started":<unix>,"version":"..."}` — DO เก็บ `started`/`version` ล่าสุดใน `state.storage` (รอด hibernation) แล้วเทียบ; ใหม่กว่าชนะ → ส่งตัวเก่า `{"ctl":"superseded"}` แล้วปิด socket; **engine ที่ถูก supersede จะจบโปรเซสเอง** (พฤติกรรมเดียวกับ `newerDaemonRunning` วันนี้) — DO เก็บกวาดช่อง engine เมื่อ socket ตาย
+- Handover: engine ส่ง `{"role":"engine","started":<unix>,"version":"..."}` — DO เก็บ `started`/`version` ล่าสุดใน `state.storage` (รอด hibernation) แล้วเทียบ; ใหม่กว่าชนะ → ส่งตัวเก่า `{"ctl":"superseded"}` แล้วปิด socket; **เท่ากัน = ตัวเดิม reconnect (§8) → ยอมรับและปิด socket เก่า**; **engine ที่ถูก supersede จะจบโปรเซสเอง** (พฤติกรรมเดียวกับ `newerDaemonRunning` วันนี้) — DO เก็บกวาดช่อง engine เมื่อ socket ตาย
 - Forward: DO ส่ง frame ระหว่าง engine ↔ phone (มีคู่เดียว) — **ไม่ parse เนื้อใน** ยกเว้น `ctl` ของ DO เอง; ไม่ต้องมี socket id
 - Presence: `{"ctl":"presence","engine":true|false}` (แค่ดีบัก; สถานะ/uptime/version ของแอพยังมาจาก D1)
 - ขนาด frame: relay ไม่แตก/ไม่ประกอบ; ใช้ message size ที่ DO รองรับ (สูงสุด 32 MiB ตามเอกสาร)

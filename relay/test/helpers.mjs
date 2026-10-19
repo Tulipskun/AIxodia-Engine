@@ -4,12 +4,14 @@ export const BASE = process.env.RELAY_URL ?? "https://aixodia-relay.aixodia.work
 export const TOKEN = process.env.RELAY_TOKEN ?? "test-token";
 export const WS_BASE = BASE.replace(/^http/, "ws");
 
+const RUN = Math.random().toString(36).slice(2, 8);
+
 export const timed = (p, ms, label) =>
   Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`timeout: ${label}`)), ms))]);
 
 function openOnce(name, token) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`${WS_BASE}/room/${name}`, {
+    const ws = new WebSocket(`${WS_BASE}/room/${name}-${RUN}`, {
       headers: { Authorization: `Bearer ${token}` },
       family: 4,
     });

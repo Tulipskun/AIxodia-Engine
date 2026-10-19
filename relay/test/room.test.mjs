@@ -42,10 +42,30 @@ test("newer engine takes the slot, older engine is closed", async () => {
 
   const c = await dial("t3ho");
   await c.engine(101, "c");
-  assert.match(await c.waitFor(/superseded/, 8000), /superseded/);
-  await timed(c.closed, 8000, "a stale-started engine must be closed");
+  assert.match(await b.waitFor(/superseded/, 8000), /superseded/);
+  await timed(b.closed, 8000, "the superseded engine must be closed");
 
-  b.ws.close();
+  c.ws.close();
+});
+
+test("a reconnect with the same started replaces the live engine", async () => {
+  const a = await dial("t3same");
+  await a.engine(700, "a");
+
+  const again = await dial("t3same");
+  await again.engine(700, "a");
+
+  assert.match(await a.waitFor(/superseded/, 8000), /superseded/);
+  await timed(a.closed, 8000, "the stale same-started socket must be closed");
+
+  const ph = await dial("t3same");
+  await ph.phone();
+  await ph.waitFor(/"ctl":"presence"/, 8000);
+  await again.send("still-engine");
+  assert.equal(await ph.waitFor("still-engine"), "still-engine");
+
+  again.ws.close();
+  ph.ws.close();
 });
 
 test("an engine with an older started never takes the slot", async () => {

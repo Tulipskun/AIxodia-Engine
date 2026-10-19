@@ -35,12 +35,15 @@ export class Room {
         const started = Number((hello as { started?: unknown }).started);
         if (!Number.isFinite(started)) return;
         const prev = await this.state.storage.get<EngineSlot>("engine");
-        if (prev && started <= prev.started) {
+        if (prev && started < prev.started) {
           this.reject(ws, "superseded");
           return;
         }
-        const old = this.peer("engine");
-        if (old && old !== ws) this.reject(old, "superseded");
+        for (const other of this.state.getWebSockets()) {
+          if (other === ws) continue;
+          const oa = (other.deserializeAttachment() ?? { role: null }) as Attachment;
+          if (oa.role === "engine") this.reject(other, "superseded");
+        }
         att.role = "engine";
         att.started = started;
         ws.serializeAttachment(att);

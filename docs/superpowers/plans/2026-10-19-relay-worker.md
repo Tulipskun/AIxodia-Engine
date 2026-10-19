@@ -35,7 +35,7 @@ RELAY_TOKEN=test-token npm test           # node --test test/
 
 - ไม่มี/ผิด bearer → `401` และ DO ต้องไม่ถูกแตะเลย (ไม่จับคู่ ไม่เก็บ state)
 - frame แรกก่อนส่ง `{"role":...}` หรือ role แปลก → ต้องไม่ถูก forward ไปฝั่งตรงข้าม
-- engine ที่ `started` เท่ากัน/เก่ากว่า → ต้องไม่แย่ง slot และไม่ปิด engine ที่ครองอยู่
+- engine ที่ `started` เก่ากว่า → ต้องไม่แย่ง slot; เท่ากัน = reconnect ตัวเดิม → ยอมรับและปิด socket เก่า (ห้ามปิด engine ที่ครอง slot อยู่เมื่อ `started` ใหม่กว่าเท่านั้น)
 - phone ที่สอง → ตัวเก่าถูกปิด (`superseded-phone`) แต่ **engine ต้องไม่ถูกปิด**
 - frame 32 KiB (chunk ของ terminal) → ผ่านได้ทั้งสองทาง ไม่ถูกตัด
 
@@ -329,7 +329,7 @@ git commit -m "relay: auth, websocket upgrade, engine/phone pairing"
 
 **Interfaces:**
 - Consumes: `Room` (Task 2), `dial` (Task 1)
-- Produces: engine ใหม่กว่า → ตัวเก่าได้ `{"ctl":"superseded"}` แล้วถูกปิด; เท่ากัน/เก่ากว่า → ตัวใหม่ถูกปฏิเสธ (`{"ctl":"superseded"}` + ปิด); `started` เก็บใน `state.storage` เพื่อรอดข้ามการตายของ socket
+- Produces: engine ใหม่กว่า หรือ `started` เท่ากัน (reconnect ตัวเดิม ตามสเปก §8) → ตัวเก่าได้ `{"ctl":"superseded"}` แล้วถูกปิด; เก่ากว่า → ตัวใหม่ถูกปฏิเสธ (`{"ctl":"superseded"}` + ปิด); `started` เก็บใน `state.storage` เพื่อรอดข้ามการตายของ socket
 
 - [ ] **Step 1: เขียนเทสต์ที่ fail**
 
@@ -367,7 +367,7 @@ Expected: FAIL (ยังไม่มี handover — b ไม่ได้แย
 - [ ] **Step 3: เติม handover ใน `room.ts`**
 
 ตอนได้ hello `engine`: อ่าน `const prev = await this.state.storage.get<{started:number}>("engine")`;
-- `prev && hello.started <= prev.started` → `ws.send('{"ctl":"superseded"}'); ws.close(1000, "superseded")` แล้ว return
+- `prev && hello.started < prev.started` → `ws.send('{"ctl":"superseded"}'); ws.close(1000, "superseded")` แล้ว return (เท่ากันไม่ใช่กรณีนี้: สเปก §8 ถือว่า reconnect ตัวเดิม)
 - มิฉะนั้น → ถ้ามี engine เก่า (`this.peer("engine")`) → `old.send('{"ctl":"superseded"}'); old.close(1000, "superseded")`; `storage.put("engine", { started, version })`; `publishPresence()`
 ตอน `webSocketClose`/`webSocketError`: ลบ `engine` slot เมื่อ role = engine และ `storage.get("engine").started` ตรงกับ attachment
 
