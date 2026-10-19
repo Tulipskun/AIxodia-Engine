@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -26,6 +27,7 @@ import (
 	"aixodia-engine/io/mobile"
 	"aixodia-engine/io/relay"
 	"aixodia-engine/io/terminal"
+	"aixodia-engine/kaggle"
 	"aixodia-engine/localdb"
 	"aixodia-engine/provider/registry"
 	"aixodia-engine/session"
@@ -195,6 +197,13 @@ func main() {
 		go startHeartbeat(ctx, stop, relayUp.Load)
 	}
 
+	// The notebook that runs this engine on Kaggle only restores the machine,
+	// starts the engine and waits for it to exit. The session itself belongs
+	// here: when the operator drops ~/.exit or the 11.5 h budget is spent, the
+	// engine snapshots the machine, pushes a fresh kernel version, and stops —
+	// which ends the cell and with it the session.
+	startKaggleSession(ctx, stop)
+
 	<-ctx.Done()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -202,6 +211,81 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("http shutdown: %v", err)
 	}
+}
+
+// startKaggleSession hands the notebook's lifetime to the engine. It does
+// nothing unless AIXODIA_SESSION is set, so a local run can never snapshot and
+// restart somebody's Kaggle notebook.
+func startKaggleSession(ctx context.Context, stop context.CancelFunc) {
+	if !truthy(os.Getenv("AIXODIA_SESSION")) {
+		return
+	}
+	script := strings.TrimSpace(os.Getenv("AIXODIA_SESSION_SCRIPT"))
+	if script == "" {
+		script = "/usr/local/bin/kgat_sync.py"
+	}
+	if _, err := os.Stat(script); err != nil {
+		log.Printf("session: %s is missing; this session will not restart itself", script)
+		return
+	}
+	cfg := kaggle.Config{
+		Script:   script,
+		ExitFile: strings.TrimSpace(os.Getenv("AIXODIA_EXIT_FILE")),
+		Limit:    durationEnv("AIXODIA_SESSION_LIMIT", 41400*time.Second),
+		Logf:     log.Printf,
+	}
+	// The marker is what tells the notebook's wait loop that the session was
+	// closed on purpose. It is cleared first: ~/.aixodia is restored from the
+	// previous snapshot, so a stale marker would end this session at once.
+	done := strings.TrimSpace(os.Getenv("AIXODIA_SESSION_DONE"))
+	if done == "" {
+		home, _ := os.UserHomeDir()
+		done = filepath.Join(home, ".aixodia", "session-closed")
+	}
+	os.Remove(done)
+	log.Printf("session: controlling this notebook session (limit %s)", cfg.Limit)
+	go func() {
+		res, err := cfg.Run(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			log.Printf("session: %s: %v", res.Reason, err)
+			return
+		}
+		if dir := filepath.Dir(done); dir != "" {
+			os.MkdirAll(dir, 0o755)
+		}
+		if err := os.WriteFile(done, []byte(res.Reason+"\n"), 0o644); err != nil {
+			log.Printf("session: cannot write %s: %v", done, err)
+		}
+		log.Printf("session: closed after %s; stopping so the notebook can end", res.Reason)
+		stop()
+	}()
+}
+
+func truthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// durationEnv reads a duration from the environment: a bare number is seconds
+// (the notebook budget is quoted in seconds), "90m" is accepted too.
+func durationEnv(key string, def time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	if n, err := strconv.Atoi(v); err == nil {
+		return time.Duration(n) * time.Second
+	}
+	if d, err := time.ParseDuration(v); err == nil {
+		return d
+	}
+	return def
 }
 
 func startConfigReloader(ctx context.Context) {
