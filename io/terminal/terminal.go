@@ -43,6 +43,7 @@ type session struct {
 	mu         sync.Mutex
 	subs       map[*subscriber]struct{}
 	ring       []byte
+	modes      *modeTracker
 	cols, rows uint16
 	dead       bool
 	exitCode   int
@@ -108,7 +109,8 @@ func (s *Server) acquireSession(id string, cols, rows uint16, dir, sh string) (*
 	}
 	sess := &session{
 		id: id, pty: p, subs: map[*subscriber]struct{}{},
-		cols: cols, rows: rows, createdAt: time.Now(), lastAct: time.Now(),
+		modes: newModeTracker(),
+		cols:  cols, rows: rows, createdAt: time.Now(), lastAct: time.Now(),
 		stop: make(chan struct{}),
 	}
 	s.sess[id] = sess
@@ -168,13 +170,18 @@ func (s *Server) serve(conn net.Conn, br *bufio.Reader, r *http.Request, sess *s
 	sub := &subscriber{conn: conn}
 	sess.mu.Lock()
 	sess.subs[sub] = struct{}{}
-	// replay ring buffer
+	// replay ring buffer, preceded by the modes the program set before the
+	// ring began (mouse reporting, alternate screen, cursor keys)
 	ring := append([]byte(nil), sess.ring...)
+	modes := sess.modes.replay()
 	sess.mu.Unlock()
 	// send ready
 	_ = wsock.WriteFrame(conn, wsock.OpText, mustJSON(map[string]any{
 		"type": "ready", "shell": sh, "cwd": dir, "cols": cols, "rows": rows, "id": id,
 	}))
+	if len(modes) > 0 {
+		_ = wsock.WriteFrame(conn, wsock.OpBinary, modes)
+	}
 	if len(ring) > 0 {
 		_ = wsock.WriteFrame(conn, wsock.OpBinary, ring)
 	}
@@ -231,6 +238,7 @@ func (sess *session) readLoop() {
 		if n > 0 {
 			chunk := append([]byte(nil), buf[:n]...)
 			sess.mu.Lock()
+			sess.modes.scan(chunk)
 			sess.ring = append(sess.ring, chunk...)
 			if len(sess.ring) > ringCap {
 				sess.ring = sess.ring[len(sess.ring)-ringCap:]
