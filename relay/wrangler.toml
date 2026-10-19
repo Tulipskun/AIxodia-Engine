@@ -1,0 +1,12 @@
+name = "aixodia-relay"
+main = "src/index.ts"
+compatibility_date = "2026-10-19"
+account_id = "3b953d1cbb784b3424c27798931bc37b"
+
+[[durable_objects.bindings]]
+name = "ROOM"
+class_name = "Room"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
