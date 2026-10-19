@@ -13,12 +13,13 @@ fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
 
 tmp_home() { mktemp -d; }
 
-# Stub engine: prints a tunnel URL and stays alive until it is killed.
+# Stub engine: logs the room it joins, then stays alive until it is killed.
 make_stub_engine() {
   cat > "$1" <<'STUB'
 #!/usr/bin/env bash
 echo "engine started"
-echo "tunnel url: https://stub-tunnel.trycloudflare.com"
+echo "relay: dialling wss://stub-relay.example/room/test"
+echo "relay: connected"
 while true; do sleep 0.5; done
 STUB
   chmod +x "$1"
@@ -65,11 +66,9 @@ fi
 # --- start, then status, stop, status ---------------------------------------
 home=$(tmp_home); fakebin=$(tmp_home); bin=$fakebin/aixodia-engine
 make_stub_engine "$bin"
-printf '#!/usr/bin/env bash\nexec sleep 100000\n' > "$fakebin/cloudflared"
-chmod +x "$fakebin/cloudflared"
-out=$(CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_TUNNEL_WAIT=15 PATH="$fakebin:$PATH" bash "$LAUNCHER" 2>&1); rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "https://stub-tunnel.trycloudflare.com"; then
-  pass "start prints the tunnel url and returns"
+out=$(CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_RELAY_WAIT=15 PATH="$fakebin:$PATH" bash "$LAUNCHER" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "https://stub-relay.example/room/test"; then
+  pass "start prints the relay address and returns"
 else
   fail "start (rc=$rc, out=$out)"
 fi
@@ -81,7 +80,7 @@ else
 fi
 
 out=$(AIXODIA_HOME="$home" bash "$LAUNCHER" status 2>&1); rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "https://stub-tunnel.trycloudflare.com"; then
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "https://stub-relay.example/room/test"; then
   pass "status reports the running url"
 else
   fail "status running (rc=$rc, out=$out)"

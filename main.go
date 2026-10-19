@@ -145,6 +145,7 @@ func main() {
 	noted := false
 	onConnect := func() {
 		relayUp.Store(true)
+		log.Print("relay: connected")
 		if !publishing {
 			log.Print("local test mode: relay not published to D1")
 			return
