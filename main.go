@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -230,34 +231,19 @@ func startKaggleSession(ctx context.Context, stop context.CancelFunc) {
 	done := filepath.Join(home, ".aixodia", "session-closed")
 	os.Remove(done)
 
-	// Announce this instance to D1 so a newer session can ask this one to
-	// exit gracefully (backup + restart) instead of being killed abruptly.
-	instanceID := fmt.Sprintf("inst-%d", startedAt)
-	if err := db.SaveState("daemon/instance", instanceID); err != nil {
-		log.Printf("session: cannot announce instance: %v", err)
-	}
+	// Graceful shutdown on SIGTERM/SIGINT (manual stop or Kaggle graceful
+	// kill): create ~/.exit so the supervisor runs backup + restart before
+	// exiting instead of losing the session's work.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
-		tick := time.NewTicker(30 * time.Second)
-		defer tick.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-tick.C:
-			}
-			rows, err := db.Query("SELECT value FROM system_state WHERE key = ?", "daemon/instance")
-			if err != nil || len(rows) == 0 {
-				continue
-			}
-			v, _ := rows[0]["value"].(string)
-			if v != "" && v != instanceID {
-				log.Printf("session: newer instance %s detected (this is %s); requesting graceful exit", v, instanceID)
-				// Creating ~/.exit makes the supervisor run backup + restart.
-				f, err := os.Create(exitFile)
-				if err == nil {
-					f.Close()
-				}
-				return
+		select {
+		case <-ctx.Done():
+		case <-sigCh:
+			log.Printf("session: signal received; requesting graceful exit")
+			f, err := os.Create(exitFile)
+			if err == nil {
+				f.Close()
 			}
 		}
 	}()
@@ -269,6 +255,35 @@ func startKaggleSession(ctx context.Context, stop context.CancelFunc) {
 		Logf:     log.Printf,
 	}
 	log.Printf("session: controlling this notebook session (limit %s)", limit)
+	// Periodic safety snapshot every 30 minutes.
+	go func() {
+		runBackup := cfg.Exec
+		if runBackup == nil {
+			runBackup = func(ctx context.Context, script, action string) error {
+				cmd := exec.CommandContext(ctx, "python3", script, action)
+				return cmd.Run()
+			}
+		}
+		tick := time.NewTicker(30 * time.Minute)
+		defer tick.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(30 * time.Minute):
+		}
+		for {
+			if err := runBackup(ctx, script, "backup"); err != nil {
+				log.Printf("session: periodic backup failed: %v", err)
+			} else {
+				log.Printf("session: periodic backup done")
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+		}
+	}()
 	go selfupdate.RunLoop(ctx, func() bool { return activeChats.Load() == 0 })
 	go func() {
 		res, err := cfg.Run(ctx)
