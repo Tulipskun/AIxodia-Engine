@@ -576,13 +576,18 @@ def backup(force=False):
     # Only (re)pack roots that actually changed; unchanged roots keep their
     # previous archive on the hub, so a small edit no longer re-uploads every
     # root's tarball.
-    changed_roots = {p.strip("/").split("/", 1)[0] for p in changed}
+    def _group(p):
+        parts = p.strip("/").split("/")
+        if len(parts) >= 2:
+            return parts[0] + "_" + parts[1]
+        return parts[0]
+    changed_groups = {_group(p) for p in changed}
     groups = {}
     for p, sig in user.items():
-        root = p.strip("/").split("/", 1)[0]
-        if root not in changed_roots:
+        g = _group(p)
+        if g not in changed_groups:
             continue
-        groups.setdefault(root, []).append(p)
+        groups.setdefault(g, []).append(p)
     with tempfile.TemporaryDirectory() as tmp:
         if groups:
             with ThreadPoolExecutor(min(WORKERS, len(groups))) as ex:
