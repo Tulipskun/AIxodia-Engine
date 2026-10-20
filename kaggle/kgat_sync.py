@@ -577,10 +577,12 @@ def backup(force=False):
     # previous archive on the hub, so a small edit no longer re-uploads every
     # root's tarball.
     def _group(p):
-        parts = p.strip("/").split("/")
-        if len(parts) >= 2:
-            return parts[0] + "_" + parts[1]
-        return parts[0]
+        # Group by the file's own directory, so the archive layout mirrors
+        # the filesystem dynamically instead of a fixed depth.
+        d = os.path.dirname(p.rstrip("/"))
+        if not d or d == "/":
+            return "_root"
+        return d.strip("/").replace("/", "_")
     changed_groups = {_group(p) for p in changed}
     groups = {}
     for p, sig in user.items():
