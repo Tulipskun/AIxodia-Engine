@@ -166,7 +166,7 @@ func Query(sql string, params ...any) ([]map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	applyAuth(req, token)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := httpClient.Do(req)
@@ -197,12 +197,24 @@ func Query(sql string, params ...any) ([]map[string]any, error) {
 	return results[0].Rows, nil
 }
 
+// applyAuth sets the Cloudflare credentials on a request. A value containing a
+// colon is treated as an account global API key in "email:key" form and uses
+// the X-Auth-* headers; anything else is a scoped API token sent as a Bearer.
+func applyAuth(req *http.Request, cred string) {
+	if i := strings.Index(cred, ":"); i >= 0 && i < len(cred)-1 {
+		req.Header.Set("X-Auth-Email", cred[:i])
+		req.Header.Set("X-Auth-Key", cred[i+1:])
+	} else {
+		req.Header.Set("Authorization", "Bearer "+cred)
+	}
+}
+
 func get(path, cfToken string, out any) error {
 	req, err := http.NewRequest(http.MethodGet, apiBase+path, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+cfToken)
+	applyAuth(req, cfToken)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
