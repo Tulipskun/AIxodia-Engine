@@ -121,6 +121,32 @@ test("the phone is told when the engine attaches and when it leaves", async () =
   p.ws.close();
 });
 
+test("a replacement engine makes presence fall before it rises again", async () => {
+  const room = "t4hand";
+  const ph = await dial(room);
+  await ph.phone();
+
+  const a = await dial(room);
+  await a.engine(900, "a");
+  await ph.waitFor(/"engine":true/, 8000);
+
+  // Forget the first rise: the phone must see a new false -> true pair, or an
+  // app with an open terminal keeps its dead streams after a handover.
+  ph.received.length = 0;
+
+  const b = await dial(room);
+  await b.engine(901, "b");
+
+  assert.match(await ph.waitFor(/"engine":false/, 8000), /"engine":false/);
+  assert.match(await ph.waitFor(/"engine":true/, 8000), /"engine":true/);
+
+  await ph.send("after-handover");
+  assert.equal(await b.waitFor("after-handover"), "after-handover");
+
+  b.ws.close();
+  ph.ws.close();
+});
+
 const waitRaw = (c, n, ms = 8000) => timed(new Promise((res) => {
   const t0 = Date.now();
   const tick = () => {

@@ -40,6 +40,12 @@ export class Room2 {
             this.reject(ws, "superseded");
             return;
           }
+          // A new engine means a new relay session, and every terminal stream
+          // the phone opened belonged to the old one. The phone only re-dials
+          // its shells when presence goes false then true, so announce the gap
+          // here: replacing the engine used to send a second "true" to a phone
+          // that already had "true", and the dead streams stayed on screen.
+          if (prev) this.publishPresence(false);
           for (const other of this.state.getWebSockets()) {
             if (other === ws) continue;
             const oa = this.attachmentOf(other);
@@ -144,11 +150,11 @@ export class Room2 {
       });
   }
 
-  private publishPresence() {
+  private publishPresence(engine: boolean = !!this.peer("engine")) {
     const phone = this.peer("phone");
     if (!phone) return;
     try {
-      phone.send(JSON.stringify({ ctl: "presence", engine: !!this.peer("engine") }));
+      phone.send(JSON.stringify({ ctl: "presence", engine }));
     } catch (e) {
       console.error("relay publishPresence failed", e);
     }
