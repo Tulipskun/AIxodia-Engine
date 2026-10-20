@@ -6,7 +6,7 @@
 # Installs to /usr/local/bin:
 #   aixodia-engine  the engine binary (it dials the relay; no inbound port)
 #   aixodia         the launcher (start / stop / status / logs)
-#   kgat_sync.py    environment snapshot for a Kaggle session (restore/backup/restart)
+#   (kgat_sync.py lives in the kaggle repo, not here)
 #
 # Updating is the same command again: it replaces the files and stops there.
 # Restart a running engine afterwards (aixodia stop; aixodia) to pick the new
@@ -59,9 +59,8 @@ fetch() {
 
 fetch "$ENGINE_URL" "$PREFIX/aixodia-engine"
 fetch "$RAW_BASE/aixodia" "$PREFIX/aixodia"
-fetch "$RAW_BASE/kaggle/kgat_sync.py" "$PREFIX/kgat_sync.py"
 
-log "installed: $PREFIX/{aixodia-engine, aixodia, kgat_sync.py}"
+log "installed: $PREFIX/{aixodia-engine, aixodia}"
 echo
 echo "Start it with:"
 echo "  export CF_TOKEN=xxxxx   # the engine joins the relay and publishes its room with this"

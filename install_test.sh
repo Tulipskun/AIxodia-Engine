@@ -12,8 +12,6 @@ fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
 srv=$(mktemp -d)
 printf '#!/usr/bin/env bash\necho engine\n' > "$srv/aixodia-engine"
 printf '#!/usr/bin/env bash\necho launcher\n' > "$srv/aixodia"
-mkdir -p "$srv/kaggle"
-printf '#!/usr/bin/env python3\nprint("sync")\n' > "$srv/kaggle/kgat_sync.py"
 chmod +x "$srv"/* "$srv/kaggle"/*
 missing="file://$srv/does-not-exist"
 
@@ -29,7 +27,7 @@ if [ "$rc" -eq 0 ]; then
 else
   fail "install rc=$rc ($out)"
 fi
-for f in aixodia-engine aixodia kgat_sync.py; do
+for f in aixodia-engine aixodia; do
   if [ -x "$prefix/$f" ]; then
     pass "installed $f (executable)"
   else
