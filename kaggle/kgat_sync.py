@@ -70,7 +70,6 @@ def config(key):
     rows = (out.get("result") or [{}])[0].get("results") or []
     _CONFIG[key] = rows[0].get("value", "") if rows else ""
     return _CONFIG[key]
-ARCHIVE = "env_backup.part"
 MANIFEST = "manifest.json"
 INDEX = "image_index.json.gz"
 SAMPLE = 128
@@ -286,9 +285,9 @@ def _zstd():
 
 
 def _pack_py(args):
-    i, paths, tmp = args
+    name, paths, tmp = args
     ok, bad = [], []
-    with open(f"{tmp}/{ARCHIVE}{i:02d}.tar.zst", "wb") as f:
+    with open(f"{tmp}/{name}.tar.zst", "wb") as f:
         with _zstd().ZstdCompressor(level=LEVEL).stream_writer(f) as z:
             with tarfile.open(fileobj=z, mode="w|") as tar:
                 for p in paths:
@@ -312,11 +311,11 @@ def _tar_names(archive):
 
 
 def _pack(args):
-    i, paths, tmp = args
+    name, paths, tmp = args
     if TAR is None:
         return _pack_py(args)
-    archive = f"{tmp}/{ARCHIVE}{i:02d}.tar.zst"
-    lst = f"{tmp}/{ARCHIVE}{i:02d}.list"
+    archive = f"{tmp}/{name}.tar.zst"
+    lst = f"{tmp}/{name}.list"
     Path(lst).write_bytes(b"\0".join(p.lstrip("/").encode() for p in paths) + b"\0")
     try:
         p = subprocess.Popen([TAR, "-C", "/", "--null", "-T", lst, "-cf", "-"],
@@ -408,7 +407,7 @@ def _download(repo, tmp):
 
     return snapshot_download(
         repo, repo_type="dataset", local_dir=tmp, token=config("kaggle/hf_token"),
-        allow_patterns=[ARCHIVE + "*.tar.zst", MANIFEST, INDEX],
+        allow_patterns=["*.tar.zst", MANIFEST, INDEX],
     )
 
 
@@ -508,7 +507,7 @@ def restore():
                 _SCAN = threading.Thread(target=_baseline_scan, args=(ready,), daemon=True)
                 _SCAN.start()
 
-            parts = sorted(Path(tmp).glob(ARCHIVE + "*.tar.zst"))
+            parts = sorted(Path(tmp).glob("*.tar.zst"))
             gone = time.time() - t0
 
             _zstd()
@@ -572,13 +571,27 @@ def backup(force=False):
         return []
 
     t1 = time.time()
+    # Group the snapshot into one archive per top-level root, so a change in
+    # one root no longer forces re-uploading every other root's archive.
+    # Only (re)pack roots that actually changed; unchanged roots keep their
+    # previous archive on the hub, so a small edit no longer re-uploads every
+    # root's tarball.
+    changed_roots = {p.strip("/").split("/", 1)[0] for p in changed}
+    groups = {}
+    for p, sig in user.items():
+        root = p.strip("/").split("/", 1)[0]
+        if root not in changed_roots:
+            continue
+        groups.setdefault(root, []).append(p)
     with tempfile.TemporaryDirectory() as tmp:
-        shards = _shard([(p, s[0]) for p, s in user.items()], WORKERS)
-        with ThreadPoolExecutor(min(WORKERS, len(shards))) as ex:
-            results = list(ex.map(_pack, [(i, b, tmp) for i, b in enumerate(shards)]))
+        if groups:
+            with ThreadPoolExecutor(min(WORKERS, len(groups))) as ex:
+                results = list(ex.map(_pack, [(name, paths, tmp) for name, paths in groups.items()]))
+        else:
+            results = []
         ok = [p for good, _ in results for p in good]
         bad = [x for _, err in results for x in err]
-        manifest = {p: _key(user[p]) for p in ok}
+        manifest = {p: _key(user[p]) for p in user}
         Path(tmp, MANIFEST).write_text(json.dumps(manifest))
         src = _IMG if _IMG is not None else _BASE
         idx = {p: [s[0], s[1]] for p, s in src.items()}
@@ -601,7 +614,7 @@ def backup(force=False):
     _PREV, _EXISTS = manifest, True
     if stored:
         _FRESH_BASE, _BASE_SOURCE = False, "index"
-    print(f"[sync] backed up {len(ok)} files{stored} -> {target} ({time.time() - t1:.1f}s)")
+    print(f"[sync] backed up {len(changed)} changed file(s) in {len(groups)} root(s){stored} -> {target} ({time.time() - t1:.1f}s)")
     for p, err in bad:
         print(f"[sync]   unreadable: {p} ({err})")
     return bad
