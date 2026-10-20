@@ -30,6 +30,7 @@ import (
 	"aixodia-engine/kaggle"
 	"aixodia-engine/localdb"
 	"aixodia-engine/provider/registry"
+	"aixodia-engine/selfupdate"
 	"aixodia-engine/session"
 	"aixodia-engine/tools"
 )
@@ -239,6 +240,7 @@ func startKaggleSession(ctx context.Context, stop context.CancelFunc) {
 		Logf:     log.Printf,
 	}
 	log.Printf("session: controlling this notebook session (limit %s)", limit)
+	go selfupdate.RunLoop(ctx, func() bool { return activeChats.Load() == 0 })
 	go func() {
 		res, err := cfg.Run(ctx)
 		if err != nil {
@@ -298,6 +300,8 @@ func startConfigReloader(ctx context.Context) {
 // the default even after the user pins another model mid-session.
 func chatViaGateway(h http.Handler, model string) mobile.ChatFunc {
 	return func(ctx context.Context, sessionID, text string, attachments []mobile.Attachment, onDelta func(string), onTool func(mobile.ToolEvent)) (mobile.ChatResult, error) {
+		activeChats.Add(1)
+		defer activeChats.Add(-1)
 		var result mobile.ChatResult
 		// The pictures among the attachments are named to the gateway, which
 		// loads them and sends them as pictures. It cannot do that from the text
@@ -490,6 +494,7 @@ func (w *sseWriter) Write(p []byte) (int, error) {
 
 // startedAt marks this process; a later start is a newer engine.
 var startedAt = time.Now().Unix()
+var activeChats atomic.Int64
 
 const versionTag = "aixodia-engine/1.1"
 
