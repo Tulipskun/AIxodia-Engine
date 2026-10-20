@@ -12,7 +12,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -28,7 +27,6 @@ import (
 	"aixodia-engine/io/mobile"
 	"aixodia-engine/io/relay"
 	"aixodia-engine/io/terminal"
-	"aixodia-engine/kaggle"
 	"aixodia-engine/localdb"
 	"aixodia-engine/provider/registry"
 	"aixodia-engine/selfupdate"
@@ -186,12 +184,11 @@ func main() {
 	}()
 	go startHeartbeat(ctx, stop, relayUp.Load)
 
-	// The notebook that runs this engine on Kaggle only restores the machine,
-	// starts the engine and waits for it to exit. The session itself belongs
-	// here: when the operator drops ~/.exit or the 11.5 h budget is spent, the
-	// engine snapshots the machine, pushes a fresh kernel version, and stops —
-	// which ends the cell and with it the session.
-	startKaggleSession(ctx, stop)
+	// On Kaggle, periodically check for a newer engine binary and restart
+	// in place without ending the session.
+	if _, err := os.Stat("/kaggle/working"); err == nil {
+		go selfupdate.RunLoop(ctx, func() bool { return activeChats.Load() == 0 })
+	}
 
 	<-ctx.Done()
 
@@ -200,109 +197,6 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("http shutdown: %v", err)
 	}
-}
-
-// startKaggleSession hands the notebook's lifetime to the engine. It does
-// nothing unless AIXODIA_SESSION is set, so a local run can never snapshot and
-// restart somebody's Kaggle notebook.
-// startKaggleSession hands the notebook's lifetime to the engine.
-//
-// It is Kaggle only, and it says so by looking at the machine rather than at an
-// environment variable: /kaggle/working is where the notebook works, and
-// kgat_sync.py is installed next to the engine by install.sh. Anywhere else
-// this returns at once, so a local run can never snapshot and restart somebody's
-// notebook.
-func startKaggleSession(ctx context.Context, stop context.CancelFunc) {
-	const (
-		script = "/usr/local/bin/kgat_sync.py"
-		// Kaggle stops a session at 12 h; the backup and the push need room,
-		// so the engine closes its own session half an hour early.
-		limit = 41400 * time.Second
-	)
-	if _, err := os.Stat("/kaggle/working"); err != nil {
-		return
-	}
-	if _, err := os.Stat(script); err != nil {
-		log.Printf("session: %s is missing; this session will not restart itself", script)
-		return
-	}
-	home, _ := os.UserHomeDir()
-	exitFile := filepath.Join(home, ".exit")
-	done := filepath.Join(home, ".aixodia", "session-closed")
-	os.Remove(done)
-
-	// Graceful shutdown on SIGTERM/SIGINT (manual stop or Kaggle graceful
-	// kill): create ~/.exit so the supervisor runs backup + restart before
-	// exiting instead of losing the session's work.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-	go func() {
-		select {
-		case <-ctx.Done():
-		case <-sigCh:
-			log.Printf("session: signal received; requesting graceful exit")
-			f, err := os.Create(exitFile)
-			if err == nil {
-				f.Close()
-			}
-		}
-	}()
-
-	cfg := kaggle.Config{
-		Script:   script,
-		ExitFile: exitFile,
-		Limit:    limit,
-		Logf:     log.Printf,
-	}
-	log.Printf("session: controlling this notebook session (limit %s)", limit)
-	// Periodic safety snapshot every 30 minutes.
-	go func() {
-		runBackup := cfg.Exec
-		if runBackup == nil {
-			runBackup = func(ctx context.Context, script, action string) error {
-				cmd := exec.CommandContext(ctx, "python3", script, action)
-				return cmd.Run()
-			}
-		}
-		tick := time.NewTicker(30 * time.Minute)
-		defer tick.Stop()
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(30 * time.Minute):
-		}
-		for {
-			if err := runBackup(ctx, script, "backup"); err != nil {
-				log.Printf("session: periodic backup failed: %v", err)
-			} else {
-				log.Printf("session: periodic backup done")
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-tick.C:
-			}
-		}
-	}()
-	go selfupdate.RunLoop(ctx, func() bool { return activeChats.Load() == 0 })
-	go func() {
-		res, err := cfg.Run(ctx)
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return
-			}
-			log.Printf("session: %s: %v", res.Reason, err)
-			return
-		}
-		if dir := filepath.Dir(done); dir != "" {
-			os.MkdirAll(dir, 0o755)
-		}
-		if err := os.WriteFile(done, []byte(res.Reason+"\n"), 0o644); err != nil {
-			log.Printf("session: cannot write %s: %v", done, err)
-		}
-		log.Printf("session: closed after %s; stopping so the notebook can end", res.Reason)
-		stop()
-	}()
 }
 
 func startConfigReloader(ctx context.Context) {
