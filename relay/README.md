@@ -49,5 +49,8 @@ engine ต่อออกมาที่ห้องเดียวและถ�
 Worker ต้องตั้ง `RELAY_TOKEN` ให้ตรงกับค่านี้ ถ้าใช้ค่าเริ่มต้น (CF token)
 ก็ `printf '<CF_TOKEN>' | npx wrangler secret put RELAY_TOKEN` ครั้งเดียว
 
+ตอน rotate token ให้ใส่หลายค่า คั่นด้วย comma (`เก่า,ใหม่`) ได้ Worker จะรับ
+ทั้งคู่จนกว่าทั้ง engine และแอพจะย้ายเสร็จ แล้วค่อยเหลือค่าใหม่ค่าเดียว
+
 engine เขียน `daemon/url` ใน D1 เป็น `https://<worker>/room/<room>` ตอนเชื่อมต่อได้
 และหยุดเขียน heartbeat ตอนหลุด แอพจึงรู้ว่า online/offline เหมือนเดิม

@@ -20,6 +20,7 @@ import json
 import os
 import queue
 import random
+import re
 import shutil
 import sqlite3
 import stat
@@ -651,6 +652,43 @@ def load_state():
     return True
 
 
+def stage_token(where):
+    """Put this engine's CF_TOKEN into the notebook that is about to be pushed.
+
+    The notebook carries its credential in the cell that starts the engine, so
+    a rotated token would otherwise be pushed as the old one forever: the next
+    session would come up unable to read D1. Only the CF_TOKEN assignment is
+    touched, and an empty environment value leaves the notebook alone.
+    """
+    token = os.environ.get("CF_TOKEN", "").strip()
+    if not token:
+        return
+    pattern = re.compile(r'CF_TOKEN\s*=\s*"[^"]*"')
+    for nb in Path(where).glob("*.ipynb"):
+        try:
+            doc = json.loads(nb.read_text())
+        except Exception as ex:
+            print(f"[sync] cannot read {nb.name}: {ex}", flush=True)
+            continue
+        changed = 0
+        for cell in doc.get("cells", []):
+            src = cell.get("source")
+            if isinstance(src, list):
+                text = "".join(src)
+                new, n = pattern.subn(f'CF_TOKEN = "{token}"', text)
+                if n:
+                    cell["source"] = new.splitlines(keepends=True)
+                    changed += n
+            elif isinstance(src, str):
+                new, n = pattern.subn(f'CF_TOKEN = "{token}"', src)
+                if n:
+                    cell["source"] = new
+                    changed += n
+        if changed:
+            nb.write_text(json.dumps(doc))
+            print(f"[sync] staged the current CF_TOKEN in {nb.name}", flush=True)
+
+
 def restart():
     """Push a fresh version of this notebook; Kaggle starts it as a new session."""
     env = dict(os.environ)
@@ -660,11 +698,16 @@ def restart():
         env["KAGGLE_API_TOKEN"] = token
     where = "/kaggle/working/restart"
     Path(where).mkdir(parents=True, exist_ok=True)
-    for argv in (["kaggle", "kernels", "pull", "-m", "-p", where, KERNEL],
-                 ["kaggle", "kernels", "push", "-p", where]):
-        print(f"[sync] {' '.join(argv)}", flush=True)
-        if subprocess.run(argv, env=env).returncode != 0:
-            raise RuntimeError(f"{' '.join(argv)} failed")
+    run = lambda argv: subprocess.run(argv, env=env).returncode  # noqa: E731
+    argv = ["kaggle", "kernels", "pull", "-m", "-p", where, KERNEL]
+    print(f"[sync] {' '.join(argv)}", flush=True)
+    if run(argv) != 0:
+        raise RuntimeError(f"{' '.join(argv)} failed")
+    stage_token(where)
+    argv = ["kaggle", "kernels", "push", "-p", where]
+    print(f"[sync] {' '.join(argv)}", flush=True)
+    if run(argv) != 0:
+        raise RuntimeError(f"{' '.join(argv)} failed")
 
 
 def main(argv):

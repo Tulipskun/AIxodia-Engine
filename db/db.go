@@ -62,8 +62,13 @@ func Verify(cfToken string) bool {
 		return false
 	}
 
+	// This endpoint only answers for user-owned tokens. An account-owned token
+	// is a normal server credential and answers 401 here even when it is valid;
+	// the account and database lookups below are the real proof. A user token
+	// that was revoked or disabled still fails there, so a definite answer of
+	// "not active" is respected.
 	var verify tokenVerifyResult
-	if err := get("/user/tokens/verify", cfToken, &verify); err != nil || verify.Status != "active" {
+	if err := get("/user/tokens/verify", cfToken, &verify); err == nil && verify.Status != "active" {
 		return false
 	}
 
