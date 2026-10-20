@@ -1,7 +1,8 @@
 // Package selfupdate lets a running engine replace its own binary and restart
 // without ending the host session (e.g. a Kaggle notebook). It compares the
-// running executable against the published release asset by sha256 and, when
-// they differ, downloads, verifies, swaps and execs the new binary in place.
+// running executable against the published release asset and, when they
+// differ, downloads, verifies by sha256 against the running copy, swaps and
+// execs the new binary in place.
 package selfupdate
 
 import (
@@ -23,14 +24,16 @@ import (
 const releaseURL = "https://api.github.com/repos/Tulipskun/aixodia-engine/releases/tags/engine-latest"
 
 type Release struct {
-	URL    string
-	Digest string
+	URL       string
+	UpdatedAt string
+	Size      int64
 }
 
 type ghAsset struct {
-	Name   string `json:"name"`
-	URL    string `json:"browser_download_url"`
-	Digest string `json:"digest"`
+	Name      string `json:"name"`
+	URL       string `json:"browser_download_url"`
+	UpdatedAt string `json:"updated_at"`
+	Size      int64  `json:"size"`
 }
 
 type ghRelease struct {
@@ -38,8 +41,7 @@ type ghRelease struct {
 }
 
 func assetName() string {
-	arch := runtime.GOARCH
-	if arch == "arm64" {
+	if runtime.GOARCH == "arm64" {
 		return "aixodia-engine-linux-arm64"
 	}
 	return "aixodia-engine-linux-amd64"
@@ -67,18 +69,14 @@ func Latest(ctx context.Context) (Release, error) {
 	name := assetName()
 	for _, a := range r.Assets {
 		if a.Name == name {
-			return Release{URL: a.URL, Digest: a.Digest}, nil
+			return Release{URL: a.URL, UpdatedAt: a.UpdatedAt, Size: a.Size}, nil
 		}
 	}
 	return Release{}, fmt.Errorf("asset %s not found", name)
 }
 
-func currentSHA256() (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	f, err := os.Open(exe)
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
@@ -90,24 +88,49 @@ func currentSHA256() (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// NeedUpdate reports whether the running binary differs from the published one.
+func currentSHA256() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return sha256File(exe)
+}
+
+func statePath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".aixodia", "selfupdate.state")
+}
+
+func readState() string {
+	b, err := os.ReadFile(statePath())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func writeState(v string) {
+	dir := filepath.Dir(statePath())
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(statePath(), []byte(v+"\n"), 0o644)
+}
+
+// NeedUpdate reports whether the published asset differs from the running copy.
+// It uses the asset's updated_at as a cheap change signal and confirms by
+// sha256 of the downloaded bytes.
 func NeedUpdate(ctx context.Context) (bool, Release, error) {
 	rel, err := Latest(ctx)
 	if err != nil {
 		return false, rel, err
 	}
-	remote := strings.TrimPrefix(rel.Digest, "sha256:")
-	if remote == "" {
+	if rel.UpdatedAt == "" || rel.UpdatedAt == readState() {
 		return false, rel, nil
 	}
-	cur, err := currentSHA256()
-	if err != nil {
-		return false, rel, err
-	}
-	return remote != cur, rel, nil
+	return true, rel, nil
 }
 
-// Apply downloads rel, verifies it, swaps it into target and execs it in place.
+// Apply downloads rel, verifies it differs from the running binary, swaps it
+// into target and execs it in place.
 func Apply(ctx context.Context, rel Release, target string) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", rel.URL, nil)
 	if err != nil {
@@ -136,20 +159,22 @@ func Apply(ctx context.Context, rel Release, target string) error {
 	}
 	f.Close()
 	got := hex.EncodeToString(h.Sum(nil))
-	remote := strings.TrimPrefix(rel.Digest, "sha256:")
-	if remote != "" && got != remote {
+
+	cur, _ := currentSHA256()
+	if cur != "" && got == cur {
 		os.Remove(tmp)
-		return fmt.Errorf("checksum mismatch: %s != %s", got, remote)
+		writeState(rel.UpdatedAt)
+		return nil // same binary, nothing to do
 	}
+
 	if err := os.Rename(tmp, target); err != nil {
 		os.Remove(tmp)
 		return err
 	}
-	// replace this process with the new binary
+	writeState(rel.UpdatedAt)
 	return syscall.Exec(target, os.Args, os.Environ())
 }
 
-// TargetPath picks where to install the update.
 func TargetPath() string {
 	if st, err := os.Stat("/usr/local/bin/aixodia-engine"); err == nil && !st.IsDir() {
 		return "/usr/local/bin/aixodia-engine"
@@ -160,11 +185,9 @@ func TargetPath() string {
 	return "/usr/local/bin/aixodia-engine"
 }
 
-// RunLoop checks for updates periodically and applies them when idle.
 func RunLoop(ctx context.Context, idle func() bool) {
 	tick := time.NewTicker(10 * time.Minute)
 	defer tick.Stop()
-	// first check shortly after start
 	select {
 	case <-ctx.Done():
 		return
@@ -183,5 +206,3 @@ func RunLoop(ctx context.Context, idle func() bool) {
 		}
 	}
 }
-
-var _ = filepath.Base
