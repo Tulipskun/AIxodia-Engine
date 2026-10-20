@@ -106,6 +106,12 @@ func getDatabaseLocation(cfToken string) (string, string, error) {
 	return "", "", fmt.Errorf("db: D1 database named aixodia was not found in any accessible account")
 }
 
+// SaveState writes one system_state key, replacing any earlier value. It is the
+// exported form of upsertState for callers outside the db package.
+func SaveState(key, value string) error {
+	return upsertState(key, value)
+}
+
 // upsertState writes one system_state key, replacing any earlier value.
 func upsertState(key, value string) error {
 	_, err := Query("INSERT INTO system_state (key, value, updated_at) VALUES (?, ?, unixepoch()) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", key, value)

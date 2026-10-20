@@ -227,11 +227,40 @@ func startKaggleSession(ctx context.Context, stop context.CancelFunc) {
 	}
 	home, _ := os.UserHomeDir()
 	exitFile := filepath.Join(home, ".exit")
-	// The marker tells the notebook's wait loop that the session was closed on
-	// purpose. It is cleared first: ~/.aixodia is restored from the previous
-	// snapshot, so a stale marker would end this session at once.
 	done := filepath.Join(home, ".aixodia", "session-closed")
 	os.Remove(done)
+
+	// Announce this instance to D1 so a newer session can ask this one to
+	// exit gracefully (backup + restart) instead of being killed abruptly.
+	instanceID := fmt.Sprintf("inst-%d", startedAt)
+	if err := db.SaveState("daemon/instance", instanceID); err != nil {
+		log.Printf("session: cannot announce instance: %v", err)
+	}
+	go func() {
+		tick := time.NewTicker(30 * time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+			rows, err := db.Query("SELECT value FROM system_state WHERE key = ?", "daemon/instance")
+			if err != nil || len(rows) == 0 {
+				continue
+			}
+			v, _ := rows[0]["value"].(string)
+			if v != "" && v != instanceID {
+				log.Printf("session: newer instance %s detected (this is %s); requesting graceful exit", v, instanceID)
+				// Creating ~/.exit makes the supervisor run backup + restart.
+				f, err := os.Create(exitFile)
+				if err == nil {
+					f.Close()
+				}
+				return
+			}
+		}
+	}()
 
 	cfg := kaggle.Config{
 		Script:   script,
