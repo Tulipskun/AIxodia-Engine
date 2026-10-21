@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +53,13 @@ type SessionStore interface {
 	History(id string) ([]provider.Message, error)
 	AppendTurns(id string, turns []session.TurnInput) ([]session.Turn, error)
 	Unfinished(limit int) ([]session.UnfinishedTurn, error)
+}
+
+// PagedTurnStore is the optional half of SessionStore that can read one page
+// of a transcript. It is kept separate so stores that only implement Turns
+// (tests, older adapters) still work: the route slices their full answer.
+type PagedTurnStore interface {
+	TurnsPage(id string, beforeSeq int64, limit int) ([]session.Turn, error)
 }
 
 type Gateway struct {
@@ -294,12 +302,57 @@ func (g *Gateway) updateSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) getSessionTurns(w http.ResponseWriter, r *http.Request) {
-	turns, err := g.sessions.Turns(r.PathValue("id"))
+	id := r.PathValue("id")
+	// A phone opens a long chat on its newest page and asks for one older page
+	// per scroll. Without these two parameters every open sent the whole
+	// transcript over the tunnel, which is what made the first frame wait on
+	// history the reader had not reached yet. Both are optional: a request with
+	// neither is still the full turns list older clients expect.
+	beforeSeq, _ := strconv.ParseInt(r.URL.Query().Get("before_seq"), 10, 64)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit > 500 {
+		limit = 500
+	}
+	var (
+		turns []session.Turn
+		err   error
+	)
+	if limit > 0 {
+		if paged, ok := g.sessions.(PagedTurnStore); ok {
+			turns, err = paged.TurnsPage(id, beforeSeq, limit)
+		} else {
+			turns, err = g.sessions.Turns(id)
+			turns = turnPage(turns, beforeSeq, limit)
+		}
+	} else {
+		turns, err = g.sessions.Turns(id)
+	}
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "database_error", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"turns": turns})
+}
+
+// turnPage picks the newest limit turns before beforeSeq from an oldest-first
+// transcript. It is the fallback for a store without TurnsPage, and the same
+// rule the SQL uses.
+func turnPage(turns []session.Turn, beforeSeq int64, limit int) []session.Turn {
+	if limit <= 0 {
+		return turns
+	}
+	e := len(turns)
+	if beforeSeq > 0 {
+		e = 0
+		for e < len(turns) && int64(turns[e].Seq) < beforeSeq {
+			e++
+		}
+	}
+	s := e - limit
+	if s < 0 {
+		s = 0
+	}
+	return turns[s:e]
 }
 
 func (g *Gateway) nextKey(name string) int {

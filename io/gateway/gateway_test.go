@@ -1238,6 +1238,47 @@ func TestReasoningIsStoredAndReplayedOnTheNextTurn(t *testing.T) {
 	}
 }
 
+// The phone opens a chat on its newest page and asks for one page per scroll.
+// A store that only knows how to return everything must still be served the
+// requested slice, never the whole transcript for a page request.
+func TestSessionTurnsHonourBeforeAndLimit(t *testing.T) {
+	store := newMemStore()
+	for i := 1; i <= 250; i++ {
+		store.turns["s1"] = append(store.turns["s1"], session.Turn{SessionID: "s1", Seq: i})
+	}
+	gateway, _ := newTestGateway(t, store)
+	get := func(path string) []session.Turn {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		gateway.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("GET %s: status = %d, body = %s", path, recorder.Code, recorder.Body.String())
+		}
+		var page struct {
+			Turns []session.Turn `json:"turns"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &page); err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		return page.Turns
+	}
+
+	newest := get("/v1/sessions/s1/turns?limit=60")
+	if len(newest) != 60 || newest[0].Seq != 191 || newest[59].Seq != 250 {
+		t.Fatalf("newest page = %d rows, seqs %d..%d; want 60 rows, 191..250",
+			len(newest), newest[0].Seq, newest[len(newest)-1].Seq)
+	}
+	older := get("/v1/sessions/s1/turns?before_seq=191&limit=60")
+	if len(older) != 60 || older[0].Seq != 131 || older[59].Seq != 190 {
+		t.Fatalf("older page = %d rows, seqs %d..%d; want 60 rows, 131..190",
+			len(older), older[0].Seq, older[len(older)-1].Seq)
+	}
+	all := get("/v1/sessions/s1/turns")
+	if len(all) != 250 {
+		t.Fatalf("unpaged request = %d rows, want the whole 250", len(all))
+	}
+}
+
 // A request without the right bearer token is turned away; the right one gets
 // through. The comparison is constant-time, so this only pins the behaviour.
 func TestRequireTokenComparesTheWholeToken(t *testing.T) {

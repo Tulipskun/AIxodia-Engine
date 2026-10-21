@@ -161,6 +161,35 @@ func (d *D1) Turns(id string) ([]Turn, error) {
 	return turns, nil
 }
 
+// TurnsPage is the newest page ending just before beforeSeq, returned
+// oldest-first like Turns. beforeSeq <= 0 means the newest page. The phone
+// reads one page per scroll, so a long transcript no longer travels over the
+// tunnel whole because its first screen needed the last sixty rows.
+func (d *D1) TurnsPage(id string, beforeSeq int64, limit int) ([]Turn, error) {
+	if limit <= 0 {
+		return d.Turns(id)
+	}
+	var (
+		rows []map[string]any
+		err  error
+	)
+	if beforeSeq > 0 {
+		rows, err = db.Query(`SELECT `+turnColumns+` FROM chat_turns WHERE session_id=? AND seq<? ORDER BY seq DESC LIMIT ?`, id, beforeSeq, limit)
+	} else {
+		rows, err = db.Query(`SELECT `+turnColumns+` FROM chat_turns WHERE session_id=? ORDER BY seq DESC LIMIT ?`, id, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	turns := make([]Turn, 0, len(rows))
+	// SQL walked backwards from beforeSeq so LIMIT took the page nearest it;
+	// callers (and the screen) read a transcript oldest-first.
+	for i := len(rows) - 1; i >= 0; i-- {
+		turns = append(turns, turnFromRow(rows[i]))
+	}
+	return turns, nil
+}
+
 func (d *D1) History(id string) ([]provider.Message, error) {
 	turns, err := d.Turns(id)
 	if err != nil {
