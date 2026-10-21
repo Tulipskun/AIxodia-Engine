@@ -11,15 +11,16 @@
 - Module `aixodia-engine`, Go 1.26. Third-party code is only `modernc.org/sqlite`, used by the local log store (`d1log.go`); everything the engine serves lives in D1 or KV.
 - `db/` is not a local database — it is a thin HTTP client for the Cloudflare **D1 REST API** (`db.go`) and **Workers KV** (`kv.go`). No SQL files, no migrations; schema lives only in D1 and in the column names quoted in code. KV holds the providers, D1 holds chat history, settings and daemon discovery.
   - The query body must be a **JSON object**: `{"sql":"...","params":[...]}`. An array of statements is rejected with error 7400 ("Expected object, received array") — this silently broke the original code.
-- Startup (`main.go`): `CF_TOKEN` → `db.Verify` → `db.VerifyKV` (error logged, retried on the config tick) → `session.NewD1()` + `EnsureTurns` → `config.SetStore(config.NewStore(db.KV{}))` → serve `127.0.0.1:8787` → config reloads every 60s → relay room (no cloudflared).
+- Startup (`main.go`): `CF_TOKEN` → `db.Verify` → `db.VerifyKV` (error logged, retried on the config tick) → `session.NewD1()` + `EnsureTurns` → `config.SetStore(config.NewStore(db.KV{}))` → serve `127.0.0.1:8787` → config reloads every 60s → cloudflared quick tunnel + heartbeat.
   - `db.Verify` sets package globals (`token`, `AccountID`, `DBID`); every `db.Query` fails until it runs. `db.VerifyKV` finds the KV namespace titled `aixodia-providers` (creating it when the token may) and sets `kvNamespace`; every KV call fails until it runs.
   - D1 target: first account the token can see; database named `aixodia`, else the first one. No env override.
-  - The engine no longer starts a tunnel: it dials the relay at `wss://aixodia-relay.aixodia.workers.dev/room/aixodia` and publishes that URL to `system_state`.
+  - The engine starts cloudflared itself (`tunnel.go`: one quick tunnel at a time, republished whenever cloudflared reconnects) and publishes the `https://*.trycloudflare.com` URL to `system_state`; the launcher and installer ship the binary. The URL is only published after cloudflared logs `Registered tunnel connection`, because the hostname is announced before it resolves.
 
 ## HTTP API (`io/gateway`)
 - `GET /healthz`, `GET /v1/providers`, `GET /v1/models[?provider=Name]` (fetches upstream `/models`, 60s cache).
 - Sessions: `POST /v1/sessions`, `GET /v1/sessions`, `GET|DELETE /v1/sessions/{id}`, `GET /v1/sessions/{id}/turns`. Go 1.22 `ServeMux` patterns with `{id}`.
-- Terminals: `GET /v1/terminals` lists the shells the engine holds (`id`, `pid`, `shell`, `cwd`, size, `alive`). It is served both on the local mux and behind the relay's rpc channel; the terminal's `ready` frame carries the same `pid`, so the phone can label a tab by process and reconcile saved ids after an engine restart instead of silently starting a new shell under an old tab.
+- Terminals: `GET /v1/terminals` lists the shells the engine holds (`id`, `pid`, `shell`, `cwd`, size, `alive`). It is served both on the local mux and over the phone socket's rpc channel; the terminal's `ready` frame carries the same `pid`, so the phone can label a tab by process and reconcile saved ids after an engine restart instead of silently starting a new shell under an old tab.
+- The phone's single socket is `GET /room` (WebSocket, bearer token): the same multiplexed protocol the relay used to forward — `chat` frames, `ctl`/`term` terminal streams, and `rpc` requests answered in-process — now served directly on the tunnel. `io/relay/serve.go` is the inbound half; `io/relay/relay.go` keeps the outbound Cloudflare-room client and the shared session logic.
 - Chat: `POST /v1/chat/completions`, OpenAI-compatible, `"stream":true` for SSE.
 - **Model routing**: `model` must be `provider/model` (e.g. `NousResearch/inclusionai/ling-3.1-flash`), or give the `provider` field. A bare model name errors with 400 — there is no model→provider index anywhere.
 - **Sessions own history**: when `session_id` is set the engine loads turns from D1 and merges the incoming `messages` by common prefix, so clients may send either the full history or only the new turn. Reply, tokens, and duration are appended as turns; the session's `provider`, `model`, and first `title` are written on success.
@@ -71,7 +72,7 @@ Also: Zen intermittently returns `429 "Upstream request failed: Endpoint is unav
 - `session/` is real Go now (D1 store + context trimming) — the old pseudocode sketches are gone.
 
 ## Runtime requirements
-- Needs `CF_TOKEN` (D1 read/write + Workers KV read/write), outbound HTTPS to `api.cloudflare.com` and the provider endpoints, and the relay. `cloudflared` is no longer used. No offline mode.
+- Needs `CF_TOKEN` (D1 read/write + Workers KV read/write), outbound HTTPS to `api.cloudflare.com` and the provider endpoints, and `cloudflared` on PATH (the installer places it in `/usr/local/bin`). No offline mode.
 
 ## Deploy (you are the process you would be restarting)
 - On this host the agent **is** the running engine: `~/.aixodia/aixodia.pid` names `/usr/local/bin/aixodia-engine`, and every tool shell is a child of that pid (`ps -o ppid= -p $$` proves it). Never `pkill` it, never `pkill -f aixodia`, never `aixodia stop`: the answer being written dies with the process and the session drops mid-turn.

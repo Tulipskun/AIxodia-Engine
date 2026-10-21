@@ -1,7 +1,7 @@
 # AIxodia
 
-The AIxodia engine: serves the chat API on `127.0.0.1:8787`, dials out to the
-Cloudflare relay, and tells the phone where to find it via D1.
+The AIxodia engine: serves the chat API on `127.0.0.1:8787`, puts a Cloudflare
+quick tunnel in front of it, and tells the phone the tunnel URL via D1.
 
 ## Install / update
 
@@ -59,7 +59,7 @@ it live in **D1** (`chat_sessions`, `chat_turns`, `system_state`). Providers and
 their API keys live in **Workers KV**: namespace `aixodia-providers`, one key
 `providers` holding the whole list. D1's `system_state` also carries the daemon
 discovery keys (`daemon/url`, `daemon/version`, `daemon/heartbeat`), which is how
-the phone finds the relay room. `CF_TOKEN` therefore needs D1 and Workers KV
+the phone finds the current tunnel. `CF_TOKEN` therefore needs D1 and Workers KV
 read/write.
 
 ## Development

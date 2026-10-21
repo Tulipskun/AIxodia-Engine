@@ -12,14 +12,16 @@ fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
 srv=$(mktemp -d)
 printf '#!/usr/bin/env bash\necho engine\n' > "$srv/aixodia-engine"
 printf '#!/usr/bin/env bash\necho launcher\n' > "$srv/aixodia"
+printf '#!/usr/bin/env bash\necho cloudflared\n' > "$srv/cloudflared"
 chmod +x "$srv"/*
 missing="file://$srv/does-not-exist"
 
-# --- fresh install drops both binaries in the prefix -------------------------
+# --- fresh install drops the binaries and the tunnel helper in the prefix ----
 prefix=$(mktemp -d)
 out=$(PATH=/usr/bin:/bin \
       AIXODIA_PREFIX="$prefix" AIXODIA_PLATFORM=linux-amd64 \
       AIXODIA_ENGINE_URL="file://$srv/aixodia-engine" \
+      AIXODIA_CLOUDFLARED_URL="file://$srv/cloudflared" \
       AIXODIA_RAW_BASE="file://$srv" \
       bash "$HERE/install.sh" 2>&1); rc=$?
 if [ "$rc" -eq 0 ]; then
@@ -27,7 +29,7 @@ if [ "$rc" -eq 0 ]; then
 else
   fail "install rc=$rc ($out)"
 fi
-for f in aixodia-engine aixodia; do
+for f in aixodia-engine aixodia cloudflared; do
   if [ -x "$prefix/$f" ]; then
     pass "installed $f (executable)"
   else
@@ -39,6 +41,7 @@ done
 prefix=$(mktemp -d)
 out=$(AIXODIA_PREFIX="$prefix" AIXODIA_PLATFORM=linux-amd64 \
       AIXODIA_ENGINE_URL="$missing" \
+      AIXODIA_CLOUDFLARED_URL="file://$srv/cloudflared" \
       AIXODIA_RAW_BASE="file://$srv" \
       bash "$HERE/install.sh" 2>&1); rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi "cannot download"; then
@@ -74,6 +77,11 @@ if grep -q "aixodia-engine-linux-$want" "$record"; then
   pass "engine download matches the host arch ($want)"
 else
   fail "engine url for $want: $(tr '\n' ' ' < "$record")"
+fi
+if grep -q "cloudflared-linux-$want" "$record"; then
+  pass "cloudflared download matches the host arch ($want)"
+else
+  fail "cloudflared url for $want: $(tr '\n' ' ' < "$record")"
 fi
 
 echo

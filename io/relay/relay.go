@@ -138,7 +138,7 @@ func runOnce(ctx context.Context, cfg Config) error {
 		}
 	}()
 
-	s := &session{cfg: cfg, c: c, terms: map[uint16]*termStream{}, uploads: map[string]*bytes.Buffer{}}
+	s := newSession(cfg, c)
 	defer s.close()
 
 	pingCtx, stopPings := context.WithCancel(ctx)
@@ -166,14 +166,31 @@ type termStream struct {
 	conn *pipeConn
 }
 
+// wireConn is what a session needs from its socket: the relay client it dials
+// with, or a ServerConn the engine accepted from the phone behind its tunnel.
+// Reading stays with the loop that owns the socket, because the two transports
+// notice a closed socket differently.
+type wireConn interface {
+	WriteMessage(op byte, payload []byte) error
+}
+
 type session struct {
 	cfg Config
-	c   *wsock.Client
+	c   wireConn
 
 	mu      sync.Mutex
 	chat    *pipeConn
 	terms   map[uint16]*termStream
 	uploads map[string]*bytes.Buffer
+}
+
+func newSession(cfg Config, c wireConn) *session {
+	return &session{
+		cfg:     cfg,
+		c:       c,
+		terms:   map[uint16]*termStream{},
+		uploads: map[string]*bytes.Buffer{},
+	}
 }
 
 func (s *session) close() {

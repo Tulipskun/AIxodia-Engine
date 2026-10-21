@@ -4,8 +4,9 @@
 #   curl -fsSL https://raw.githubusercontent.com/Tulipskun/aixodia-engine/main/install.sh | sudo bash
 #
 # Installs to /usr/local/bin:
-#   aixodia-engine  the engine binary (it dials the relay; no inbound port)
+#   aixodia-engine  the engine binary (it serves 127.0.0.1:8787)
 #   aixodia         the launcher (start / stop / status / logs / update)
+#   cloudflared     the tunnel helper, if it is not already installed
 #
 # Updating is the same command again: it replaces the files and stops there.
 # A running engine picks the new build up in place with `aixodia update`, which
@@ -40,6 +41,7 @@ if [ -z "$PLATFORM" ]; then
 fi
 
 ENGINE_URL="${AIXODIA_ENGINE_URL:-https://github.com/$REPO_SLUG/releases/download/engine-latest/aixodia-engine-$PLATFORM}"
+CLOUDFLARED_URL="${AIXODIA_CLOUDFLARED_URL:-https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-$PLATFORM}"
 
 mkdir -p "$PREFIX"
 TMP="$(mktemp -d)"
@@ -59,8 +61,14 @@ fetch() {
 fetch "$ENGINE_URL" "$PREFIX/aixodia-engine"
 fetch "$RAW_BASE/aixodia" "$PREFIX/aixodia"
 
-log "installed: $PREFIX/{aixodia-engine, aixodia}"
+if command -v cloudflared >/dev/null 2>&1; then
+  log "cloudflared already installed, keeping it"
+else
+  fetch "$CLOUDFLARED_URL" "$PREFIX/cloudflared"
+fi
+
+log "installed: $PREFIX/{aixodia-engine, aixodia}$(command -v cloudflared >/dev/null 2>&1 && echo "" || echo ", cloudflared")"
 echo
 echo "Start it with:"
-echo "  export CF_TOKEN=xxxxx   # the engine joins the relay and publishes its room with this"
+echo "  export CF_TOKEN=xxxxx   # the engine publishes its tunnel url to D1 with this"
 echo "  aixodia"

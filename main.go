@@ -9,8 +9,8 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -116,6 +116,21 @@ func main() {
 	mux.Handle("/terminal", termSrv.Handler())
 	mux.Handle("/v1/terminals", gateway.RequireToken(token, termSrv.ListHandler()))
 	mux.Handle("/", gateway.RequireToken(token, gw))
+	// The phone's own socket: one connection carries chat, terminal streams and
+	// every HTTP call as an rpc frame, which is what keeps a phone behind a
+	// quick tunnel to one handshake and one token.
+	rpcMux := http.NewServeMux()
+	rpcMux.Handle("/v1/terminals", gateway.RequireToken(token, termSrv.ListHandler()))
+	rpcMux.Handle("/", gateway.RequireToken(token, gw))
+	room := relay.Handler(relay.Config{
+		Token:    token,
+		APIToken: token,
+		Hub:      hub,
+		Chat:     chatViaGateway(gw, model),
+		API:      rpcMux,
+		Term:     termSrv,
+	})
+	mux.Handle("/room", room)
 	server := &http.Server{
 		Addr:    "127.0.0.1:8787",
 		Handler: mux,
@@ -127,65 +142,31 @@ func main() {
 		}
 	}()
 
-	// The public address is the relay room, not a tunnel this process starts:
-	// the engine dials out, so it needs no inbound port and no cloudflared.
-	const (
-		relayBase = "wss://aixodia-relay.aixodia.workers.dev"
-		room      = "aixodia"
-	)
-	relayToken := token
-	roomPath := "/room/" + url.PathEscape(room)
-	roomURL := strings.TrimRight(relayBase, "/") + roomPath
-	publicURL := strings.Replace(strings.Replace(roomURL, "wss://", "https://", 1), "ws://", "http://", 1)
-
-	var relayUp atomic.Bool
+	// The public address is a Cloudflare quick tunnel in front of the local
+	// mux. cloudflared announces the hostname before it resolves, so the keeper
+	// publishes only once the tunnel has registered with the edge, and again
+	// whenever it reconnects: D1 must never name a URL that is already dead.
+	cloudflared, err := exec.LookPath("cloudflared")
+	if err != nil {
+		log.Fatalf("tunnel: %v", err)
+	}
 	noted := false
-	onConnect := func() {
-		relayUp.Store(true)
-		log.Print("relay: connected")
-		if err := db.SaveDaemon(publicURL, versionString(), time.Now().Unix()); err != nil {
+	keeper := newKeeper(cloudflared, func(tunnelURL string) {
+		if err := db.SaveDaemon(tunnelURL, versionString(), time.Now().Unix()); err != nil {
 			log.Printf("save daemon: %v", err)
 			return
 		}
 		log.Print("daemon url saved")
-		// The note names an address that is already reachable, so it is written
+		// The note names a URL that is already reachable, so it is written
 		// after the daemon keys; it is written once per process, not on every
 		// reconnect.
 		if !noted {
 			noted = true
-			publishHandover(ctx, publicURL)
+			publishHandover(ctx, tunnelURL)
 		}
-	}
-	onDisconnect := func() { relayUp.Store(false) }
-
-	// RPC requests come from a socket the relay already authenticated, so the
-	// gateway is served whole. The phone and terminal sockets are deliberately
-	// absent: they are transport, and the relay owns that transport already.
-	rpcMux := http.NewServeMux()
-	rpcMux.Handle("/v1/terminals", gateway.RequireToken(token, termSrv.ListHandler()))
-	rpcMux.Handle("/", gateway.RequireToken(token, gw))
-
-	log.Printf("relay: dialling %s", roomURL)
-	go func() {
-		err := relay.Run(ctx, relay.Config{
-			URL:          roomURL,
-			Token:        relayToken,
-			APIToken:     token,
-			Started:      startedAt,
-			Version:      versionString(),
-			Hub:          hub,
-			Chat:         chatViaGateway(gw, model),
-			API:          rpcMux,
-			Term:         termSrv,
-			OnConnect:    onConnect,
-			OnDisconnect: onDisconnect,
-		})
-		if errors.Is(err, relay.ErrSuperseded) {
-			log.Print("relay: a newer engine took the room; exiting")
-			stop()
-		}
-	}()
-	go startHeartbeat(ctx, stop, relayUp.Load)
+	})
+	go keeper.run(ctx)
+	go startHeartbeat(ctx, stop, keeper.alive)
 
 	// Periodically check for a newer engine binary and restart in place
 	// without ending the session.

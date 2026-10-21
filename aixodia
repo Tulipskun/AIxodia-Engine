@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# aixodia — run the AIxodia engine in the background, wait for it to join its
-# relay room, print the public address, and give the prompt back.
+# aixodia — run the AIxodia engine in the background (127.0.0.1:8787 behind a
+# Cloudflare quick tunnel), print the public address, and give the prompt back.
 #
-# Only one secret is needed: CF_TOKEN, which the engine uses to reach the relay
-# and to publish the room address to D1 so the phone can find it.
+# Only one secret is needed: CF_TOKEN, which the engine uses to publish its
+# tunnel URL and chat history to D1 so the phone can find it.
 #
 #   export CF_TOKEN=xxxxx
 #   aixodia            # start (background)
@@ -17,7 +17,7 @@ AIXODIA_HOME="${AIXODIA_HOME:-$HOME/.aixodia}"
 PID_FILE="$AIXODIA_HOME/aixodia.pid"
 LOG_FILE="$AIXODIA_HOME/aixodia.log"
 ENGINE_BIN="${AIXODIA_ENGINE_BIN:-aixodia-engine}"
-RELAY_WAIT="${AIXODIA_RELAY_WAIT:-${AIXODIA_TUNNEL_WAIT:-90}}"
+TUNNEL_WAIT="${AIXODIA_TUNNEL_WAIT:-${AIXODIA_RELAY_WAIT:-90}}"
 
 die() { echo "aixodia: $*" >&2; exit 1; }
 
@@ -32,16 +32,11 @@ running_pid() {
   printf '%s' "$pid"
 }
 
-# The engine dials out, so there is no process to scrape a URL from: it logs
-# the room it joins, and "connected" is the moment the room is live.
-relay_url() {
+# The engine starts cloudflared itself and logs the hostname once the tunnel
+# has registered with the edge, so the URL read here is one that resolves.
+tunnel_url() {
   [ -f "$LOG_FILE" ] || return 1
-  grep -Eo 'wss://[^ ]+' "$LOG_FILE" | tail -1 | sed 's#^wss://#https://#'
-}
-
-relay_ready() {
-  [ -f "$LOG_FILE" ] || return 1
-  grep -q 'relay: connected' "$LOG_FILE"
+  grep -Eo 'https://[A-Za-z0-9.-]+\.trycloudflare\.com' "$LOG_FILE" | tail -1
 }
 
 cmd_start() {
@@ -49,13 +44,14 @@ cmd_start() {
 
   local pid
   if pid="$(running_pid)"; then
-    echo "aixodia: already running (pid $pid, url $(relay_url 2>/dev/null || echo unknown))"
+    echo "aixodia: already running (pid $pid, url $(tunnel_url 2>/dev/null || echo unknown))"
     return 0
   fi
 
   local resolved
   resolved="$(command -v "$ENGINE_BIN" 2>/dev/null || true)"
   [ -n "$resolved" ] || die "engine binary '$ENGINE_BIN' not found — reinstall with the install script"
+  command -v cloudflared >/dev/null 2>&1 || die "cloudflared not found in PATH — reinstall with the install script"
 
   mkdir -p "$AIXODIA_HOME" || die "cannot create $AIXODIA_HOME"
   # A fresh log per start so the url read below cannot be a stale one.
@@ -70,15 +66,15 @@ cmd_start() {
   echo "$pid" > "$PID_FILE"
 
   local waited=0 url
-  while [ "$waited" -lt "$RELAY_WAIT" ]; do
+  while [ "$waited" -lt "$TUNNEL_WAIT" ]; do
     if ! kill -0 "$pid" 2>/dev/null; then
       echo "aixodia: engine exited during startup — last log lines:" >&2
       tail -n 15 "$LOG_FILE" >&2
       rm -f "$PID_FILE"
       return 1
     fi
-    url="$(relay_url || true)"
-    if [ -n "$url" ] && relay_ready; then
+    url="$(tunnel_url || true)"
+    if [ -n "$url" ]; then
       echo "aixodia: running (pid $pid)"
       echo "aixodia: url $url"
       echo "aixodia: log $LOG_FILE"
@@ -88,7 +84,7 @@ cmd_start() {
     waited=$((waited + 1))
   done
 
-  echo "aixodia: not connected to the relay after ${RELAY_WAIT}s — engine still starting (pid $pid)" >&2
+  echo "aixodia: no tunnel url after ${TUNNEL_WAIT}s — engine still starting (pid $pid)" >&2
   echo "aixodia: follow it with: aixodia logs" >&2
   return 1
 }
@@ -114,7 +110,7 @@ cmd_stop() {
 cmd_status() {
   local pid
   if pid="$(running_pid)"; then
-    echo "aixodia: running (pid $pid, url $(relay_url 2>/dev/null || echo unknown))"
+    echo "aixodia: running (pid $pid, url $(tunnel_url 2>/dev/null || echo unknown))"
     return 0
   fi
   echo "aixodia: not running"
@@ -192,7 +188,7 @@ cmd_update() {
           ;;
         *"engine started"*)
           echo "aixodia: updated in place (pid $live)"
-          echo "aixodia: url $(relay_url 2>/dev/null || echo unknown)"
+          echo "aixodia: url $(tunnel_url 2>/dev/null || echo unknown)"
           return 0
           ;;
       esac

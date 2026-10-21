@@ -13,7 +13,7 @@ fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
 
 tmp_home() { mktemp -d; }
 
-# Stub engine: logs the room it joins, then stays alive until it is killed.
+# Stub engine: logs the tunnel url it published, then stays alive until killed.
 make_stub_engine() {
   cat > "$1" <<'STUB'
 #!/usr/bin/env bash
@@ -22,11 +22,18 @@ if [ "${1:-}" = "update" ]; then
   exit 0
 fi
 echo "engine started"
-echo "relay: dialling wss://stub-relay.example/room/test"
-echo "relay: connected"
+echo "tunnel url: https://stub-tunnel.trycloudflare.com"
+echo "daemon url saved"
 while true; do sleep 0.5; done
 STUB
   chmod +x "$1"
+}
+
+# A cloudflared stand-in: the launcher only checks that the binary exists.
+make_cloudflared() {
+  mkdir -p "$1"
+  printf '#!/bin/sh\nexit 0\n' > "$1/cloudflared"
+  chmod +x "$1/cloudflared"
 }
 
 # --- missing CF_TOKEN: refuse before starting anything ------------------------
@@ -69,10 +76,10 @@ fi
 
 # --- start, then status, stop, status ---------------------------------------
 home=$(tmp_home); fakebin=$(tmp_home); bin=$fakebin/aixodia-engine
-make_stub_engine "$bin"
-out=$(CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_RELAY_WAIT=15 PATH="$fakebin:$PATH" bash "$LAUNCHER" 2>&1); rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "https://stub-relay.example/room/test"; then
-  pass "start prints the relay address and returns"
+make_cloudflared "$fakebin"; make_stub_engine "$bin"
+out=$(CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_TUNNEL_WAIT=15 PATH="$fakebin:$PATH" bash "$LAUNCHER" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "https://stub-tunnel.trycloudflare.com"; then
+  pass "start prints the tunnel address and returns"
 else
   fail "start (rc=$rc, out=$out)"
 fi
@@ -84,7 +91,7 @@ else
 fi
 
 out=$(AIXODIA_HOME="$home" bash "$LAUNCHER" status 2>&1); rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "https://stub-relay.example/room/test"; then
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "https://stub-tunnel.trycloudflare.com"; then
   pass "status reports the running url"
 else
   fail "status running (rc=$rc, out=$out)"
@@ -105,7 +112,7 @@ fi
 
 # --- update with no engine running: installs and stops there ----------------
 home=$(tmp_home); fakebin=$(tmp_home); bin=$fakebin/aixodia-engine
-make_stub_engine "$bin"
+make_cloudflared "$fakebin"; make_stub_engine "$bin"
 out=$(AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" PATH="$fakebin:$PATH" bash "$LAUNCHER" update 2>&1); rc=$?
 if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "installed the build published"; then
   pass "update installs the published build"
@@ -120,11 +127,11 @@ fi
 
 # --- update with the engine running: it is restarted into the new build -----
 home=$(tmp_home); fakebin=$(tmp_home); bin=$fakebin/aixodia-engine
-make_stub_engine "$bin"
-env CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_RELAY_WAIT=15 \
+make_cloudflared "$fakebin"; make_stub_engine "$bin"
+env CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_TUNNEL_WAIT=15 \
   PATH="$fakebin:$PATH" bash "$LAUNCHER" start >/dev/null 2>&1
 before=$(cat "$home/aixodia.pid" 2>/dev/null || echo "")
-out=$(CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_RELAY_WAIT=15 \
+out=$(CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_TUNNEL_WAIT=15 \
       PATH="$fakebin:$PATH" bash "$LAUNCHER" update 2>&1); rc=$?
 after=$(cat "$home/aixodia.pid" 2>/dev/null || echo "")
 if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "restarting (pid $before)"; then
@@ -141,8 +148,8 @@ AIXODIA_HOME="$home" bash "$LAUNCHER" stop >/dev/null 2>&1
 
 # --- update without CF_TOKEN while running leaves the engine up --------------
 home=$(tmp_home); fakebin=$(tmp_home); bin=$fakebin/aixodia-engine
-make_stub_engine "$bin"
-env CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_RELAY_WAIT=15 \
+make_cloudflared "$fakebin"; make_stub_engine "$bin"
+env CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_TUNNEL_WAIT=15 \
   PATH="$fakebin:$PATH" bash "$LAUNCHER" start >/dev/null 2>&1
 pid=$(cat "$home/aixodia.pid" 2>/dev/null || echo "")
 out=$(env -u CF_TOKEN AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" PATH="$fakebin:$PATH" \
@@ -171,8 +178,8 @@ if [ "${1:-}" = "update" ]; then
   exit 0
 fi
 echo "engine started"
-echo "relay: dialling wss://stub-relay.example/room/test"
-echo "relay: connected"
+echo "tunnel url: https://stub-tunnel.trycloudflare.com"
+echo "daemon url saved"
 exec python3 - <<'PY'
 import http.server, json, os, signal
 
@@ -208,9 +215,9 @@ STUB
 
 # --- update asks a handshake-capable engine to swap instead of restarting ----
 home=$(tmp_home); fakebin=$(tmp_home); bin=$fakebin/aixodia-engine
-make_handshake_engine "$bin"
+make_cloudflared "$fakebin"; make_handshake_engine "$bin"
 error_log=$home/stub.err
-CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_RELAY_WAIT=15 \
+CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_TUNNEL_WAIT=15 \
   PATH="$fakebin:$PATH" bash "$LAUNCHER" start >"$home/start.out" 2>"$error_log"
 pid=$(cat "$home/aixodia.pid" 2>/dev/null || echo "")
 # The stub serves /healthz on a port it picks itself and prints into the log.
@@ -240,8 +247,8 @@ AIXODIA_HOME="$home" bash "$LAUNCHER" stop >/dev/null 2>&1
 
 # --- a pidfile that disagrees with /healthz is not signalled -----------------
 home=$(tmp_home); fakebin=$(tmp_home); bin=$fakebin/aixodia-engine
-make_handshake_engine "$bin"
-CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_RELAY_WAIT=15 \
+make_cloudflared "$fakebin"; make_handshake_engine "$bin"
+CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_TUNNEL_WAIT=15 \
   PATH="$fakebin:$PATH" bash "$LAUNCHER" start >/dev/null 2>&1
 engine_pid=$(cat "$home/aixodia.pid" 2>/dev/null || echo "")
 port=$(sed -n 's/.*listening on \([0-9][0-9]*\).*/\1/p' "$home/aixodia.log" | tail -1)
