@@ -33,9 +33,9 @@ type rtcSignal struct {
 // session, then moves the terminal stream onto a direct WebRTC DataChannel.
 // Only offer/answer signaling crosses the relay; PTY data does not.
 type RTCServer struct {
-	term *Server
-	send func([]byte) error
-	mu   sync.Mutex
+	term  *Server
+	send  func([]byte) error
+	mu    sync.Mutex
 	peers map[string]*webrtc.PeerConnection
 }
 
