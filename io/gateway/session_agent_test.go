@@ -4,24 +4,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
-
-	"aixodia-engine/localdb"
-	"aixodia-engine/session"
 )
 
 // Pinning a model for one chat is what the phone's per-chat menu does. The pin
-// lives in the local store, and a patch that names one field must leave the
-// others — including the provider and model the chat runs on — alone.
+// goes through the session store, and a patch that names one field must leave
+// the others — including the provider and model the chat runs on — alone.
 func TestSessionAgentPatchLandsInTheStore(t *testing.T) {
-	handle, err := localdb.Open(filepath.Join(t.TempDir(), "aixodia.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { handle.Close() })
-	store := session.NewSQLite(handle)
+	store := newMemStore()
 	gateway, _ := newTestGateway(t, store)
 	handler := gateway.Handler()
 
@@ -61,7 +52,7 @@ func TestSessionAgentPatchLandsInTheStore(t *testing.T) {
 		t.Fatalf("patch answer = %+v, want the chat's own model untouched", answer)
 	}
 
-	// The pin has to be in the file, not only in the answer.
+	// The pin has to be in the store, not only in the answer.
 	stored, err := store.Get(createdSession.ID)
 	if err != nil {
 		t.Fatal(err)

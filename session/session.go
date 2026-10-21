@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-// The engine's chat vocabulary. The store that holds it is SQLite, in the
-// engine's own file; there is no second implementation to keep in step.
+// The engine's chat vocabulary. The store that holds it is D1 (d1.go), so the
+// phone and a fresh engine see the same conversations.
 
 type Session struct {
 	ID          string   `json:"id"`

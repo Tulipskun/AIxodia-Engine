@@ -7,13 +7,17 @@ import (
 	"strconv"
 	"time"
 
-	"aixodia-engine/localdb"
+	"aixodia-engine/db"
 	"aixodia-engine/session"
 )
 
 // handoverStateKey is where a session leaves a note for the one that replaces
 // it. The key already existed; nothing wrote it, so it is defined here.
 const handoverStateKey = "daemon/ready"
+
+// putHandoverState writes the note. It is a variable so a test can watch the
+// write without D1.
+var putHandoverState = db.PutState
 
 // Handover is what a new session records about itself and about the session it
 // replaced. A session is killed at its fixed limit whether or not it is in the
@@ -64,9 +68,9 @@ func publishHandover(ctx context.Context, tunnelURL string) {
 		log.Printf("handover: %v", err)
 		return
 	}
-	// The note is written to the engine's own store: there is no reader left on
-	// the D1 side, and a note is only useful on this machine anyway.
-	if err := localdb.PutState(storeDB, handoverStateKey, string(payload)); err != nil {
+	// The note is written to D1's system_state, beside the daemon keys, so a
+	// fresh engine on another host can read what was in flight.
+	if err := putHandoverState(handoverStateKey, string(payload)); err != nil {
 		log.Printf("handover: cannot write the note: %v", err)
 		return
 	}

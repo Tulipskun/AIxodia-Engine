@@ -1,72 +1,44 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
-	"strings"
 	"testing"
 )
 
-// fakeD1 answers the handful of statements the store sends, keeping the rows in
-// memory. It is the shape of D1 that matters here: values come back as
-// []map[string]any with numbers as float64, because that is what the real
-// client decodes.
-type fakeD1 struct {
-	rows   []map[string]any
-	nextID int
+// fakeKV is the KV namespace the store talks to, kept in a map. A key that was
+// never written is reported as missing, exactly as Workers KV does.
+type fakeKV struct {
+	values map[string]string
 	err    error
-	seen   []string
+	puts   int
 }
 
-func (f *fakeD1) query(sql string, params ...any) ([]map[string]any, error) {
-	f.seen = append(f.seen, strings.Fields(sql)[0])
+func (f *fakeKV) Get(key string) (string, bool, error) {
 	if f.err != nil {
-		return nil, f.err
+		return "", false, f.err
 	}
-	switch {
-	case strings.HasPrefix(sql, "SELECT \"index\""):
-		return f.rows, nil
-	case strings.HasPrefix(sql, "SELECT COUNT(*)"):
-		return []map[string]any{{"n": float64(len(f.rows))}}, nil
-	case strings.HasPrefix(sql, "INSERT INTO llm_providers"):
-		f.nextID++
-		f.rows = append(f.rows, map[string]any{
-			"idx":      float64(f.nextID),
-			"provider": params[0],
-			"endpoint": params[1],
-			"keys":     params[2],
-			"adapter":  params[3],
-		})
-		return nil, nil
-	case strings.HasPrefix(sql, "DELETE FROM llm_providers"):
-		name := params[0].(string)
-		kept := f.rows[:0]
-		for _, row := range f.rows {
-			if row["provider"] != name {
-				kept = append(kept, row)
-			}
-		}
-		f.rows = kept
-		return nil, nil
-	case strings.HasPrefix(sql, "UPDATE llm_providers"):
-		name := params[1].(string)
-		for _, row := range f.rows {
-			if row["provider"] == name {
-				row["keys"] = params[0]
-			}
-		}
-		return nil, nil
-	case strings.HasPrefix(sql, "CREATE TABLE"):
-		return nil, nil
-	default:
-		return nil, fmt.Errorf("fakeD1: unexpected SQL %q", sql)
-	}
+	value, ok := f.values[key]
+	return value, ok, nil
 }
 
-func testStore(t *testing.T) (*Store, *fakeD1) {
+func (f *fakeKV) Put(key, value string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.puts++
+	if f.values == nil {
+		f.values = map[string]string{}
+	}
+	f.values[key] = value
+	return nil
+}
+
+func testStore(t *testing.T) (*Store, *fakeKV) {
 	t.Helper()
-	fake := &fakeD1{}
-	store := NewStore(fake.query)
+	fake := &fakeKV{values: map[string]string{}}
+	store := NewStore(fake)
 	SetStore(store)
 	mu.Lock()
 	Providers = nil
@@ -83,7 +55,7 @@ func testStore(t *testing.T) (*Store, *fakeD1) {
 // A provider is a name, an endpoint, an adapter and its keys. Losing any of
 // them loses the ability to talk to that upstream.
 func TestStoreRoundTrip(t *testing.T) {
-	store, _ := testStore(t)
+	store, fake := testStore(t)
 	if err := store.Add(Provider{Name: "Alpha", APIURL: "https://alpha.test", Adapter: "openai", Keys: []string{"k1", "k2"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -95,11 +67,22 @@ func TestStoreRoundTrip(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("List = %+v, want one provider", got)
 	}
-	if got[0].ID == "" || got[0].Name != "Alpha" || got[0].APIURL != "https://alpha.test" || got[0].Adapter != "openai" {
+	if got[0].ID != "1" || got[0].Name != "Alpha" || got[0].APIURL != "https://alpha.test" || got[0].Adapter != "openai" {
 		t.Fatalf("List = %+v, want the provider that was written", got[0])
 	}
 	if !reflect.DeepEqual(got[0].Keys, []string{"k1", "k2"}) {
 		t.Fatalf("keys = %v, want k1 k2", got[0].Keys)
+	}
+
+	// The value is one JSON object under the providers key, the shape the rest
+	// of the engine and the phone's tooling expect.
+	raw := fake.values[providersKey]
+	var file providerFile
+	if err := json.Unmarshal([]byte(raw), &file); err != nil {
+		t.Fatalf("stored value is not JSON: %v (%s)", err, raw)
+	}
+	if file.NextID != 2 || len(file.Providers) != 1 || file.Providers[0].Provider != "Alpha" {
+		t.Fatalf("stored file = %+v, want one Alpha and next_id 2", file)
 	}
 
 	if err := store.Remove("Alpha"); err != nil {
@@ -131,32 +114,28 @@ func TestStoreSetKeysReplacesThem(t *testing.T) {
 	}
 }
 
-func TestStoreCount(t *testing.T) {
+// A fresh namespace has no providers key at all, which is an empty list and not
+// a failure: the engine must boot on the built-in provider.
+func TestStoreWithNoKeyIsEmpty(t *testing.T) {
 	store, _ := testStore(t)
-	count, err := store.Count()
-	if err != nil || count != 0 {
-		t.Fatalf("Count = %d, err = %v; want 0, nil", count, err)
+	got, err := store.List()
+	if err != nil {
+		t.Fatalf("List on an empty namespace: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("List = %+v, want none", got)
 	}
 	if err := store.Add(Provider{Name: "Alpha", APIURL: "https://alpha.test", Adapter: "openai"}); err != nil {
 		t.Fatal(err)
 	}
-	if count, err = store.Count(); err != nil || count != 1 {
-		t.Fatalf("Count = %d, err = %v; want 1, nil", count, err)
+	got, err = store.List()
+	if err != nil || len(got) != 1 || got[0].ID != "1" {
+		t.Fatalf("first provider = %+v, err = %v; want id 1", got, err)
 	}
 }
 
-func TestStoreEnsureCreatesTheTable(t *testing.T) {
-	_, fake := testStore(t)
-	if err := EnsureStore(); err != nil {
-		t.Fatal(err)
-	}
-	if len(fake.seen) == 0 || fake.seen[0] != "CREATE" {
-		t.Fatalf("statements = %v, want CREATE first", fake.seen)
-	}
-}
-
-// The engine carries the opencode free tier itself, so a phone with no D1 rows
-// still has a provider - and it is read-only.
+// The engine carries the opencode free tier itself, so a phone with no KV
+// providers still has something to talk to - and it is read-only.
 func TestLoadConfigAlwaysAddsTheBuiltin(t *testing.T) {
 	store, _ := testStore(t)
 	if err := store.Add(Provider{Name: "Alpha", APIURL: "https://alpha.test", Adapter: "openai", Keys: []string{"k"}}); err != nil {
@@ -190,27 +169,35 @@ func TestBuiltinProviderCannotBeChanged(t *testing.T) {
 	}
 }
 
-func TestStoreReportsD1Failures(t *testing.T) {
+func TestStoreReportsKVFailures(t *testing.T) {
 	store, fake := testStore(t)
-	fake.err = fmt.Errorf("db: D1 query failed: HTTP 502")
+	fake.err = fmt.Errorf("db: KV read failed: HTTP 502")
 	if _, err := store.List(); err == nil {
-		t.Fatal("List must report a D1 failure")
+		t.Fatal("List must report a KV failure")
 	}
 	if err := store.Add(Provider{Name: "Alpha", APIURL: "https://alpha.test", Adapter: "openai"}); err == nil {
-		t.Fatal("Add must report a D1 failure")
+		t.Fatal("Add must report a KV failure")
 	}
 }
 
-// A boot that cannot reach D1 still has the free provider: it is carried by the
+// A boot that cannot reach KV still has the free provider: it is carried by the
 // engine, not by the store.
-func TestLoadConfigKeepsTheBuiltinWhenD1Fails(t *testing.T) {
+func TestLoadConfigKeepsTheBuiltinWhenKVFails(t *testing.T) {
 	_, fake := testStore(t)
-	fake.err = fmt.Errorf("db: D1 query failed: HTTP 502")
+	fake.err = fmt.Errorf("db: KV read failed: HTTP 502")
 	if err := LoadConfig(); err == nil {
-		t.Fatal("LoadConfig must report the D1 failure")
+		t.Fatal("LoadConfig must report the KV failure")
 	}
 	got := GetProviders()
 	if len(got) != 1 || got[0].Name != "Opencode" {
 		t.Fatalf("GetProviders = %+v, want the built-in only", got)
+	}
+}
+
+func TestStoreRejectsCorruptValue(t *testing.T) {
+	store, fake := testStore(t)
+	fake.values[providersKey] = `{"providers": oops}`
+	if _, err := store.List(); err == nil {
+		t.Fatal("a corrupt providers value must be an error, not an empty list")
 	}
 }

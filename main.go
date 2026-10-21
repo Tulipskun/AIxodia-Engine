@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,20 +26,13 @@ import (
 	"aixodia-engine/io/mobile"
 	"aixodia-engine/io/relay"
 	"aixodia-engine/io/terminal"
-	"aixodia-engine/localdb"
 	"aixodia-engine/provider/registry"
 	"aixodia-engine/selfupdate"
 	"aixodia-engine/session"
 	"aixodia-engine/tools"
 )
 
-var (
-	sessionStore gateway.SessionStore
-	// storeDB is the handle behind sessionStore: providers, settings and the
-	// daemon's own notes live in the same file, but they are not chat history,
-	// so they are not reached through the gateway's store interface.
-	storeDB *sql.DB
-)
+var sessionStore gateway.SessionStore
 
 func main() {
 	// `aixodia-engine update` is what the launcher's `aixodia update` runs: it
@@ -61,6 +53,11 @@ func main() {
 	if !db.Verify(token) {
 		log.Fatal("CF_TOKEN is invalid")
 	}
+	// Providers live in KV. A boot that cannot reach KV still serves the
+	// built-in provider, and the config reloader retries this.
+	if err := db.VerifyKV(); err != nil {
+		log.Printf("kv: %v", err)
+	}
 
 	// Engine logs live on this machine (local SQLite, rotating). Opening the
 	// database is what creates the table, so there is nothing to do before it.
@@ -76,28 +73,19 @@ func main() {
 		return
 	}
 
-	// The store is this machine's own file: chat history, providers with their
-	// API keys, settings and the daemon's notes all live in it. D1 keeps the
-	// discovery keys and nothing else, and no request waits on it.
-	handle, err := localdb.Open(localdb.Path())
-	if err != nil {
-		log.Fatal(err)
-	}
-	storeDB = handle
-	store := session.NewSQLite(handle)
+	// Chat history and settings live in D1, so a fresh engine finds the same
+	// conversations the phone saw yesterday. Providers — with the API keys that
+	// exist nowhere else — live in KV. Nothing the engine owns is on this disk
+	// except logs and uploaded attachments.
+	store := session.NewD1()
 	sessionStore = store
-	// Providers — with the API keys that exist nowhere else — live in D1, not in
-	// this file: a fresh session still has to find them. The table was dropped
-	// while providers lived locally, so it is put back before the first read.
-	config.SetStore(config.NewStore(db.Query))
-	if err := config.EnsureStore(); err != nil {
-		log.Printf("config: %v", err)
-	}
+	session.EnsureTurns()
+	config.SetStore(config.NewStore(db.KV{}))
 
 	startConfigReloader(ctx)
 
 	g := gateway.New(store, registry.New(), tools.Builtin())
-	g.SetLocalStore(storeDB)
+	g.SetStateStore(db.State{})
 	g.SetStartedAt(startedAt)
 	g.SetLogReader(recentLogs)
 	// Attachments land beside the store, under ~/.aixodia, so a picture stays
@@ -232,18 +220,17 @@ func updateOnce(ctx context.Context) int {
 
 func startConfigReloader(ctx context.Context) {
 	loadProviders := func() {
-		if err := config.LoadConfig(); err != nil {
-			log.Printf("config: %v", err)
-			// A boot whose CREATE failed would otherwise never recover: retry
-			// the schema before the next read. D1 being down fails here too,
-			// and the next tick tries again.
-			if err := config.EnsureStore(); err != nil {
-				log.Printf("config: %v", err)
+		// A boot that could not find the KV namespace (or reach KV at all)
+		// retries here before reading, so a transient failure heals on the next
+		// tick instead of leaving the built-in provider alone until restart.
+		if !db.KVReady() {
+			if err := db.VerifyKV(); err != nil {
+				log.Printf("kv: %v", err)
 				return
 			}
-			if err := config.LoadConfig(); err != nil {
-				log.Printf("config: %v", err)
-			}
+		}
+		if err := config.LoadConfig(); err != nil {
+			log.Printf("config: %v", err)
 		}
 	}
 	loadProviders()

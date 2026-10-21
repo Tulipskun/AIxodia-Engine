@@ -1,7 +1,7 @@
 # AIxodia
 
-The AIxodia engine: serves the chat API on `127.0.0.1:8787`, publishes itself
-through a Cloudflare quick tunnel, and tells the phone where to find it via D1.
+The AIxodia engine: serves the chat API on `127.0.0.1:8787`, dials out to the
+Cloudflare relay, and tells the phone where to find it via D1.
 
 ## Install / update
 
@@ -36,8 +36,9 @@ The engine also installs a published build by itself, ten minutes at a time and
 only while no chat is in flight (`selfupdate: installing the build published
 ...` in the log); `aixodia update` is the same download on demand.
 
-State lives in `~/.aixodia/` (`aixodia.pid`, `aixodia.log`, `aixodia.db`,
-`uploads/`).
+Only local state lives in `~/.aixodia/` (`aixodia.pid`, `aixodia.log`,
+`aixodia-logs.db`, `uploads/`). Chat history and settings are in D1; providers
+and their API keys are in Workers KV.
 
 ## Configuration
 
@@ -45,11 +46,13 @@ Only `CF_TOKEN` is required. Everything else has a working default, and the
 usual engine variables (`AIXODIA_MODEL`, `AIXODIA_DB_PATH`, `AIXODIA_UPLOADS`)
 are respected when set.
 
-Everything the engine owns lives in one SQLite file: chat history, providers
-with their API keys, settings, and the note a session leaves for the one that
-replaces it. D1 holds only the daemon discovery keys (`daemon/url`,
-`daemon/version`, `daemon/heartbeat`), which is how the phone finds the
-tunnel — no request waits on it.
+Chat history, settings and the note a session leaves for the one that replaces
+it live in **D1** (`chat_sessions`, `chat_turns`, `system_state`). Providers and
+their API keys live in **Workers KV**: namespace `aixodia-providers`, one key
+`providers` holding the whole list. D1's `system_state` also carries the daemon
+discovery keys (`daemon/url`, `daemon/version`, `daemon/heartbeat`), which is how
+the phone finds the relay room. `CF_TOKEN` therefore needs D1 and Workers KV
+read/write.
 
 ## Development
 

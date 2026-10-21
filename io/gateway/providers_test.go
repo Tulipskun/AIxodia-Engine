@@ -1,44 +1,56 @@
 package gateway
 
 import (
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"aixodia-engine/config"
-	"aixodia-engine/localdb"
-	"aixodia-engine/session"
 )
+
+// providerKV is the KV namespace the provider API writes to, kept in a map.
+type providerKV struct {
+	values map[string]string
+}
+
+func (f *providerKV) Get(key string) (string, bool, error) {
+	value, ok := f.values[key]
+	return value, ok, nil
+}
+
+func (f *providerKV) Put(key, value string) error {
+	if f.values == nil {
+		f.values = map[string]string{}
+	}
+	f.values[key] = value
+	return nil
+}
+
+func testProviderAPI(t *testing.T) (*providerKV, http.Handler) {
+	t.Helper()
+	kv := &providerKV{values: map[string]string{}}
+	config.SetStore(config.NewStore(kv))
+	t.Cleanup(func() { config.SetStore(nil) })
+
+	gateway, _ := newTestGateway(t, newMemStore())
+	return kv, gateway.Handler()
+}
 
 // The provider API is where the API keys are edited, and the keys are the one
 // thing the engine cannot recreate. This drives the real store rather than a
-// mock: what the handler writes has to be in the file, which is why the checks
-// read it back through a second store over the same handle.
+// mock: what the handler writes has to be in KV, which is why the checks read
+// it back through a second store over the same values.
 func TestProviderAPIRoundTripLandsInTheStore(t *testing.T) {
-	handle, err := localdb.Open(filepath.Join(t.TempDir(), "aixodia.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { handle.Close() })
-	d1 := &fakeProviders{}
-	config.SetStore(config.NewStore(d1.query))
-	t.Cleanup(func() { config.SetStore(nil) })
-
-	store := session.NewSQLite(handle)
-	gateway, _ := newTestGateway(t, store)
-	handler := gateway.Handler()
+	kv, handler := testProviderAPI(t)
 
 	created := postJSON(t, handler, "/api/providers", `{"id":"Probe","endpoint":"https://probe.test","adapter":"openai","keys":["k1"]}`)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("add status = %d, body = %s", created.Code, created.Body.String())
 	}
 
-	// Read through a second store: the handler's own copy could be in memory.
-	fromStore, err := config.NewStore(d1.query).List()
+	fromStore, err := config.NewStore(kv).List()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +65,7 @@ func TestProviderAPIRoundTripLandsInTheStore(t *testing.T) {
 	if keys.Code != http.StatusOK {
 		t.Fatalf("keys status = %d, body = %s", keys.Code, keys.Body.String())
 	}
-	fromStore, err = config.NewStore(d1.query).List()
+	fromStore, err = config.NewStore(kv).List()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +79,7 @@ func TestProviderAPIRoundTripLandsInTheStore(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("remove status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
-	fromStore, err = config.NewStore(d1.query).List()
+	fromStore, err = config.NewStore(kv).List()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,74 +88,18 @@ func TestProviderAPIRoundTripLandsInTheStore(t *testing.T) {
 	}
 }
 
-// The built-in opencode provider is not a D1 row, so removing it through the
+// The built-in opencode provider is not a KV entry, so removing it through the
 // API has to be refused rather than deleting nothing and reporting success.
 func TestProviderAPIRefusesToRemoveTheBuiltin(t *testing.T) {
-	handle, err := localdb.Open(filepath.Join(t.TempDir(), "aixodia.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { handle.Close() })
-	config.SetStore(config.NewStore((&fakeProviders{}).query))
-	t.Cleanup(func() { config.SetStore(nil) })
+	_, handler := testProviderAPI(t)
 	if err := config.LoadConfig(); err != nil {
 		t.Fatal(err)
 	}
 
-	gateway, _ := newTestGateway(t, session.NewSQLite(handle))
 	request := httptest.NewRequest(http.MethodDelete, "/api/providers/Opencode", strings.NewReader(""))
 	recorder := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(recorder, request)
+	handler.ServeHTTP(recorder, request)
 	if recorder.Code == http.StatusOK {
 		t.Fatalf("remove builtin status = %d, want a refusal; body = %s", recorder.Code, recorder.Body.String())
-	}
-}
-
-// fakeProviders is the D1 side of the provider table for these tests: the
-// handlers write through config.Store, and these rows are what a later read
-// finds. Numbers arrive as float64 and keys as a JSON string, as D1 does.
-type fakeProviders struct {
-	rows []map[string]any
-	next int
-}
-
-func (f *fakeProviders) query(sql string, params ...any) ([]map[string]any, error) {
-	switch {
-	case strings.HasPrefix(sql, "SELECT \"index\""):
-		return f.rows, nil
-	case strings.HasPrefix(sql, "SELECT COUNT(*)"):
-		return []map[string]any{{"n": float64(len(f.rows))}}, nil
-	case strings.HasPrefix(sql, "INSERT INTO llm_providers"):
-		f.next++
-		f.rows = append(f.rows, map[string]any{
-			"idx":      float64(f.next),
-			"provider": params[0],
-			"endpoint": params[1],
-			"keys":     params[2],
-			"adapter":  params[3],
-		})
-		return nil, nil
-	case strings.HasPrefix(sql, "DELETE FROM llm_providers"):
-		name := params[0].(string)
-		kept := f.rows[:0]
-		for _, row := range f.rows {
-			if row["provider"] != name {
-				kept = append(kept, row)
-			}
-		}
-		f.rows = kept
-		return nil, nil
-	case strings.HasPrefix(sql, "UPDATE llm_providers"):
-		name := params[1].(string)
-		for _, row := range f.rows {
-			if row["provider"] == name {
-				row["keys"] = params[0]
-			}
-		}
-		return nil, nil
-	case strings.HasPrefix(sql, "CREATE TABLE"):
-		return nil, nil
-	default:
-		return nil, fmt.Errorf("fakeProviders: unexpected SQL %q", sql)
 	}
 }

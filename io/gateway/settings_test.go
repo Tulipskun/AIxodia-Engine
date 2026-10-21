@@ -3,25 +3,35 @@ package gateway
 import (
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
-
-	"aixodia-engine/localdb"
 )
 
-// Settings are the phone's choice of model, saved between sessions. They used
-// to be a D1 row and are now a key in the engine's own file; a fresh install
-// still has to be handed the defaults rather than a failure.
-func TestSettingsRoundTripLandsInTheStore(t *testing.T) {
-	handle, err := localdb.Open(filepath.Join(t.TempDir(), "aixodia.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { handle.Close() })
+// fakeState is D1's system_state for these tests: a map of key to value.
+type fakeState struct {
+	values map[string]string
+}
 
+func (f *fakeState) GetState(key string) (string, bool, error) {
+	value, ok := f.values[key]
+	return value, ok, nil
+}
+
+func (f *fakeState) PutState(key, value string) error {
+	if f.values == nil {
+		f.values = map[string]string{}
+	}
+	f.values[key] = value
+	return nil
+}
+
+// Settings are the phone's choice of model, saved between sessions. They live
+// in D1's system_state now; a fresh install still has to be handed the defaults
+// rather than a failure.
+func TestSettingsRoundTripLandsInTheStore(t *testing.T) {
+	state := &fakeState{values: map[string]string{}}
 	gateway, _ := newTestGateway(t, newMemStore())
-	gateway.SetLocalStore(handle)
+	gateway.SetStateStore(state)
 	handler := gateway.Handler()
 
 	recorder := httptest.NewRecorder()
@@ -48,9 +58,9 @@ func TestSettingsRoundTripLandsInTheStore(t *testing.T) {
 		t.Fatalf("settings after the write = %d %s, want the saved value", recorder.Code, recorder.Body.String())
 	}
 
-	stored, found, err := localdb.GetState(handle, settingsStateKey)
-	if err != nil || !found {
-		t.Fatalf("stored settings = %q, %v, %v; want the value in the file", stored, found, err)
+	stored, found := state.values[settingsStateKey]
+	if !found {
+		t.Fatalf("stored settings missing, want the value in the state store")
 	}
 	if stored != saved {
 		t.Fatalf("stored settings = %s, want %s", stored, saved)

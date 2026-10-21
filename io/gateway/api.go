@@ -1,9 +1,9 @@
 package gateway
 
 // The /api routes are what the AIxodia app's Settings screen and per-chat agent
-// settings call over the tunnel. Everything they read and write lives in the
-// engine's own SQLite file; D1 keeps only the daemon discovery keys. The probe
-// results are kept in memory and reset when the daemon restarts.
+// settings call over the tunnel. Chat history and settings live in D1; the
+// providers, keys and all, live in Workers KV. The probe results are kept in
+// memory and reset when the daemon restarts.
 
 import (
 	"crypto/subtle"
@@ -18,7 +18,6 @@ import (
 	"sync"
 
 	"aixodia-engine/config"
-	"aixodia-engine/localdb"
 	"aixodia-engine/provider/registry"
 	"aixodia-engine/session"
 )
@@ -360,14 +359,14 @@ func (g *Gateway) savedMainModel() (string, string) {
 	return saved.Main.Provider, saved.Main.Model
 }
 
-// storedSettings reads the settings blob from the engine's own store. found is
-// false until the phone saves anything, which is what puts the defaults on the
+// storedSettings reads the settings blob from the engine's state store. found
+// is false until the phone saves anything, which is what puts the defaults on the
 // screen of a fresh install.
 func (g *Gateway) storedSettings() (string, bool, error) {
-	if g.local == nil {
-		return "", false, errors.New("the local store is not open")
+	if g.state == nil {
+		return "", false, errors.New("the engine state store is not open")
 	}
-	return localdb.GetState(g.local, settingsStateKey)
+	return g.state.GetState(settingsStateKey)
 }
 
 func defaultSettings() json.RawMessage {
@@ -398,11 +397,11 @@ func (g *Gateway) apiPutSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "settings must be a JSON object")
 		return
 	}
-	if g.local == nil {
-		writeError(w, http.StatusBadGateway, "database_error", "the local store is not open")
+	if g.state == nil {
+		writeError(w, http.StatusBadGateway, "database_error", "the engine state store is not open")
 		return
 	}
-	if err := localdb.PutState(g.local, settingsStateKey, string(raw)); err != nil {
+	if err := g.state.PutState(settingsStateKey, string(raw)); err != nil {
 		writeError(w, http.StatusBadGateway, "database_error", err.Error())
 		return
 	}

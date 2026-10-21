@@ -106,10 +106,33 @@ func getDatabaseLocation(cfToken string) (string, string, error) {
 	return "", "", fmt.Errorf("db: D1 database named aixodia was not found in any accessible account")
 }
 
-// SaveState writes one system_state key, replacing any earlier value. It is the
-// exported form of upsertState for callers outside the db package.
-func SaveState(key, value string) error {
+// PutState writes one system_state key. Settings and the handover note live
+// here alongside the daemon keys, so a fresh engine finds them.
+func PutState(key, value string) error {
 	return upsertState(key, value)
+}
+
+// State is the key/value store the gateway speaks to. Keeping it a type with
+// methods (rather than the package functions) lets the gateway take an
+// interface and tests a map.
+type State struct{}
+
+func (State) GetState(key string) (string, bool, error) { return GetState(key) }
+func (State) PutState(key, value string) error          { return PutState(key, value) }
+
+// GetState reads one system_state key. found is false for a key that was never
+// written, which is not an error: a fresh install asks for settings and is told
+// the defaults.
+func GetState(key string) (string, bool, error) {
+	rows, err := Query("SELECT value FROM system_state WHERE key=?", key)
+	if err != nil {
+		return "", false, err
+	}
+	if len(rows) == 0 {
+		return "", false, nil
+	}
+	value, _ := rows[0]["value"].(string)
+	return value, true, nil
 }
 
 // upsertState writes one system_state key, replacing any earlier value.

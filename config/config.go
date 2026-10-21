@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -19,7 +18,7 @@ type Provider struct {
 // builtinProviders are the providers the engine carries itself, so the phone
 // has something to talk to before - or without - any provider being added. The
 // opencode free tier needs no API key, which is what makes it safe to ship
-// turned on and why it is not stored in D1.
+// turned on and why it is not stored in KV.
 var builtinProviders = []Provider{
 	{
 		Name:    "Opencode",
@@ -33,9 +32,9 @@ var (
 	mu        sync.RWMutex
 )
 
-// LoadConfig reads the providers into memory. They live in D1, so this is the
+// LoadConfig reads the providers into memory. They live in KV, so this is the
 // one place the engine reads them; the built-ins are carried by the engine and
-// appended after them, so a D1 row with the same name wins the lookup.
+// appended after them, so a KV provider with the same name wins the lookup.
 func LoadConfig() error {
 	store, err := current()
 	if err != nil {
@@ -43,8 +42,8 @@ func LoadConfig() error {
 	}
 	providers, err := store.List()
 	if err != nil {
-		// The built-ins do not depend on D1. Publish them even when the read
-		// fails so a boot without D1 still has the free provider, and keep the
+		// The built-ins do not depend on KV. Publish them even when the read
+		// fails so a boot without KV still has the free provider, and keep the
 		// last good list instead of dropping it.
 		mu.Lock()
 		if len(Providers) == 0 {
@@ -106,38 +105,4 @@ func GetProviderByName(name string) (Provider, bool) {
 		}
 	}
 	return Provider{}, false
-}
-
-func intString(value any) string {
-	switch value := value.(type) {
-	case float64:
-		return fmt.Sprint(int(value))
-	case int:
-		return fmt.Sprint(value)
-	default:
-		return stringValue(value)
-	}
-}
-
-func parseKeys(value any) []string {
-	raw, ok := value.(string)
-	if !ok || strings.TrimSpace(raw) == "" {
-		return nil
-	}
-	var keys []string
-	if err := json.Unmarshal([]byte(raw), &keys); err != nil {
-		return nil
-	}
-	return keys
-}
-
-func stringValue(value any) string {
-	switch value := value.(type) {
-	case string:
-		return value
-	case []byte:
-		return string(value)
-	default:
-		return fmt.Sprint(value)
-	}
 }

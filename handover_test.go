@@ -3,48 +3,48 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"path/filepath"
 	"testing"
 
-	"aixodia-engine/localdb"
+	"aixodia-engine/io/gateway"
 	"aixodia-engine/session"
 )
 
+// handoverStore answers only the one call the note makes: the questions the
+// previous session left unanswered.
+type handoverStore struct {
+	gateway.SessionStore
+	turns []session.UnfinishedTurn
+}
+
+func (s handoverStore) Unfinished(int) ([]session.UnfinishedTurn, error) { return s.turns, nil }
+
 // The note is how a new session learns whether the one before it was cut off
-// mid-turn. It used to be a D1 row; it is now a key in the engine's own file,
-// which is also where the unfinished turns it lists come from.
-func TestPublishHandoverWritesTheLocalNote(t *testing.T) {
-	handle, err := localdb.Open(filepath.Join(t.TempDir(), "aixodia.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { handle.Close() })
-	storeDB = handle
-	sessionStore = session.NewSQLite(handle)
-	t.Cleanup(func() {
-		storeDB = nil
-		sessionStore = nil
-	})
+// mid-turn. It is a key in D1's system_state beside the daemon keys, and it
+// lists the unfinished turns the session store reports.
+func TestPublishHandoverWritesTheNote(t *testing.T) {
+	sessionStore = handoverStore{turns: []session.UnfinishedTurn{
+		{SessionID: "s1", Seq: 3, Text: "ยังไม่ได้ตอบ"},
+	}}
+	t.Cleanup(func() { sessionStore = nil })
 	was := startedAt
 	startedAt = 1700000000
 	t.Cleanup(func() { startedAt = was })
 
-	created, err := sessionStore.Create(session.NewSession{Title: "ค้างไว้"})
-	if err != nil {
-		t.Fatal(err)
+	var stored string
+	wasPut := putHandoverState
+	putHandoverState = func(key, value string) error {
+		if key != handoverStateKey {
+			t.Fatalf("wrote key %q, want %q", key, handoverStateKey)
+		}
+		stored = value
+		return nil
 	}
-	if _, err := sessionStore.AppendTurns(created.ID, []session.TurnInput{{Role: "user", Text: "ยังไม่ได้ตอบ"}}); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { putHandoverState = wasPut })
 
 	publishHandover(context.Background(), "https://handover.test")
 
-	stored, found, err := localdb.GetState(handle, handoverStateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !found {
-		t.Fatal("the handover note was not written to the local store")
+	if stored == "" {
+		t.Fatal("the handover note was not written")
 	}
 	var note Handover
 	if err := json.Unmarshal([]byte(stored), &note); err != nil {
