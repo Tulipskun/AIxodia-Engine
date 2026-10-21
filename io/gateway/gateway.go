@@ -2,9 +2,11 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -30,9 +32,14 @@ const (
 	requestMaxBody = 8 << 20
 )
 
+// sessionIDPattern is what a client-supplied draft id may contain. The phone
+// puts this id in URLs and on disk, so path separators and whitespace must not
+// get through.
+var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
 // Version is the release tag, baked in at build time. Bump on every release
 // so a live service can be identified via GET /healthz.
-const Version = "v1.148"
+const Version = "v1.149"
 
 type SessionStore interface {
 	Create(params session.NewSession) (*session.Session, error)
@@ -141,6 +148,10 @@ func (g *Gateway) listProviders(w http.ResponseWriter, r *http.Request) {
 }
 
 type createSessionRequest struct {
+	// ID lets the phone promote a locally-created draft without changing the
+	// id the screen and its pending messages already use. A second create with
+	// the same id is idempotent, so a retried HTTP request cannot make twins.
+	ID          string   `json:"id,omitempty"`
 	Title       string   `json:"title"`
 	Provider    string   `json:"provider"`
 	Model       string   `json:"model"`
@@ -165,7 +176,24 @@ func (g *Gateway) createSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	requested := strings.TrimSpace(body.ID)
+	if requested != "" {
+		if !sessionIDPattern.MatchString(requested) {
+			writeError(w, http.StatusBadRequest, "invalid_request_error", "session id must be letters, digits, '.', '_' or '-'")
+			return
+		}
+		// Promoting a draft may be retried after a lost response. Returning the
+		// row that already exists makes that retry harmless.
+		if found, err := g.sessions.Get(requested); err == nil {
+			writeJSON(w, http.StatusOK, found)
+			return
+		} else if !errors.Is(err, session.ErrNotFound) {
+			writeError(w, http.StatusBadGateway, "database_error", err.Error())
+			return
+		}
+	}
 	created, err := g.sessions.Create(session.NewSession{
+		ID:          requested,
 		Title:       body.Title,
 		Provider:    body.Provider,
 		Model:       body.Model,
@@ -178,6 +206,14 @@ func (g *Gateway) createSession(w http.ResponseWriter, r *http.Request) {
 		MaxTokens:   body.MaxTokens,
 	})
 	if err != nil {
+		// Two requests racing with the same draft id: the loser still gets the
+		// one row the winner made.
+		if requested != "" {
+			if found, getErr := g.sessions.Get(requested); getErr == nil {
+				writeJSON(w, http.StatusOK, found)
+				return
+			}
+		}
 		writeError(w, http.StatusBadGateway, "database_error", err.Error())
 		return
 	}

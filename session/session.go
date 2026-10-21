@@ -51,6 +51,11 @@ type Turn struct {
 }
 
 type NewSession struct {
+	// ID is optional. The phone makes a draft chat locally and only asks the
+	// daemon to create it when the first message is sent; keeping that id means
+	// the draft does not have to be migrated to a new server-generated one.
+	// An empty ID still gets the engine's own random id.
+	ID          string
 	Title       string
 	Provider    string
 	Model       string

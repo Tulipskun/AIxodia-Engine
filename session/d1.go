@@ -26,8 +26,12 @@ var ErrNotFound = errors.New("session not found")
 
 func (d *D1) Create(params NewSession) (*Session, error) {
 	now := time.Now().Unix()
+	id := strings.TrimSpace(params.ID)
+	if id == "" {
+		id = newID()
+	}
 	session := Session{
-		ID:          newID(),
+		ID:          id,
 		Title:       params.Title,
 		Provider:    params.Provider,
 		Model:       params.Model,

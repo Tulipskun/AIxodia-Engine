@@ -32,8 +32,15 @@ func newMemStore() *memStore {
 func (m *memStore) Create(params session.NewSession) (*session.Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	id := params.ID
+	if id == "" {
+		id = "s1"
+	}
+	if _, exists := m.sessions[id]; exists {
+		return nil, fmt.Errorf("session %q already exists", id)
+	}
 	created := &session.Session{
-		ID:          "s1",
+		ID:          id,
 		Title:       params.Title,
 		Provider:    params.Provider,
 		Model:       params.Model,
@@ -579,6 +586,48 @@ func TestChatRejectsUnknownModel(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), "prefix it with a provider") {
 		t.Errorf("body = %s", recorder.Body.String())
+	}
+}
+
+// The phone opens a new chat locally and only asks for the server row when the
+// first message is sent. It supplies the id of the draft it has been showing,
+// so that first send does not force the screen to switch ids (and lose the live
+// turn). Repeating the create — a lost HTTP response, a reconnect — must return
+// the same row rather than make a second chat.
+func TestCreateSessionKeepsClientDraftIDAndIsIdempotent(t *testing.T) {
+	store := newMemStore()
+	gateway, _ := newTestGateway(t, store)
+
+	first := postJSON(t, gateway.Handler(), "/v1/sessions", `{"id":"s-draft-42","title":"New chat"}`)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first create status = %d, body = %s", first.Code, first.Body.String())
+	}
+	var created session.Session
+	if err := json.Unmarshal(first.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.ID != "s-draft-42" {
+		t.Fatalf("created id = %q, want s-draft-42", created.ID)
+	}
+
+	second := postJSON(t, gateway.Handler(), "/v1/sessions", `{"id":"s-draft-42","title":"Different"}`)
+	if second.Code != http.StatusOK {
+		t.Fatalf("second create status = %d, body = %s", second.Code, second.Body.String())
+	}
+	var again session.Session
+	if err := json.Unmarshal(second.Body.Bytes(), &again); err != nil {
+		t.Fatal(err)
+	}
+	if again.ID != created.ID || again.Title != "New chat" {
+		t.Fatalf("second create = %+v, want the first row unchanged", again)
+	}
+	if len(store.sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(store.sessions))
+	}
+
+	bad := postJSON(t, gateway.Handler(), "/v1/sessions", `{"id":"../outside","title":"bad"}`)
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("bad id status = %d, want 400", bad.Code)
 	}
 }
 
