@@ -341,10 +341,10 @@ func TestResponsesCacheKeyNamesTheSession(t *testing.T) {
 	}
 }
 
-// A tool-call assistant turn usually has no text. The wire needs null there,
-// not "", and an assistant turn with neither text nor calls is not a message
-// the provider should see at all. An empty tool result still has to be replayed
-// so its function_call is answered.
+// A tool-call assistant turn usually has no text. Chat completions needs null
+// there, not "", and an assistant turn with neither text nor calls is not a
+// message the provider should see at all. An empty tool result still has to be
+// replayed so its function_call is answered.
 func TestChatMessagesDoNotSendEmptyContent(t *testing.T) {
 	call := provider.ToolCall{ID: "call_1", Name: "bash", Arguments: `{"command":"true"}`}
 	got := toMessages([]provider.Message{
@@ -376,16 +376,25 @@ func TestResponsesInputDoesNotSendEmptyContent(t *testing.T) {
 		},
 	}, true)
 	items, ok := body.Input.([]any)
-	if !ok || len(items) != 3 {
-		t.Fatalf("input items = %#v, want user, function_call, function_call_output", body.Input)
+	if !ok || len(items) != 4 {
+		t.Fatalf("input items = %#v, want user, assistant text, function_call, function_call_output", body.Input)
 	}
 	if user, _ := items[0].(map[string]any); user["role"] != "user" {
 		t.Errorf("first item = %v", user)
 	}
-	if fc, _ := items[1].(map[string]any); fc["type"] != "function_call" {
-		t.Errorf("second item = %v", fc)
+	// opencode's gateway turns a bare function_call into an assistant message
+	// with content "". A text item before it is what keeps that message valid.
+	assistant, _ := items[1].(map[string]any)
+	if assistant["role"] != "assistant" {
+		t.Errorf("second item = %v", assistant)
 	}
-	output, _ := items[2].(map[string]any)
+	if text, _ := assistant["content"].(string); text == "" {
+		t.Errorf("assistant item before a call must be a non-empty string, got %#v", assistant)
+	}
+	if fc, _ := items[2].(map[string]any); fc["type"] != "function_call" {
+		t.Errorf("third item = %v", fc)
+	}
+	output, _ := items[3].(map[string]any)
 	if output["type"] != "function_call_output" || output["output"] != "(no output)" {
 		t.Errorf("empty tool output = %v", output)
 	}

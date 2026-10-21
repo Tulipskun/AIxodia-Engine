@@ -610,6 +610,14 @@ func buildResponsesRequest(req *provider.Request, stream bool) responsesRequest 
 			}
 			if text := strings.TrimSpace(textContent(m.Content)); text != "" {
 				items = append(items, map[string]any{"role": "assistant", "content": text})
+			} else if len(calls) > 0 {
+				// This gateway translates a bare function_call item into an
+				// assistant chat message with content "". Its validator rejects
+				// that, even though the Responses API itself allows a call with
+				// no text. An assistant item before the call makes the
+				// translated message non-empty; a space is the smallest text
+				// that survives the check without inventing an answer.
+				items = append(items, map[string]any{"role": "assistant", "content": " "})
 			}
 			for _, call := range calls {
 				items = append(items, map[string]any{
