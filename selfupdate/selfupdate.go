@@ -91,12 +91,30 @@ func sha256File(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func currentSHA256() (string, error) {
+// runningImage is the path to the bytes this process is actually executing.
+// On Linux that is /proc/self/exe, which stays bound to the inode that was
+// loaded even after install.sh or a manual download renames a new binary over
+// the path. os.Executable() is not used here on purpose: Go strips the
+// " (deleted)" suffix that readlink adds once the file has been replaced, so it
+// reports the path — and the hash — of the *new* binary, and Install would then
+// conclude the published build is already running and never exec it.
+func runningImage() string {
+	if runtime.GOOS == "linux" {
+		return "/proc/self/exe"
+	}
 	exe, err := os.Executable()
 	if err != nil {
-		return "", err
+		return ""
 	}
-	return sha256File(exe)
+	return exe
+}
+
+func currentSHA256() (string, error) {
+	img := runningImage()
+	if img == "" {
+		return "", fmt.Errorf("cannot locate the running executable")
+	}
+	return sha256File(img)
 }
 
 func statePath() string {
