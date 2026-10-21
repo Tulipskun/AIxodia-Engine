@@ -60,10 +60,9 @@ cmd_start() {
   # A fresh log per start so the url read below cannot be a stale one.
   : > "$LOG_FILE"
 
-  # The engine picks the database itself: /kaggle/working/aixodia.db where that
-  # directory exists - the session's durable directory, and where history moved
-  # off D1 already lives - and ./aixodia.db everywhere else, which is this
-  # directory because the engine starts here.
+  # The engine picks the database itself: ~/.aixodia/aixodia.db, the store's
+  # own directory, and ./aixodia.db when there is no home directory, which is
+  # this directory because the engine starts here.
   cd "$AIXODIA_HOME" || die "cannot enter $AIXODIA_HOME"
   nohup "$resolved" >>"$LOG_FILE" 2>&1 &
   pid=$!

@@ -25,8 +25,7 @@ func TestOpenCreatesEveryTableTheEngineUses(t *testing.T) {
 	}
 }
 
-// Kaggle's writable directory is /kaggle/working, but the store can be pointed
-// at a directory that does not exist yet.
+// The store can be pointed at a directory that does not exist yet.
 func TestOpenCreatesTheParentDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "dir", "aixodia.db")
 	store, err := Open(path)

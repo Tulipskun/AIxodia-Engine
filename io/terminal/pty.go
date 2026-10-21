@@ -1,7 +1,7 @@
 // Package terminal serves the shell of the machine the engine runs on over a
 // WebSocket, so the phone can use that machine the way it would use a terminal
 // app. The pty plumbing here is Linux only — the ioctls are Linux's — which is
-// where the engine runs (Kaggle, and install.sh's hosts).
+// where the engine runs.
 package terminal
 
 import (

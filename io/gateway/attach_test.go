@@ -153,7 +153,7 @@ func TestAttachImagesDoesNothingWithoutAnUploadDirectory(t *testing.T) {
 	g := &Gateway{}
 	got, _ := g.attachImages(
 		[]provider.Message{{Role: "user", Content: "x"}},
-		[]chatAttachment{{Path: "/kaggle/working/uploads/a.jpg"}},
+		[]chatAttachment{{Path: "/nonexistent/uploads/a.jpg"}},
 	)
 	if got[0].Images != nil {
 		t.Error("with uploads disabled nothing may be read from disk")

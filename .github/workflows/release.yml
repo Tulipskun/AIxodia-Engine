@@ -1,8 +1,8 @@
 name: Release engine
 
 # Every push to main produces a fresh linux-amd64 binary on a rolling release.
-# The Kaggle notebook downloads it at startup, so an engine change no longer
-# needs a dataset version or a binary upload — only a kernel restart.
+# install.sh downloads that release, so an engine change no longer needs a
+# binary upload of its own.
 on:
   push:
     branches: [main]
@@ -38,7 +38,7 @@ jobs:
               --title "engine-latest" --notes "Rolling build of main"
           gh release upload engine-latest aixodia-engine-linux-amd64 aixodia-engine-linux-arm64 \
             --repo "$GITHUB_REPOSITORY" --clobber
-          # Bare `aixodia-engine` stays the amd64 build: the Kaggle notebook
-          # downloads that name.
+          # Bare `aixodia-engine` stays the amd64 build for callers that use the
+          # plain name.
           cp aixodia-engine-linux-amd64 aixodia-engine
           gh release upload engine-latest aixodia-engine --repo "$GITHUB_REPOSITORY" --clobber

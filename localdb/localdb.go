@@ -17,9 +17,9 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Path is where the store lives: under ~/.aixodia, which the machine snapshot
-// carries across Kaggle sessions, and beside a development checkout when there
-// is no home directory.
+// Path is where the store lives: under ~/.aixodia, so it travels with the home
+// directory, and beside a development checkout when there is no home
+// directory.
 func Path() string {
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		return filepath.Join(home, ".aixodia", "aixodia.db")

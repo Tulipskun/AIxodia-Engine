@@ -5,7 +5,7 @@ import (
 )
 
 func TestBlockJSONRoundTrip(t *testing.T) {
-	b := ToolBlock("c1", "shell", `{"command":"pwd"}`, "/kaggle", false, 400)
+	b := ToolBlock("c1", "shell", `{"command":"pwd"}`, "/tmp", false, 400)
 	parsed, ok := ParseBlock(b.JSON())
 	if !ok {
 		t.Fatalf("ParseBlock(%s) = false", b.JSON())

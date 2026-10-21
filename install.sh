@@ -6,7 +6,6 @@
 # Installs to /usr/local/bin:
 #   aixodia-engine  the engine binary (it dials the relay; no inbound port)
 #   aixodia         the launcher (start / stop / status / logs)
-#   (kgat_sync.py lives in the kaggle repo, not here)
 #
 # Updating is the same command again: it replaces the files and stops there.
 # Restart a running engine afterwards (aixodia stop; aixodia) to pick the new

@@ -93,11 +93,9 @@ func main() {
 	g.SetLocalStore(storeDB)
 	g.SetStartedAt(startedAt)
 	g.SetLogReader(recentLogs)
-	// Attachments land beside the store, under ~/.aixodia, because that is the
-	// directory the machine snapshot carries across Kaggle sessions. Anything
-	// under /kaggle/working is rebuilt on the next session, so a file saved
-	// there was gone the moment the kernel restarted. The agent reads
-	// attachments from these paths.
+	// Attachments land beside the store, under ~/.aixodia, so a picture stays
+	// next to the history it belongs to. The agent reads attachments from
+	// these paths.
 	uploadDir := "./uploads"
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		uploadDir = filepath.Join(home, ".aixodia", "uploads")
@@ -184,11 +182,9 @@ func main() {
 	}()
 	go startHeartbeat(ctx, stop, relayUp.Load)
 
-	// On Kaggle, periodically check for a newer engine binary and restart
-	// in place without ending the session.
-	if _, err := os.Stat("/kaggle/working"); err == nil {
-		go selfupdate.RunLoop(ctx, func() bool { return activeChats.Load() == 0 })
-	}
+	// Periodically check for a newer engine binary and restart in place
+	// without ending the session.
+	go selfupdate.RunLoop(ctx, func() bool { return activeChats.Load() == 0 })
 
 	<-ctx.Done()
 

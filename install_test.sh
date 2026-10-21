@@ -12,7 +12,7 @@ fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
 srv=$(mktemp -d)
 printf '#!/usr/bin/env bash\necho engine\n' > "$srv/aixodia-engine"
 printf '#!/usr/bin/env bash\necho launcher\n' > "$srv/aixodia"
-chmod +x "$srv"/* "$srv/kaggle"/*
+chmod +x "$srv"/*
 missing="file://$srv/does-not-exist"
 
 # --- fresh install drops both binaries in the prefix -------------------------

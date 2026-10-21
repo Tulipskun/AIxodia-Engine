@@ -191,8 +191,6 @@ func runBash(ctx context.Context, args string) (string, error) {
 		if st, err := os.Stat(home); err == nil && st.IsDir() {
 			cmd.Dir = home
 		}
-	} else if st, err := os.Stat("/kaggle/working"); err == nil && st.IsDir() {
-		cmd.Dir = "/kaggle/working"
 	}
 	// Put the shell in its own process group so a timeout kills the whole
 	// tree, not just the top-level shell (which would leave children running

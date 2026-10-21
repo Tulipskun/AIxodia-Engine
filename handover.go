@@ -16,8 +16,8 @@ import (
 const handoverStateKey = "daemon/ready"
 
 // Handover is what a new session records about itself and about the session it
-// replaced. A Kaggle kernel is killed at twelve hours whether or not it is in
-// the middle of something, so the interesting question on boot is not "did I
+// replaced. A session is killed at its fixed limit whether or not it is in the
+// middle of something, so the interesting question on boot is not "did I
 // start" but "was the session before me cut off mid-turn, and what was it
 // answering".
 type Handover struct {

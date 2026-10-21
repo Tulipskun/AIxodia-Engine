@@ -491,9 +491,6 @@ func termDir() string {
 			return home
 		}
 	}
-	if st, err := os.Stat("/kaggle/working"); err == nil && st.IsDir() {
-		return "/kaggle/working"
-	}
 	if wd, err := os.Getwd(); err == nil {
 		return wd
 	}

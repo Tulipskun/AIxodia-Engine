@@ -1,8 +1,7 @@
 // Package selfupdate lets a running engine replace its own binary and restart
-// without ending the host session (e.g. a Kaggle notebook). It compares the
-// running executable against the published release asset and, when they
-// differ, downloads, verifies by sha256 against the running copy, swaps and
-// execs the new binary in place.
+// without ending the host session. It compares the running executable against
+// the published release asset and, when they differ, downloads, verifies by
+// sha256 against the running copy, swaps and execs the new binary in place.
 package selfupdate
 
 import (
