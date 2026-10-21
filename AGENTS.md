@@ -18,6 +18,7 @@
 ## HTTP API (`io/gateway`)
 - `GET /healthz`, `GET /v1/providers`, `GET /v1/models[?provider=Name]` (fetches upstream `/models`, 60s cache).
 - Sessions: `POST /v1/sessions`, `GET /v1/sessions`, `GET|DELETE /v1/sessions/{id}`, `GET /v1/sessions/{id}/turns`. Go 1.22 `ServeMux` patterns with `{id}`.
+- Terminals: `GET /v1/terminals` lists the shells the engine holds (`id`, `pid`, `shell`, `cwd`, size, `alive`). It is served both on the local mux and behind the relay's rpc channel; the terminal's `ready` frame carries the same `pid`, so the phone can label a tab by process and reconcile saved ids after an engine restart instead of silently starting a new shell under an old tab.
 - Chat: `POST /v1/chat/completions`, OpenAI-compatible, `"stream":true` for SSE.
 - **Model routing**: `model` must be `provider/model` (e.g. `NousResearch/inclusionai/ling-3.1-flash`), or give the `provider` field. A bare model name errors with 400 — there is no model→provider index anywhere.
 - **Sessions own history**: when `session_id` is set the engine loads turns from D1 and merges the incoming `messages` by common prefix, so clients may send either the full history or only the new turn. Reply, tokens, and duration are appended as turns; the session's `provider`, `model`, and first `title` are written on success.

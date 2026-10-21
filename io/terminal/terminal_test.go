@@ -278,6 +278,99 @@ func TestTerminalReattachReplaysFromAReset(t *testing.T) {
 	}
 }
 
+func TestTerminalReadyNamesTheShellPid(t *testing.T) {
+	s := testServer(t)
+	srv := serveTerminal(t, s)
+	conn, br := dialTerminal(t, srv.URL, testToken, "?id=with-pid&cols=90&rows=25")
+	ready := nextTextFrame(t, conn, br, 10*time.Second)
+
+	pid, ok := ready["pid"].(float64)
+	if !ok || pid <= 0 {
+		t.Fatalf("ready pid = %v, want a positive pid", ready["pid"])
+	}
+
+	list := s.List()
+	if len(list) != 1 {
+		t.Fatalf("list = %+v, want one shell", list)
+	}
+	if list[0].ID != "with-pid" || list[0].PID != int(pid) || !list[0].Alive {
+		t.Fatalf("list = %+v, want id with-pid pid %d alive", list[0], int(pid))
+	}
+	if list[0].Cwd == "" || list[0].Shell == "" {
+		t.Fatalf("list = %+v, want cwd and shell named", list[0])
+	}
+}
+
+func TestTerminalListHandlerNamesShells(t *testing.T) {
+	s := testServer(t)
+	sess, _, err := s.acquireSession("listed", 90, 25, termDir(), "/bin/sh")
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.pty.Close() })
+
+	srv := httptest.NewServer(s.ListHandler())
+	t.Cleanup(srv.Close)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get list: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list status = %d, want 200", resp.StatusCode)
+	}
+	var body struct {
+		Terminals []Info `json:"terminals"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(body.Terminals) != 1 {
+		t.Fatalf("terminals = %+v, want one", body.Terminals)
+	}
+	got := body.Terminals[0]
+	if got.ID != "listed" || got.PID != sess.pid || got.Cols != 90 || got.Rows != 25 || !got.Alive {
+		t.Fatalf("listed = %+v, want id listed, pid %d, 90x25, alive", got, sess.pid)
+	}
+
+	// The same handler refuses a request with no bearer.
+	bad, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("get without token: %v", err)
+	}
+	bad.Body.Close()
+	if bad.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("list without token = %d, want 401", bad.StatusCode)
+	}
+}
+
+func TestTerminalListDropsAFinishedShell(t *testing.T) {
+	s := testServer(t)
+	sess, _, err := s.acquireSession("done", 80, 24, termDir(), "/bin/sh")
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if got := s.List(); len(got) != 1 || !got[0].Alive {
+		t.Fatalf("list before exit = %+v, want one alive shell", got)
+	}
+	_ = sess.pty.Close()
+	// Wait for readLoop to mark the session dead rather than racing it.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		list := s.List()
+		if len(list) == 0 || !list[0].Alive {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("list after exit = %+v, want the shell gone or dead", list)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestTrimRingCutsAtAParserBoundary(t *testing.T) {
 	// 9 bytes, cut at index 3 lands in the middle of ESC[31m.
 	ring := []byte("AB\x1b[31mCD")

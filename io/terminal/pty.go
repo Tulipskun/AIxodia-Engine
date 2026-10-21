@@ -76,6 +76,16 @@ func StartPTY(shell string, args []string, cols, rows uint16, dir string) (*PTY,
 	return p, nil
 }
 
+// Pid is the pid of the shell this pty started. It is the identity a client
+// can show and log: two attaches to the same session id reach the same pid,
+// and a reattach after the engine replaced the shell comes back with a new one.
+func (p *PTY) Pid() int {
+	if p.cmd != nil && p.cmd.Process != nil {
+		return p.cmd.Process.Pid
+	}
+	return 0
+}
+
 // Read and Write are the master side of the pty: what the shell printed, and
 // what the keyboard sent.
 func (p *PTY) Read(b []byte) (int, error)  { return p.master.Read(b) }

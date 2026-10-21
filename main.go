@@ -118,6 +118,7 @@ func main() {
 	// the "/" catch-all below, so RequireToken never sees this path.
 	termSrv := terminal.NewServer(token)
 	mux.Handle("/terminal", termSrv.Handler())
+	mux.Handle("/v1/terminals", gateway.RequireToken(token, termSrv.ListHandler()))
 	mux.Handle("/", gateway.RequireToken(token, gw))
 	server := &http.Server{
 		Addr:    "127.0.0.1:8787",
@@ -165,6 +166,7 @@ func main() {
 	// gateway is served whole. The phone and terminal sockets are deliberately
 	// absent: they are transport, and the relay owns that transport already.
 	rpcMux := http.NewServeMux()
+	rpcMux.Handle("/v1/terminals", gateway.RequireToken(token, termSrv.ListHandler()))
 	rpcMux.Handle("/", gateway.RequireToken(token, gw))
 
 	log.Printf("relay: dialling %s", roomURL)

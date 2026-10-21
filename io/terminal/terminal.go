@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,6 +48,9 @@ type Server struct {
 
 type session struct {
 	id         string
+	pid        int
+	shell      string
+	dir        string
 	pty        *PTY
 	mu         sync.Mutex
 	subs       map[*subscriber]struct{}
@@ -69,6 +73,76 @@ type subscriber struct {
 
 func NewServer(token string) *Server {
 	return &Server{token: token, sess: map[string]*session{}}
+}
+
+// Info is one shell as the engine sees it. The phone shows the pid beside a
+// tab so "Shell 2" still means the same shell after another tab was closed,
+// and reconciles its saved tabs against this list instead of reattaching an id
+// the engine no longer has (which would silently start a different shell).
+type Info struct {
+	ID        string `json:"id"`
+	PID       int    `json:"pid"`
+	Shell     string `json:"shell"`
+	Cwd       string `json:"cwd"`
+	Cols      int    `json:"cols"`
+	Rows      int    `json:"rows"`
+	Alive     bool   `json:"alive"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+// List returns every session the engine still holds, oldest first. Finished
+// shells are included with alive=false until the reaper drops them, so a client
+// can tell "exited" from "never existed".
+func (s *Server) List() []Info {
+	s.mu.Lock()
+	s.reapLocked(false)
+	sessions := make([]*session, 0, len(s.sess))
+	for _, sess := range s.sess {
+		sessions = append(sessions, sess)
+	}
+	s.mu.Unlock()
+
+	out := make([]Info, 0, len(sessions))
+	for _, sess := range sessions {
+		sess.mu.Lock()
+		info := Info{
+			ID:        sess.id,
+			PID:       sess.pid,
+			Shell:     sess.shell,
+			Cwd:       sess.dir,
+			Cols:      int(sess.cols),
+			Rows:      int(sess.rows),
+			Alive:     !sess.dead,
+			CreatedAt: sess.createdAt.Unix(),
+		}
+		sess.mu.Unlock()
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt == out[j].CreatedAt {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt < out[j].CreatedAt
+	})
+	return out
+}
+
+// ListHandler serves GET /v1/terminals for the relay's rpc channel. The relay
+// already authenticated the socket, and the mux wraps this in RequireToken, but
+// checking again keeps the direct HTTP path honest too.
+func (s *Server) ListHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !wsock.BearerOK(r, s.token) {
+			http.Error(w, "token rejected", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"terminals": s.List()})
+	})
 }
 
 func (s *Server) limit() int {
@@ -149,7 +223,8 @@ func (s *Server) acquireSession(id string, cols, rows uint16, dir, sh string) (*
 		return nil, false, err
 	}
 	sess := &session{
-		id: id, pty: p, subs: map[*subscriber]struct{}{},
+		id: id, pid: p.Pid(), shell: sh, dir: dir, pty: p,
+		subs:  map[*subscriber]struct{}{},
 		modes: newModeTracker(),
 		cols:  cols, rows: rows, createdAt: time.Now(), lastAct: time.Now(),
 		stop: make(chan struct{}),
@@ -293,6 +368,7 @@ func (s *Server) serve(conn net.Conn, br *bufio.Reader, r *http.Request, sess *s
 	// send ready
 	_ = wsock.WriteFrame(conn, wsock.OpText, mustJSON(map[string]any{
 		"type": "ready", "shell": sh, "cwd": dir, "cols": cols, "rows": rows, "id": id,
+		"pid": sess.pid,
 	}))
 	// Replay onto a known state. A client may be reattaching to a screen it
 	// already has — after a dropped link, or after the engine restarted under
