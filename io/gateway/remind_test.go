@@ -46,7 +46,7 @@ func reminderMessages(messages []provider.Message) []provider.Message {
 	return out
 }
 
-func TestPrepareMessagesInjectsActiveObjectivesBeforeTheQuestion(t *testing.T) {
+func TestPrepareMessagesInjectsActiveObjectivesAtTheTail(t *testing.T) {
 	store := &memObjectives{items: map[string][]goals.Item{
 		"chat-1": {
 			{ID: "g-1111", Kind: goals.Goal, Content: "ship the release"},
@@ -62,13 +62,16 @@ func TestPrepareMessagesInjectsActiveObjectivesBeforeTheQuestion(t *testing.T) {
 	if !whole {
 		t.Error("whole = false for a conversation that fits")
 	}
-	if len(conversation) != 2 || !isReminder(conversation[0]) || conversation[1].Content != "what is next?" {
-		t.Fatalf("conversation = %#v, want reminder then the question", conversation)
+	if len(conversation) != 2 || conversation[0].Content != "what is next?" || !isReminder(conversation[1]) {
+		t.Fatalf("conversation = %#v, want the question then the reminder", conversation)
 	}
 	if !hasReminder(messages) {
 		t.Fatal("messages have no reminder")
 	}
-	text := messages[0].Content
+	if !isReminder(messages[len(messages)-1]) {
+		t.Fatalf("reminder is not the last message: %#v", messages)
+	}
+	text := messages[len(messages)-1].Content
 	for _, want := range []string{
 		"<system-remind>", "</system-remind>",
 		"Goals:\n- [g-1111] ship the release",
@@ -89,8 +92,8 @@ func TestPrepareMessagesKeepsAUserAttachmentWithTheReminder(t *testing.T) {
 		Role: "user", Content: "what is this?", Images: []provider.Image{{}},
 	}}, session.Window{Max: 100000}, "chat-1", &reminderState{})
 
-	if len(conversation) != 2 || !isReminder(conversation[0]) || len(conversation[1].Images) != 1 {
-		t.Fatalf("conversation = %#v, want reminder then the attached question", conversation)
+	if len(conversation) != 2 || len(conversation[0].Images) != 1 || !isReminder(conversation[1]) {
+		t.Fatalf("conversation = %#v, want the attached question then the reminder", conversation)
 	}
 }
 
@@ -119,8 +122,9 @@ func TestPrepareMessagesInjectsEmptyListAfterAChange(t *testing.T) {
 	if !hasReminder(messages) {
 		t.Fatal("a completed last item did not produce a reminder")
 	}
-	if !strings.Contains(messages[0].Content, "Goals:\n- none") {
-		t.Errorf("empty reminder does not say none:\n%s", messages[0].Content)
+	text := messages[len(messages)-1].Content
+	if !strings.Contains(text, "Goals:\n- none") {
+		t.Errorf("empty reminder does not say none:\n%s", text)
 	}
 	if state.dirty {
 		t.Error("dirty was not cleared after injecting")
@@ -153,7 +157,7 @@ func TestPrepareMessagesReplacesAStaleReminder(t *testing.T) {
 	}
 }
 
-func TestPrepareMessagesReinjectsWhenTrimDropsTheReminder(t *testing.T) {
+func TestPrepareMessagesPinsTheReminderAfterTrim(t *testing.T) {
 	store := &memObjectives{items: map[string][]goals.Item{
 		"chat-1": {{ID: "g-1111", Kind: goals.Goal, Content: "keep this"}},
 	}}
@@ -175,13 +179,38 @@ func TestPrepareMessagesReinjectsWhenTrimDropsTheReminder(t *testing.T) {
 	if len(reminders) != 1 || !strings.Contains(reminders[0].Content, "keep this") {
 		t.Fatalf("reminders = %#v, want one fresh reminder", reminders)
 	}
-	if messages[len(messages)-1].Content != "the new question" {
-		t.Errorf("last message = %q, want the new question", messages[len(messages)-1].Content)
+	if messages[len(messages)-2].Content != "the new question" {
+		t.Errorf("question = %q, want it immediately before the reminder", messages[len(messages)-2].Content)
 	}
-	// The reminder and the question are one trim turn, so a tight window keeps
-	// both rather than keeping the reminder and dropping the question.
-	if !isReminder(messages[len(messages)-2]) {
-		t.Errorf("reminder is not immediately before the question: %#v", messages)
+	if !isReminder(messages[len(messages)-1]) {
+		t.Errorf("reminder is not the last message: %#v", messages)
+	}
+}
+
+func TestPrepareMessagesKeepsOneReminderAtTheTailAcrossRounds(t *testing.T) {
+	store := &memObjectives{items: map[string][]goals.Item{
+		"chat-1": {{ID: "g-1111", Kind: goals.Goal, Content: "stay focused"}},
+	}}
+	g := &Gateway{objectives: store}
+	state := &reminderState{}
+	conversation := []provider.Message{{Role: "user", Content: "start"}}
+
+	conversation, _, _ = g.prepareMessages(conversation, session.Window{Max: 100000}, "chat-1", state)
+	conversation = append(conversation,
+		provider.Message{Role: "assistant", Content: "working"},
+		provider.Message{Role: "tool", ToolName: "goal_edit", Content: "goal g-1111 updated"},
+	)
+	_, messages, _ := g.prepareMessages(conversation, session.Window{Max: 100000}, "chat-1", state)
+
+	reminders := reminderMessages(messages)
+	if len(reminders) != 1 {
+		t.Fatalf("reminders = %d, want exactly one", len(reminders))
+	}
+	if !isReminder(messages[len(messages)-1]) {
+		t.Fatalf("reminder is not the last message: %#v", messages)
+	}
+	if !strings.Contains(reminders[0].Content, "stay focused") {
+		t.Errorf("reminder lost the active goal:\n%s", reminders[0].Content)
 	}
 }
 

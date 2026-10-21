@@ -19,10 +19,12 @@ const (
 
 // reminderState is per-turn bookkeeping. dirty is set when a goal or plan tool
 // succeeded; checkedEmpty remembers that this turn already looked at an empty
-// store, so a long tool loop does not query D1 every round for nothing.
+// store, so a long tool loop does not query D1 every round for nothing. text is
+// the reminder currently in force for this turn.
 type reminderState struct {
 	dirty        bool
 	checkedEmpty bool
+	text         string
 }
 
 func isReminder(message provider.Message) bool {
@@ -52,64 +54,74 @@ func stripReminders(conversation []provider.Message) []provider.Message {
 	return out
 }
 
-// insertReminder puts one fresh reminder in the conversation. When the newest
-// message is the user's question, the reminder goes just before it so they stay
-// in the same trim turn: the sliding window always keeps the newest turn, and
-// the question must not be separated from the reminder that serves it.
-func insertReminder(conversation []provider.Message, text string) []provider.Message {
+// appendReminder puts one fresh reminder at the very end of the request, after
+// trimming room for it. The tail is the cache-friendly position: the next
+// request keeps every earlier message as a prefix, so replacing the reminder
+// only invalidates the last message instead of the user's question. The
+// reminder is trimmed separately from the conversation so the newest turn
+// always survives even when the window is tight.
+func appendReminder(conversation []provider.Message, text string, window session.Window) ([]provider.Message, bool) {
 	conversation = stripReminders(conversation)
 	reminder := provider.Message{Role: "user", Content: text}
-	if n := len(conversation); n > 0 && isUserTurnStart(conversation, n-1) {
-		out := make([]provider.Message, 0, n+1)
-		out = append(out, conversation[:n-1]...)
-		out = append(out, reminder, conversation[n-1])
-		return out
+	if window.Max <= 0 {
+		window.Max = session.DefaultMaxTokens
 	}
-	return append(conversation, reminder)
-}
-
-// isUserTurnStart reports whether this message is the user's own newest turn
-// (possibly with an attachment) rather than the caption the engine adds after a
-// tool returns a picture. The reminder goes inside that same trim turn so a
-// tight window cannot keep the reminder while dropping the question.
-func isUserTurnStart(conversation []provider.Message, i int) bool {
-	message := conversation[i]
-	if message.Role != "user" || message.ToolCallID != "" || isReminder(message) {
-		return false
+	window.Max -= session.MessageTokens(reminder)
+	if window.Max < 1 {
+		window.Max = 1
 	}
-	if len(message.Images) > 0 && i > 0 && conversation[i-1].Role == "tool" {
-		return false
-	}
-	return true
+	trimmed := session.Trim(conversation, window)
+	out := make([]provider.Message, 0, len(trimmed)+1)
+	out = append(out, trimmed...)
+	out = append(out, reminder)
+	return out, len(trimmed) == len(conversation)
 }
 
 // prepareMessages trims the conversation and, when needed, injects the active
-// goals and plans as a <system-remind> user message. A reminder is injected
-// when a goal or plan tool changed something, or when the previous reminder no
-// longer survived the sliding window. It is not injected for a chat that has no
-// active goals or plans and did not just change them.
+// goals and plans as a <system-remind> user message at the tail. A reminder is
+// injected when a goal or plan tool changed something, or when this turn has
+// not looked at the store yet. It is not injected for a chat that has no active
+// goals or plans and did not just change them.
 func (g *Gateway) prepareMessages(conversation []provider.Message, window session.Window, sessionID string, state *reminderState) ([]provider.Message, []provider.Message, bool) {
-	messages := session.Trim(conversation, window)
-	need := state.dirty || (!state.checkedEmpty && !hasReminder(messages))
+	if window.Max <= 0 {
+		window.Max = session.DefaultMaxTokens
+	}
+	// Older reminders are transient too. Strip them before trimming so the
+	// newest turn is the user's question, not a stale reminder from the last
+	// round.
+	base := stripReminders(conversation)
+	if len(base) != len(conversation) {
+		// A provider count from the previous round covered the reminder that
+		// was just removed, so it no longer describes this conversation's
+		// prefix. Size the trimmed window from the estimate instead.
+		window = session.Window{Max: window.Max}
+	}
+	need := state.dirty || (!state.checkedEmpty && state.text == "")
 	if need {
 		text, active, err := g.objectiveReminder(sessionID)
 		switch {
 		case err != nil:
 			// A failed reminder must not fail the turn. The next round retries
-			// because dirty stays set only for an update; a read failure is
-			// just logged and checked again on the next request.
+			// because text stays empty or dirty stays set.
 			log.Printf("gateway: objective reminder: %v", err)
 		case text != "" && (active || state.dirty):
-			conversation = insertReminder(conversation, text)
-			messages = session.Trim(conversation, window)
+			state.text = text
 			state.checkedEmpty = !active
 			state.dirty = false
 		case !active:
+			state.text = ""
 			state.checkedEmpty = true
 			state.dirty = false
 		}
 	}
-	return conversation, messages, len(messages) == len(conversation)
+
+	if state.text != "" {
+		out, wholeConversation := appendReminder(base, state.text, window)
+		return out, out, wholeConversation && len(base) == len(conversation)
+	}
+
+	messages := session.Trim(base, window)
+	return messages, messages, len(messages) == len(base) && len(base) == len(conversation)
 }
 
 func (g *Gateway) objectiveReminder(sessionID string) (string, bool, error) {
