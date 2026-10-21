@@ -467,6 +467,73 @@ func TestRetryStreamIncludesAlreadyRecordedUserWithoutReadingHistoryTwice(t *tes
 	}
 }
 
+func TestRetryRequestResumesStoredTurnWithoutAppendingUser(t *testing.T) {
+	store := newMemStore()
+	g, _ := newTestGateway(t, store)
+	postJSON(t, g.Handler(), "/v1/sessions", `{"model":"mock/test-model"}`)
+	store.AppendTurns("s1", []session.TurnInput{{Role: "user", Text: "hi"}})
+
+	rec := postJSON(t, g.Handler(), "/v1/chat/completions",
+		`{"session_id":"s1","retry":true,"stream":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	turns, _ := store.Turns("s1")
+	users := 0
+	for _, row := range turns {
+		if row.Role == "user" {
+			users++
+			if row.Text != "hi" {
+				t.Fatalf("retry rewrote the question: %+v", turns)
+			}
+		}
+	}
+	if users != 1 {
+		t.Fatalf("retry appended a second user row: %+v", turns)
+	}
+	if len(turns) < 2 || turns[len(turns)-1].Role != "assistant" || turns[len(turns)-1].Text != "done" {
+		t.Fatalf("retry did not finish the turn: %+v", turns)
+	}
+}
+
+func TestUnfinishedQuestionSurvivesAnInterruptedToolLoop(t *testing.T) {
+	turns := []session.Turn{
+		{Role: "user", Text: "hi"},
+		{Role: "assistant", Text: "checking", Block: session.TextBlock("n1", "checking").JSON()},
+		{Role: "tool_call", Text: `{"id":"c1","name":"read","arguments":"{}"}`},
+		{Role: "tool_result", Text: `{"tool_call_id":"c1","name":"read","content":"ok"}`},
+	}
+	if !hasUnfinishedQuestion(turns) {
+		t.Fatalf("narration before a tool was mistaken for the answer: %+v", turns)
+	}
+	turns = append(turns, session.Turn{
+		Role: "assistant", Text: "done", Block: session.TextBlock("answer", "done").JSON(),
+	})
+	if hasUnfinishedQuestion(turns) {
+		t.Fatalf("finished turn still looks retryable: %+v", turns)
+	}
+}
+
+func TestRetryRequestRejectsFinishedTurn(t *testing.T) {
+	store := newMemStore()
+	g, _ := newTestGateway(t, store)
+	postJSON(t, g.Handler(), "/v1/sessions", `{"model":"mock/test-model"}`)
+	store.AppendTurns("s1", []session.TurnInput{
+		{Role: "user", Text: "hi"},
+		{Role: "assistant", Text: "done", Block: answerBlock("done")},
+	})
+
+	rec := postJSON(t, g.Handler(), "/v1/chat/completions",
+		`{"session_id":"s1","retry":true,"stream":true}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body = %s", rec.Code, rec.Body.String())
+	}
+	turns, _ := store.Turns("s1")
+	if len(turns) != 2 {
+		t.Fatalf("retry changed a finished turn: %+v", turns)
+	}
+}
+
 type partialStore struct {
 	*memStore
 	failed bool

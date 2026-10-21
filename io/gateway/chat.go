@@ -36,6 +36,10 @@ type chatRequest struct {
 	// WebSocket sends one new message per turn; without this flag the history is
 	// matched against a single message, never matches, and is discarded.
 	Append bool `json:"append,omitempty"`
+	// Retry resumes the last question already stored in the session instead of
+	// appending messages. The phone uses it after a failed turn, so a retry
+	// never creates a second copy of the user's bubble or the prompt.
+	Retry bool `json:"retry,omitempty"`
 	// Attachments are files the phone uploaded first. Pictures among them are
 	// sent to the model as pictures rather than described to it, so a question
 	// about a photograph can be answered by looking at it.
@@ -199,7 +203,7 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	if len(body.Messages) == 0 {
+	if len(body.Messages) == 0 && !body.Retry {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "messages must not be empty")
 		return
 	}
@@ -236,7 +240,27 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 	history, delta := incoming, incoming
 	var savedTurns []session.Turn
 	var saved []provider.Message
-	if stored != nil {
+	if body.Retry {
+		if stored == nil {
+			writeError(w, http.StatusBadRequest, "invalid_request_error", "retry requires a session_id")
+			return
+		}
+		var err error
+		savedTurns, err = g.sessions.Turns(stored.ID)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "database_error", err.Error())
+			return
+		}
+		saved = session.MessagesFromTurns(savedTurns)
+		if !hasUnfinishedQuestion(savedTurns) {
+			writeError(w, http.StatusConflict, "invalid_request_error", "no unfinished turn to retry")
+			return
+		}
+		// No delta: the question and every tool step already stored belong to
+		// the turn being resumed. Persist will only append what this attempt
+		// produces from here on.
+		history, delta = saved, nil
+	} else if stored != nil {
 		var err error
 		savedTurns, err = g.sessions.Turns(stored.ID)
 		if err != nil {
@@ -926,7 +950,41 @@ func (g *Gateway) selectTools(names *[]string) ([]provider.ToolDef, error) {
 	return selected, nil
 }
 
-// persistUserDelta records the user's new turns when the upstream call failed,
+// hasUnfinishedQuestion reports whether the newest user turn has no closing
+// answer after it. Narration stored before a tool call is an assistant row too,
+// so a plain role check would call an interrupted tool loop finished: the
+// closing row is the one whose display block is the answer, recognised here the
+// same way the phone recognises it.
+func hasUnfinishedQuestion(turns []session.Turn) bool {
+	lastUser := -1
+	for i, turn := range turns {
+		if turn.Role == "user" {
+			lastUser = i
+		}
+	}
+	if lastUser < 0 {
+		return false
+	}
+	for _, turn := range turns[lastUser+1:] {
+		if isStoredAnswer(turn) {
+			return false
+		}
+	}
+	return true
+}
+
+func isStoredAnswer(turn session.Turn) bool {
+	if block, ok := session.ParseBlock(turn.Block); ok &&
+		block.Type == session.BlockText && block.ID == "answer" {
+		return true
+	}
+	// Rows written before display blocks still carry the final answer's
+	// footer; narration before a tool call carries neither model nor usage.
+	return turn.Role == "assistant" &&
+		(turn.Model != "" || turn.DurationMS > 0 || turn.InputTokens > 0 || turn.OutputTokens > 0)
+}
+
+// persistUserBefore records the user's new turns when the upstream call failed,
 // so a failed send still leaves its question in history instead of vanishing.
 // A question already recorded by an earlier failed attempt is not stacked
 // again: repeats reuse the recorded row.

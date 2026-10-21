@@ -26,7 +26,12 @@ import (
 // before sending it: the pictures among them go to the model as pictures, and
 // every one of them is still named in the text for the model that cannot take
 // them or for a later turn that reads this back from the database.
-type ChatFunc func(ctx context.Context, sessionID, text string, attachments []Attachment, onDelta func(string), onTool func(ToolEvent)) (ChatResult, error)
+//
+// retry asks the engine to resume the last unfinished question already stored
+// in the session instead of appending text as a new user turn. The phone sends
+// it after a failed turn, so pressing retry does not stack a duplicate bubble or
+// make the model read the same question twice.
+type ChatFunc func(ctx context.Context, sessionID, text string, retry bool, attachments []Attachment, onDelta func(string), onTool func(ToolEvent)) (ChatResult, error)
 
 // ChatResult carries committed rows, not a socket-local sequence counter.
 type ChatResult struct {
@@ -299,6 +304,17 @@ func handle(p *peer, in inFrame, chat ChatFunc) {
 		if p.cancelSession(in.SessionID) == 0 {
 			_ = p.send(outFrame{Kind: "done", SessionID: in.SessionID, Stage: "already_done"})
 		}
+	case "retry":
+		// The question is already in the session. Re-run the turn from what the
+		// engine stored, without appending a twin user row.
+		_ = p.send(outFrame{Kind: "ack", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID})
+		ctx, cancel := context.WithCancel(context.Background())
+		key := in.ClientMsgID
+		if key == "" {
+			key = in.SessionID
+		}
+		p.register(key, in.SessionID, cancel)
+		go p.answer(ctx, cancel, key, in, "", true, chat)
 	case "message", "":
 		var parts []string
 		for _, c := range in.Content {
@@ -329,7 +345,7 @@ func handle(p *peer, in inFrame, chat ChatFunc) {
 			key = in.SessionID
 		}
 		p.register(key, in.SessionID, cancel)
-		go p.answer(ctx, cancel, key, in, text, chat)
+		go p.answer(ctx, cancel, key, in, text, false, chat)
 	}
 }
 
@@ -375,7 +391,7 @@ func attachmentNote(items []attachment) string {
 	return b.String()
 }
 
-func (p *peer) answer(ctx context.Context, cancel context.CancelFunc, key string, in inFrame, text string, chat ChatFunc) {
+func (p *peer) answer(ctx context.Context, cancel context.CancelFunc, key string, in inFrame, text string, retry bool, chat ChatFunc) {
 	defer cancel()
 	defer p.unregister(key)
 	// This runs in its own goroutine, so a panic here would take the whole
@@ -412,7 +428,7 @@ func (p *peer) answer(ctx context.Context, cancel context.CancelFunc, key string
 		}
 		_ = p.send(frame)
 	}
-	result, err := chat(ctx, in.SessionID, text, attachmentsOf(in.Attachments), onDelta, onTool)
+	result, err := chat(ctx, in.SessionID, text, retry, attachmentsOf(in.Attachments), onDelta, onTool)
 	if ctx.Err() != nil {
 		_ = p.send(outFrame{Kind: "done", SessionID: in.SessionID, ClientMsgID: in.ClientMsgID, Stage: "cancelled", Turns: result.Turns, TurnsSynced: result.TurnsSynced})
 		return

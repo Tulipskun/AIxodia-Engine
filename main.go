@@ -259,7 +259,7 @@ func startConfigReloader(ctx context.Context) {
 // otherwise the agent default — without this every chat is answered with
 // the default even after the user pins another model mid-session.
 func chatViaGateway(h http.Handler, model string) mobile.ChatFunc {
-	return func(ctx context.Context, sessionID, text string, attachments []mobile.Attachment, onDelta func(string), onTool func(mobile.ToolEvent)) (mobile.ChatResult, error) {
+	return func(ctx context.Context, sessionID, text string, retry bool, attachments []mobile.Attachment, onDelta func(string), onTool func(mobile.ToolEvent)) (mobile.ChatResult, error) {
 		activeChats.Add(1)
 		defer activeChats.Add(-1)
 		var result mobile.ChatResult
@@ -270,6 +270,13 @@ func chatViaGateway(h http.Handler, model string) mobile.ChatFunc {
 		for _, a := range attachments {
 			payload = append(payload, map[string]string{"path": a.Path, "name": a.Name, "mime": a.Mime})
 		}
+		messages := []map[string]string{{"role": "user", "content": text}}
+		if retry {
+			// A retry names no new question: the gateway resumes the last user
+			// turn it already stored. Sending the text again would append a
+			// duplicate user row and make the model answer the same thing twice.
+			messages = nil
+		}
 		body, err := json.Marshal(map[string]any{
 			"session_id": sessionID,
 			"model":      sessionModel(h, sessionID, model),
@@ -278,7 +285,8 @@ func chatViaGateway(h http.Handler, model string) mobile.ChatFunc {
 			// transcript: the gateway appends it to the stored history instead
 			// of trying to match a prefix it cannot share.
 			"append":      true,
-			"messages":    []map[string]string{{"role": "user", "content": text}},
+			"retry":       retry,
+			"messages":    messages,
 			"attachments": payload,
 		})
 		if err != nil {

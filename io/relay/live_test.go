@@ -46,7 +46,7 @@ func TestLiveRelayRoundTrip(t *testing.T) {
 		engine <- Run(ctx, Config{
 			URL: roomURL, Token: token, Started: 1000, Version: "live-test",
 			Hub: mobile.NewHub(),
-			Chat: func(context.Context, string, string, []mobile.Attachment, func(string), func(mobile.ToolEvent)) (mobile.ChatResult, error) {
+			Chat: func(context.Context, string, string, bool, []mobile.Attachment, func(string), func(mobile.ToolEvent)) (mobile.ChatResult, error) {
 				return mobile.ChatResult{}, nil
 			},
 			API: api,

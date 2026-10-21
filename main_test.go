@@ -35,7 +35,7 @@ func TestChatBridgeCarriesCommittedRowsAndFinalAnswer(t *testing.T) {
 		fmt.Fprint(w, "data: "+`{"turn":{"seq":42,"role":"assistant","text":"answer","cache_read_tokens":80,"reasoning_content":"real reasoning","generation_ms":200},"turns_synced":true}`+"\n\n")
 	})
 	var reasoning string
-	got, err := chatViaGateway(h, "mock/m")(context.Background(), "s", "hi", nil, func(string) {}, func(ev mobile.ToolEvent) {
+	got, err := chatViaGateway(h, "mock/m")(context.Background(), "s", "hi", false, nil, func(string) {}, func(ev mobile.ToolEvent) {
 		if ev.Stage == "reasoning" {
 			reasoning += ev.Text
 		}

@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-func fakeChat(ctx context.Context, sessionID, text string, attachments []Attachment, onDelta func(string), onTool func(ToolEvent)) (ChatResult, error) {
+func fakeChat(ctx context.Context, sessionID, text string, retry bool, attachments []Attachment, onDelta func(string), onTool func(ToolEvent)) (ChatResult, error) {
 	onDelta("echo: ")
 	onDelta(text)
 	return ChatResult{Answer: session.Turn{Text: "echo: " + text, InputTokens: 3, OutputTokens: 4}}, nil
@@ -29,7 +29,7 @@ func TestClosingFramesCarryActualSeqAndFullTurnBatch(t *testing.T) {
 		InputTokens: 100, OutputTokens: 5, CacheReadTokens: 80, CacheWriteTokens: 2,
 		ReasoningTokens: 3, ReasoningContent: "real reasoning", InputIncludesCache: true,
 		DurationMS: 9000, GenerationMS: 4000, CreatedAt: 123}
-	chat := func(ctx context.Context, sid, text string, a []Attachment, delta func(string), tool func(ToolEvent)) (ChatResult, error) {
+	chat := func(ctx context.Context, sid, text string, retry bool, a []Attachment, delta func(string), tool func(ToolEvent)) (ChatResult, error) {
 		return ChatResult{Answer: answer, Turns: []session.Turn{{SessionID: "s1", Seq: 40, Role: "user", Text: text}, answer}, TurnsSynced: true}, nil
 	}
 	srv := httptest.NewServer(Handler("good", chat))
@@ -149,6 +149,34 @@ func TestMessageRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRetryFrameAsksEngineToResumeStoredTurn(t *testing.T) {
+	type call struct {
+		text  string
+		retry bool
+	}
+	got := make(chan call, 1)
+	chat := func(ctx context.Context, sid, text string, retry bool, a []Attachment, delta func(string), tool func(ToolEvent)) (ChatResult, error) {
+		got <- call{text: text, retry: retry}
+		return ChatResult{TurnsSynced: true}, nil
+	}
+	srv := httptest.NewServer(Handler("good", chat))
+	defer srv.Close()
+	conn, _, code := dialWS(t, srv, "good")
+	defer conn.Close()
+	if code != http.StatusSwitchingProtocols {
+		t.Fatalf("want 101, got %d", code)
+	}
+	sendMasked(t, conn, []byte(`{"type":"retry","session_id":"s1","client_msg_id":"r1"}`))
+	select {
+	case c := <-got:
+		if !c.retry || c.text != "" {
+			t.Fatalf("retry call = %+v, want retry with no text", c)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("retry frame never reached the engine")
+	}
+}
+
 // sendClose writes a masked close frame, the way the phone says it is finished.
 func sendClose(t *testing.T, conn net.Conn) {
 	t.Helper()
@@ -162,7 +190,7 @@ func sendClose(t *testing.T, conn net.Conn) {
 // parkedChat is a turn that waits to be released, so a test can decide when it
 // finishes and see whether it was cancelled instead.
 func parkedChat(started chan<- struct{}, release <-chan struct{}, finished chan<- error) ChatFunc {
-	return func(ctx context.Context, sessionID, text string, attachments []Attachment, onDelta func(string), onTool func(ToolEvent)) (ChatResult, error) {
+	return func(ctx context.Context, sessionID, text string, retry bool, attachments []Attachment, onDelta func(string), onTool func(ToolEvent)) (ChatResult, error) {
 		close(started)
 		select {
 		case <-release:

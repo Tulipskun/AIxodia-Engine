@@ -231,7 +231,7 @@ func TestEngineCarriesChatFramesUnchanged(t *testing.T) {
 	fr := newFakeRelay(t, "tok")
 	start(t, Config{
 		URL: fr.url(), Token: "tok",
-		Hub: mobile.NewHub(), Chat: func(context.Context, string, string, []mobile.Attachment, func(string), func(mobile.ToolEvent)) (mobile.ChatResult, error) {
+		Hub: mobile.NewHub(), Chat: func(context.Context, string, string, bool, []mobile.Attachment, func(string), func(mobile.ToolEvent)) (mobile.ChatResult, error) {
 			return mobile.ChatResult{}, nil
 		},
 		Logf: func(string, ...any) {},
