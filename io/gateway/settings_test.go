@@ -43,7 +43,7 @@ func TestSettingsRoundTripLandsInTheStore(t *testing.T) {
 		t.Fatalf("settings before any write = %s, want the defaults", got)
 	}
 
-	saved := `{"main":{"provider":"Opencode","model":"big-pickle","generation":{}},"sub":{"provider":"","model":"","generation":{}},"sub_enabled":false}`
+	saved := `{"main":{"provider":"Opencode","model":"big-pickle","generation":{}}}`
 	put := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(saved))
 	put.Header.Set("Content-Type", "application/json")
 	recorder = httptest.NewRecorder()

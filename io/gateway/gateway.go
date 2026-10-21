@@ -39,7 +39,7 @@ var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // Version is the release tag, baked in at build time. Bump on every release
 // so a live service can be identified via GET /healthz.
-const Version = "v1.149"
+const Version = "v1.150"
 
 type SessionStore interface {
 	Create(params session.NewSession) (*session.Session, error)
@@ -155,9 +155,6 @@ type createSessionRequest struct {
 	Title       string   `json:"title"`
 	Provider    string   `json:"provider"`
 	Model       string   `json:"model"`
-	SubProvider string   `json:"sub_provider"`
-	SubModel    string   `json:"sub_model"`
-	SubEnabled  bool     `json:"sub_enabled"`
 	Reasoning   bool     `json:"reasoning"`
 	Temperature *float64 `json:"temperature"`
 	TopP        *float64 `json:"top_p"`
@@ -197,9 +194,6 @@ func (g *Gateway) createSession(w http.ResponseWriter, r *http.Request) {
 		Title:       body.Title,
 		Provider:    body.Provider,
 		Model:       body.Model,
-		SubProvider: body.SubProvider,
-		SubModel:    body.SubModel,
-		SubEnabled:  body.SubEnabled,
 		Reasoning:   body.Reasoning,
 		Temperature: body.Temperature,
 		TopP:        body.TopP,

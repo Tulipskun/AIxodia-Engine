@@ -44,9 +44,6 @@ func (m *memStore) Create(params session.NewSession) (*session.Session, error) {
 		Title:       params.Title,
 		Provider:    params.Provider,
 		Model:       params.Model,
-		SubProvider: params.SubProvider,
-		SubModel:    params.SubModel,
-		SubEnabled:  params.SubEnabled,
 		Temperature: params.Temperature,
 		TopP:        params.TopP,
 		MaxTokens:   params.MaxTokens,
@@ -110,15 +107,6 @@ func (m *memStore) SaveAgent(id string, patch session.AgentPatch) error {
 	}
 	if patch.Model != nil {
 		target.Model = *patch.Model
-	}
-	if patch.SubProvider != nil {
-		target.SubProvider = *patch.SubProvider
-	}
-	if patch.SubModel != nil {
-		target.SubModel = *patch.SubModel
-	}
-	if patch.SubEnabled != nil {
-		target.SubEnabled = *patch.SubEnabled
 	}
 	return nil
 }
@@ -953,7 +941,7 @@ func TestToolHooksFireDuringRounds(t *testing.T) {
 			results = append(results, call.Name)
 		},
 	}
-	resp, err := gateway.complete(context.Background(), primary, nil,
+	resp, err := gateway.complete(context.Background(), primary,
 		[]provider.Message{{Role: "user", Content: "what time is it"}}, options)
 	if err != nil {
 		t.Fatalf("complete: %v", err)
@@ -1055,7 +1043,7 @@ func TestFinalAnswerHoldsOnlyTheLastToolRound(t *testing.T) {
 	primary := route{adapter: impl, prov: toInternalProvider(config.Providers[0]), model: "test-model"}
 	defs := []provider.ToolDef{tools.Builtin()["current_time"].Def}
 
-	resp, err := gateway.complete(context.Background(), primary, nil,
+	resp, err := gateway.complete(context.Background(), primary,
 		[]provider.Message{{Role: "user", Content: "เวลาเท่าไหร่"}},
 		completionOptions{maxTokens: 100, tools: defs})
 	if err != nil {

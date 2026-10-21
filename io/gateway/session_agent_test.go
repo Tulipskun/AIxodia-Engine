@@ -11,7 +11,7 @@ import (
 // Pinning a model for one chat is what the phone's per-chat menu does. The pin
 // goes through the session store, and a patch that names one field must leave
 // the others — including the provider and model the chat runs on — alone.
-func TestSessionAgentPatchLandsInTheStore(t *testing.T) {
+func TestSessionModelPatchLandsInTheStore(t *testing.T) {
 	store := newMemStore()
 	gateway, _ := newTestGateway(t, store)
 	handler := gateway.Handler()
@@ -27,7 +27,7 @@ func TestSessionAgentPatchLandsInTheStore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	patch := httptest.NewRequest(http.MethodPatch, "/api/sessions/"+createdSession.ID, strings.NewReader(`{"sub_provider":"Other","sub_model":"small","sub_enabled":true}`))
+	patch := httptest.NewRequest(http.MethodPatch, "/api/sessions/"+createdSession.ID, strings.NewReader(`{"model":"pinned-model"}`))
 	patch.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, patch)
@@ -35,21 +35,18 @@ func TestSessionAgentPatchLandsInTheStore(t *testing.T) {
 		t.Fatalf("patch status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 	var answer struct {
-		Provider    string `json:"provider"`
-		Model       string `json:"model"`
-		SubProvider string `json:"sub_provider"`
-		SubModel    string `json:"sub_model"`
-		SubEnabled  bool   `json:"sub_enabled"`
-		SubPinned   bool   `json:"sub_pinned"`
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		Pinned   bool   `json:"pinned"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
 		t.Fatal(err)
 	}
-	if answer.SubProvider != "Other" || answer.SubModel != "small" || !answer.SubEnabled || !answer.SubPinned {
-		t.Fatalf("patch answer = %+v, want the pinned sub agent", answer)
+	if answer.Model != "pinned-model" || !answer.Pinned {
+		t.Fatalf("patch answer = %+v, want the pinned model", answer)
 	}
-	if answer.Provider != "" || answer.Model != "mock/test-model" {
-		t.Fatalf("patch answer = %+v, want the chat's own model untouched", answer)
+	if answer.Provider != "" {
+		t.Fatalf("patch answer = %+v, want the provider untouched", answer)
 	}
 
 	// The pin has to be in the store, not only in the answer.
@@ -57,14 +54,14 @@ func TestSessionAgentPatchLandsInTheStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.SubProvider != "Other" || stored.SubModel != "small" || !stored.SubEnabled {
+	if stored.Model != "pinned-model" {
 		t.Fatalf("stored session = %+v, want the pin written to the store", stored)
 	}
-	if stored.Provider != "" || stored.Model != "mock/test-model" || stored.Title != "hello" {
+	if stored.Provider != "" || stored.Title != "hello" {
 		t.Fatalf("stored session = %+v, want the chat untouched otherwise", stored)
 	}
 
-	missing := httptest.NewRequest(http.MethodPatch, "/api/sessions/no-such-chat", strings.NewReader(`{"sub_model":"small"}`))
+	missing := httptest.NewRequest(http.MethodPatch, "/api/sessions/no-such-chat", strings.NewReader(`{"model":"small"}`))
 	missing.Header.Set("Content-Type", "application/json")
 	recorder = httptest.NewRecorder()
 	handler.ServeHTTP(recorder, missing)

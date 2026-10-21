@@ -103,7 +103,7 @@ func TestToolPictureReachesTheModelAsAnImage(t *testing.T) {
 	}
 	primary := route{adapter: impl, prov: toInternalProvider(config.Providers[0]), model: "test-model"}
 
-	resp, err := g.complete(context.Background(), primary, nil,
+	resp, err := g.complete(context.Background(), primary,
 		[]provider.Message{{Role: "user", Content: "what is on the board"}},
 		completionOptions{maxTokens: 50, tools: []provider.ToolDef{{Name: "shot"}}})
 	if err != nil {

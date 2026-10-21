@@ -313,7 +313,7 @@ func TestCompleteInjectsAReminderAfterAGoalToolUpdate(t *testing.T) {
 	cfg := config.Providers[0]
 
 	resp, err := g.complete(context.Background(),
-		route{adapter: impl, prov: toInternalProvider(cfg), model: "test-model"}, nil,
+		route{adapter: impl, prov: toInternalProvider(cfg), model: "test-model"},
 		[]provider.Message{{Role: "user", Content: "make a goal"}},
 		completionOptions{
 			sessionID: "chat-1",

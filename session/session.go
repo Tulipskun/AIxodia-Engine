@@ -15,9 +15,6 @@ type Session struct {
 	Title       string   `json:"title"`
 	Provider    string   `json:"provider"`
 	Model       string   `json:"model"`
-	SubProvider string   `json:"sub_provider,omitempty"`
-	SubModel    string   `json:"sub_model,omitempty"`
-	SubEnabled  bool     `json:"sub_enabled,omitempty"`
 	Reasoning   bool     `json:"reasoning,omitempty"`
 	Temperature *float64 `json:"temperature,omitempty"`
 	TopP        *float64 `json:"top_p,omitempty"`
@@ -59,9 +56,6 @@ type NewSession struct {
 	Title       string
 	Provider    string
 	Model       string
-	SubProvider string
-	SubModel    string
-	SubEnabled  bool
 	Reasoning   bool
 	Temperature *float64
 	TopP        *float64

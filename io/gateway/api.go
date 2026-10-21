@@ -370,7 +370,7 @@ func (g *Gateway) storedSettings() (string, bool, error) {
 }
 
 func defaultSettings() json.RawMessage {
-	return json.RawMessage(`{"main":{"provider":"","model":"","generation":{}},"sub":{"provider":"","model":"","generation":{}},"sub_enabled":true}`)
+	return json.RawMessage(`{"main":{"provider":"","model":"","generation":{}}}`)
 }
 
 func (g *Gateway) apiGetSettings(w http.ResponseWriter, r *http.Request) {
@@ -419,24 +419,16 @@ func (g *Gateway) apiGetSessionAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"provider":     saved.Provider,
-		"model":        saved.Model,
-		"pinned":       saved.Model != "",
-		"sub_provider": saved.SubProvider,
-		"sub_model":    saved.SubModel,
-		"sub_enabled":  saved.SubEnabled,
-		"sub_pinned":   saved.SubModel != "",
+		"provider": saved.Provider,
+		"model":    saved.Model,
+		"pinned":   saved.Model != "",
 	})
 }
 
 type patchSessionAgentRequest struct {
-	Provider    *string `json:"provider"`
-	Model       *string `json:"model"`
-	ClearModel  bool    `json:"clear_model"`
-	SubProvider *string `json:"sub_provider"`
-	SubModel    *string `json:"sub_model"`
-	ClearSub    bool    `json:"clear_sub"`
-	SubEnabled  *bool   `json:"sub_enabled"`
+	Provider   *string `json:"provider"`
+	Model      *string `json:"model"`
+	ClearModel bool    `json:"clear_model"`
 }
 
 // applySessionAgentPatch turns a PATCH body into the fields to write. The clear
@@ -455,21 +447,6 @@ func applySessionAgentPatch(body patchSessionAgentRequest) session.AgentPatch {
 	if body.Model != nil {
 		trimmed := strings.TrimSpace(*body.Model)
 		patch.Model = &trimmed
-	}
-	if body.ClearSub {
-		empty := ""
-		patch.SubProvider, patch.SubModel = &empty, &empty
-	}
-	if body.SubProvider != nil {
-		trimmed := strings.TrimSpace(*body.SubProvider)
-		patch.SubProvider = &trimmed
-	}
-	if body.SubModel != nil {
-		trimmed := strings.TrimSpace(*body.SubModel)
-		patch.SubModel = &trimmed
-	}
-	if body.SubEnabled != nil {
-		patch.SubEnabled = body.SubEnabled
 	}
 	return patch
 }

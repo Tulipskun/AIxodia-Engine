@@ -305,21 +305,19 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	fallback := g.fallbackRoute(stored)
-
 	if body.Stream {
-		g.chatStream(w, r, stored, primary, fallback, history, delta, options)
+		g.chatStream(w, r, stored, primary, history, delta, options)
 		return
 	}
-	g.chatOnce(w, r, stored, primary, fallback, history, delta, options)
+	g.chatOnce(w, r, stored, primary, history, delta, options)
 }
 
-func (g *Gateway) chatOnce(w http.ResponseWriter, r *http.Request, stored *session.Session, primary route, fallback *route, history, delta []provider.Message, options completionOptions) {
+func (g *Gateway) chatOnce(w http.ResponseWriter, r *http.Request, stored *session.Session, primary route, history, delta []provider.Message, options completionOptions) {
 	started := time.Now()
 	g.persistUserBefore(stored, history, delta, nil)
 	options.trail = g.newTrailWriter(stored)
 	options.onTrail = options.trail.flush
-	resp, err := g.complete(r.Context(), primary, fallback, history, options)
+	resp, err := g.complete(r.Context(), primary, history, options)
 	if err != nil {
 		writeUpstreamError(w, err)
 		return
@@ -355,7 +353,7 @@ func (g *Gateway) chatOnce(w http.ResponseWriter, r *http.Request, stored *sessi
 	})
 }
 
-func (g *Gateway) chatStream(w http.ResponseWriter, r *http.Request, stored *session.Session, primary route, fallback *route, history, delta []provider.Message, options completionOptions) {
+func (g *Gateway) chatStream(w http.ResponseWriter, r *http.Request, stored *session.Session, primary route, history, delta []provider.Message, options completionOptions) {
 	flusher, _ := w.(http.Flusher)
 	created := time.Now().Unix()
 	id := newCompletionID()
@@ -456,7 +454,7 @@ func (g *Gateway) chatStream(w http.ResponseWriter, r *http.Request, stored *ses
 			"block": session.ToolBlock(call.ID, call.Name, call.Arguments, truncate(text, 4096), isError, durationMs),
 		}})
 	}
-	resp, err := g.complete(r.Context(), primary, fallback, history, options)
+	resp, err := g.complete(r.Context(), primary, history, options)
 	if err != nil {
 		payload := map[string]any{"error": map[string]any{"message": err.Error(), "type": "upstream_error"}}
 		_ = writeSSE(w, flusher, payload)
@@ -575,28 +573,12 @@ func (g *Gateway) resolveRoute(stored *session.Session, body chatRequest) (route
 	return route{}, fmt.Errorf("unknown model %q: prefix it with a provider, for example provider/%s (known: %s)", modelID, modelID, providerNames())
 }
 
-func (g *Gateway) fallbackRoute(stored *session.Session) *route {
-	if stored == nil || !stored.SubEnabled || stored.SubProvider == "" || stored.SubModel == "" {
-		return nil
-	}
-	cfg, ok := config.GetProviderByName(stored.SubProvider)
-	if !ok {
-		return nil
-	}
-	implementation, err := g.registry.Require(cfg.Adapter)
-	if err != nil {
-		return nil
-	}
-	return &route{adapter: implementation, prov: toInternalProvider(cfg), model: stored.SubModel}
-}
-
-func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, history []provider.Message, options completionOptions) (*provider.Response, error) {
+func (g *Gateway) complete(ctx context.Context, primary route, history []provider.Message, options completionOptions) (*provider.Response, error) {
 	conversation := append([]provider.Message(nil), history...)
 	// Goal and plan tools are scoped to the chat in options.sessionID. The
 	// context is the only channel the tool signature carries into a run.
 	ctx = tools.WithSession(ctx, options.sessionID)
 	current := primary
-	usedFallback := false
 
 	window := options.window
 	if window.Max <= 0 {
@@ -647,11 +629,6 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 		// talking to a provider, so it counts towards the generation figure.
 		final.GenerationMS += time.Since(callStarted).Milliseconds()
 		if err != nil {
-			if fallback != nil && !usedFallback && canRetry() {
-				current = *fallback
-				usedFallback = true
-				continue
-			}
 			if options.onRequest != nil {
 				options.onRequest(round+1, session.StateDone)
 			}

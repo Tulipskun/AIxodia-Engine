@@ -35,9 +35,6 @@ func (d *D1) Create(params NewSession) (*Session, error) {
 		Title:       params.Title,
 		Provider:    params.Provider,
 		Model:       params.Model,
-		SubProvider: params.SubProvider,
-		SubModel:    params.SubModel,
-		SubEnabled:  params.SubEnabled,
 		Reasoning:   params.Reasoning,
 		Temperature: params.Temperature,
 		TopP:        params.TopP,
@@ -47,18 +44,21 @@ func (d *D1) Create(params NewSession) (*Session, error) {
 	}
 
 	_, err := db.Query(
+		// The sub_provider/sub_model/sub_enabled columns still exist in the
+		// external D1 schema. Write inert values so old rows and readers keep
+		// working while nothing in the engine selects or uses them any more.
 		`INSERT INTO chat_sessions (id,title,provider,model,sub_provider,sub_model,sub_enabled,reasoning,temperature,top_p,max_tokens,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 VALUES (?,?,?,?,'','',0,?,?,?,?,?,?)`,
 		session.ID, session.Title, session.Provider, session.Model,
-		session.SubProvider, session.SubModel, boolInt(session.SubEnabled), boolInt(session.Reasoning),
-		session.Temperature, session.TopP, session.MaxTokens, session.CreatedAt, session.UpdatedAt)
+		boolInt(session.Reasoning), session.Temperature, session.TopP,
+		session.MaxTokens, session.CreatedAt, session.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	return &session, nil
 }
 
-const sessionColumns = `id,title,provider,model,sub_provider,sub_model,sub_enabled,reasoning,temperature,top_p,max_tokens,created_at,updated_at`
+const sessionColumns = `id,title,provider,model,reasoning,temperature,top_p,max_tokens,created_at,updated_at`
 
 func (d *D1) Get(id string) (*Session, error) {
 	rows, err := db.Query(`SELECT `+sessionColumns+` FROM chat_sessions WHERE id=? LIMIT 1`, id)
@@ -121,15 +121,6 @@ func (d *D1) SaveAgent(id string, patch AgentPatch) error {
 	}
 	if patch.Model != nil {
 		add("model", *patch.Model)
-	}
-	if patch.SubProvider != nil {
-		add("sub_provider", *patch.SubProvider)
-	}
-	if patch.SubModel != nil {
-		add("sub_model", *patch.SubModel)
-	}
-	if patch.SubEnabled != nil {
-		add("sub_enabled", boolInt(*patch.SubEnabled))
 	}
 	if len(columns) == 0 {
 		return nil
@@ -324,9 +315,6 @@ func sessionFromRow(row map[string]any) *Session {
 		Title:       stringField(row, "title"),
 		Provider:    stringField(row, "provider"),
 		Model:       stringField(row, "model"),
-		SubProvider: stringField(row, "sub_provider"),
-		SubModel:    stringField(row, "sub_model"),
-		SubEnabled:  boolField(row, "sub_enabled"),
 		Reasoning:   boolField(row, "reasoning"),
 		Temperature: floatField(row, "temperature"),
 		TopP:        floatField(row, "top_p"),

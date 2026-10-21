@@ -29,28 +29,17 @@ func TestApplyKeyChangesReplaceWins(t *testing.T) {
 
 func TestApplySessionAgentPatch(t *testing.T) {
 	model := "m1"
-	empty := ""
-	yes := true
-	got := applySessionAgentPatch(patchSessionAgentRequest{Model: &model, SubProvider: &empty, SubEnabled: &yes})
+	got := applySessionAgentPatch(patchSessionAgentRequest{Model: &model})
 	if got.Model == nil || *got.Model != "m1" {
 		t.Errorf("model = %v, want m1", got.Model)
 	}
-	if got.SubProvider == nil || *got.SubProvider != "" {
-		t.Errorf("sub_provider = %v, want it explicitly cleared", got.SubProvider)
-	}
-	if got.SubEnabled == nil || !*got.SubEnabled {
-		t.Errorf("sub_enabled = %v, want true", got.SubEnabled)
-	}
-	if got.Provider != nil || got.SubModel != nil {
+	if got.Provider != nil {
 		t.Errorf("untouched fields were set: %+v", got)
 	}
 
-	cleared := applySessionAgentPatch(patchSessionAgentRequest{ClearModel: true, ClearSub: true})
+	cleared := applySessionAgentPatch(patchSessionAgentRequest{ClearModel: true})
 	if cleared.Provider == nil || *cleared.Provider != "" || cleared.Model == nil || *cleared.Model != "" {
 		t.Errorf("clear_model not applied: %+v", cleared)
-	}
-	if cleared.SubProvider == nil || *cleared.SubProvider != "" || cleared.SubModel == nil || *cleared.SubModel != "" {
-		t.Errorf("clear_sub not applied: %+v", cleared)
 	}
 	if !applySessionAgentPatch(patchSessionAgentRequest{}).Empty() {
 		t.Error("an empty body is not an empty patch")
