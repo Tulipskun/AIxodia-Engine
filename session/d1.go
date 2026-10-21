@@ -257,16 +257,19 @@ func (d *D1) AppendTurns(id string, turns []TurnInput) ([]Turn, error) {
 	defer d.appendMu.Unlock()
 	var saved []Turn
 	var lastErr error
+	// The starting seq is chosen once, not per attempt. D1 can commit an
+	// INSERT and still lose the HTTP answer, and the old retry then handed the
+	// same rows a fresh seq: one tool round was stored twice, with the same call
+	// ids, and the next provider request was refused for duplicate tool calls.
+	// With a fixed seq the retry collides and ON CONFLICT leaves the row alone.
+	seq, err := d.nextSeq(id)
+	if err != nil {
+		return saved, err
+	}
 	for attempt := 0; attempt < 3 && len(saved) < len(turns); attempt++ {
-		seq, err := d.nextSeq(id)
-		if err != nil {
-			return saved, err
-		}
-
 		now := time.Now().Unix()
-		base := len(saved)
 		lastErr = nil
-		for start := base; start < len(turns); start += maxTurnsPerStatement {
+		for start := len(saved); start < len(turns); start += maxTurnsPerStatement {
 			end := start + maxTurnsPerStatement
 			if end > len(turns) {
 				end = len(turns)
@@ -279,7 +282,7 @@ func (d *D1) AppendTurns(id string, turns []TurnInput) ([]Turn, error) {
 				placeholders = append(placeholders, "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
 				values = append(values,
 					id,
-					seq+start-base+i,
+					seq+start+i,
 					turn.Role,
 					turn.Text,
 					turn.Model,
@@ -296,13 +299,13 @@ func (d *D1) AppendTurns(id string, turns []TurnInput) ([]Turn, error) {
 					now,
 				)
 			}
-			statement := "INSERT INTO chat_turns (session_id, seq, role, text, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, reasoning_content, input_includes_cache, duration_ms, generation_ms, block, created_at) VALUES " + strings.Join(placeholders, ", ")
+			statement := "INSERT INTO chat_turns (session_id, seq, role, text, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, reasoning_content, input_includes_cache, duration_ms, generation_ms, block, created_at) VALUES " + strings.Join(placeholders, ", ") + " ON CONFLICT(session_id, seq) DO NOTHING"
 			if _, err := db.Query(statement, values...); err != nil {
 				lastErr = err
 				break
 			}
 			for i, turn := range chunk {
-				saved = append(saved, StoredTurn(id, seq+start-base+i, now, turn))
+				saved = append(saved, StoredTurn(id, seq+start+i, now, turn))
 			}
 		}
 		if lastErr != nil {

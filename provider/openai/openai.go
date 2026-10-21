@@ -204,6 +204,7 @@ func (a *Adapter) Complete(ctx context.Context, req *provider.Request, prov prov
 				Arguments: call.Function.Arguments,
 			})
 		}
+		out.ToolCalls = uniqueToolCalls(out.ToolCalls)
 	}
 	return out, nil
 }
@@ -309,6 +310,7 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 	for _, index := range indexes {
 		out.ToolCalls = append(out.ToolCalls, *calls[index])
 	}
+	out.ToolCalls = uniqueToolCalls(out.ToolCalls)
 	return out, nil
 }
 
@@ -547,12 +549,23 @@ type responsesResponse struct {
 // disabled persistence, and a prompt cache key for session affinity.
 func buildResponsesRequest(req *provider.Request, stream bool) responsesRequest {
 	items := make([]any, 0, len(req.Messages))
+	// Call ids must be unique across the whole input. A stored history can
+	// still contain one round twice from the old retry path, so the wire build
+	// is the last place that guarantees the provider sees each call once.
+	seenCalls := map[string]bool{}
+	seenResults := map[string]bool{}
 	for _, m := range req.Messages {
 		// The Responses API has no role=tool message: tool results travel
 		// as function_call_output items and model tool calls as
 		// function_call items. Sending chat-style tool messages back gets
 		// "`input[N]` did not match any supported type".
 		if m.Role == "tool" {
+			if m.ToolCallID != "" && seenResults[m.ToolCallID] {
+				continue
+			}
+			if m.ToolCallID != "" {
+				seenResults[m.ToolCallID] = true
+			}
 			items = append(items, map[string]any{
 				"type":    "function_call_output",
 				"call_id": m.ToolCallID,
@@ -561,10 +574,20 @@ func buildResponsesRequest(req *provider.Request, stream bool) responsesRequest 
 			continue
 		}
 		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			calls := make([]provider.ToolCall, 0, len(m.ToolCalls))
+			for _, call := range m.ToolCalls {
+				if call.ID != "" && seenCalls[call.ID] {
+					continue
+				}
+				if call.ID != "" {
+					seenCalls[call.ID] = true
+				}
+				calls = append(calls, call)
+			}
 			if text := textContent(m.Content); text != "" {
 				items = append(items, map[string]any{"role": "assistant", "content": text})
 			}
-			for _, call := range m.ToolCalls {
+			for _, call := range calls {
 				items = append(items, map[string]any{
 					"type":      "function_call",
 					"call_id":   call.ID,
@@ -622,6 +645,27 @@ func cacheKeyFor(session string) string {
 	return "aixodia-engine-" + session
 }
 
+// uniqueToolCalls keeps the first call for each id. A duplicate id in one
+// assistant turn is rejected by the provider, and replaying it only makes the
+// next request fail again.
+func uniqueToolCalls(calls []provider.ToolCall) []provider.ToolCall {
+	if len(calls) < 2 {
+		return calls
+	}
+	seen := make(map[string]bool, len(calls))
+	out := calls[:0]
+	for _, call := range calls {
+		if call.ID != "" {
+			if seen[call.ID] {
+				continue
+			}
+			seen[call.ID] = true
+		}
+		out = append(out, call)
+	}
+	return out
+}
+
 // parseResponsesOutput folds a Responses API output array into text,
 // tool calls, and usage.
 func parseResponsesOutput(parsed responsesResponse) (string, []provider.ToolCall, provider.Usage) {
@@ -660,7 +704,7 @@ func parseResponsesOutput(parsed responsesResponse) (string, []provider.ToolCall
 			})
 		}
 	}
-	return sb.String(), calls, usage
+	return sb.String(), uniqueToolCalls(calls), usage
 }
 
 // CompleteViaResponses executes req against the /v1/responses endpoint
@@ -872,6 +916,7 @@ func (a *Adapter) StreamViaResponses(ctx context.Context, req *provider.Request,
 				ID: id, Name: callNames[id], Arguments: argBufs[id].String(),
 			})
 		}
+		out.ToolCalls = uniqueToolCalls(out.ToolCalls)
 	}
 	if out.Content == "" && len(out.ToolCalls) == 0 && !finished {
 		return nil, fmt.Errorf("openai: empty responses stream")

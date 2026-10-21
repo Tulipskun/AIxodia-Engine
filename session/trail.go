@@ -95,6 +95,13 @@ func itoa(n int) string {
 // Rows that cannot be decoded are skipped rather than failing the whole chat.
 func MessagesFromTurns(turns []Turn) []provider.Message {
 	messages := make([]provider.Message, 0, len(turns))
+	// A retry after a lost D1 response used to store one tool round twice.
+	// Replaying that history sends the provider two function_call items with
+	// the same call id, which it rejects with "duplicate tool call ID". Keep
+	// the first call and its first result, and leave the duplicate rows out of
+	// the request.
+	seenCalls := map[string]bool{}
+	seenResults := map[string]bool{}
 	for _, turn := range turns {
 		switch turn.Role {
 		case "system", "user", "assistant":
@@ -108,6 +115,10 @@ func MessagesFromTurns(turns []Turn) []provider.Message {
 			if json.Unmarshal([]byte(turn.Text), &row) != nil || row.ID == "" {
 				continue
 			}
+			if seenCalls[row.ID] {
+				continue
+			}
+			seenCalls[row.ID] = true
 			messages = append(messages, provider.Message{
 				Role:    "assistant",
 				Content: row.Content,
@@ -123,6 +134,10 @@ func MessagesFromTurns(turns []Turn) []provider.Message {
 			if json.Unmarshal([]byte(turn.Text), &row) != nil || row.ToolCallID == "" {
 				continue
 			}
+			if seenResults[row.ToolCallID] {
+				continue
+			}
+			seenResults[row.ToolCallID] = true
 			messages = append(messages, provider.Message{
 				Role:       "tool",
 				ToolCallID: row.ToolCallID,

@@ -52,6 +52,37 @@ func TestMessagesFromTurnsSkipsBrokenRows(t *testing.T) {
 	}
 }
 
+// A D1 write whose HTTP answer was lost used to be retried and stored twice.
+// Replaying those rows sent the provider two function_call items with one call
+// id, and every later turn failed with "duplicate tool call ID".
+func TestMessagesFromTurnsDropsARepeatedToolRound(t *testing.T) {
+	call, _ := json.Marshal(toolCallRow{ID: "c1", Name: "shell", Arguments: `{"command":"ls"}`})
+	result, _ := json.Marshal(toolResultRow{ToolCallID: "c1", Name: "shell", Content: "a"})
+	turns := []Turn{
+		{Role: "assistant", Text: "checking"},
+		{Role: "tool_call", Text: string(call)},
+		{Role: "tool_result", Text: string(result)},
+		{Role: "assistant", Text: "checking"},
+		{Role: "tool_call", Text: string(call)},
+		{Role: "tool_result", Text: string(result)},
+		{Role: "user", Text: "next"},
+	}
+	got := MessagesFromTurns(turns)
+	calls, results := 0, 0
+	for _, message := range got {
+		calls += len(message.ToolCalls)
+		if message.Role == "tool" {
+			results++
+		}
+	}
+	if calls != 1 || results != 1 {
+		t.Fatalf("replayed %d calls and %d results, want one of each: %+v", calls, results, got)
+	}
+	if last := got[len(got)-1]; last.Role != "user" || last.Content != "next" {
+		t.Errorf("last message = %+v, want the new question", last)
+	}
+}
+
 // The reasoning a model wrote has to come back with the assistant turn, or the
 // next request is refused for a missing reasoning_content.
 func TestReasoningSurvivesTheRoundTrip(t *testing.T) {

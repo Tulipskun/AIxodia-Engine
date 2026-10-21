@@ -238,6 +238,58 @@ func TestZZResponsesToolHistoryMapping(t *testing.T) {
 	}
 }
 
+// A stored history can contain one call round twice. The wire body must still
+// name each call id once, or the whole chat is refused with a duplicate-id 400.
+func TestResponsesRequestDedupesRepeatedToolCalls(t *testing.T) {
+	call := provider.ToolCall{ID: "call_1", Name: "bash", Arguments: `{"command":"ls"}`}
+	req := &provider.Request{
+		Model: "m",
+		Messages: []provider.Message{
+			{Role: "user", Content: "run ls"},
+			{Role: "assistant", ToolCalls: []provider.ToolCall{call}},
+			{Role: "tool", ToolCallID: "call_1", Content: "a"},
+			{Role: "assistant", Content: "again", ToolCalls: []provider.ToolCall{call}},
+			{Role: "tool", ToolCallID: "call_1", Content: "a"},
+		},
+	}
+	body := buildResponsesRequest(req, true)
+	items, ok := body.Input.([]any)
+	if !ok {
+		t.Fatalf("input items = %#v", body.Input)
+	}
+	calls, outputs := 0, 0
+	for _, item := range items {
+		m, _ := item.(map[string]any)
+		switch m["type"] {
+		case "function_call":
+			calls++
+			if m["call_id"] != "call_1" {
+				t.Errorf("function_call = %v", m)
+			}
+		case "function_call_output":
+			outputs++
+		}
+	}
+	if calls != 1 || outputs != 1 {
+		t.Fatalf("input has %d calls and %d outputs, want one of each: %#v", calls, outputs, items)
+	}
+}
+
+// A provider response that repeats a call id inside one assistant turn is put
+// through the same filter, so the next request does not inherit it.
+func TestResponsesOutputDropsRepeatedCalls(t *testing.T) {
+	raw := `{"id":"r","output":[{"type":"function_call","call_id":"c1","name":"bash","arguments":"{}"},` +
+		`{"type":"function_call","call_id":"c1","name":"bash","arguments":"{}"}]}`
+	var parsed responsesResponse
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	_, calls, _ := parseResponsesOutput(parsed)
+	if len(calls) != 1 || calls[0].ID != "c1" {
+		t.Fatalf("calls = %+v, want one c1", calls)
+	}
+}
+
 // The Responses API reports what the cache served and wrote in the input
 // details, and what the model thought in the output details. A parser that
 // reads only the top-level counts shows a cache that never works.
