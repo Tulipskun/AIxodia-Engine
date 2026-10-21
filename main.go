@@ -22,6 +22,7 @@ import (
 
 	"aixodia-engine/config"
 	"aixodia-engine/db"
+	"aixodia-engine/goals"
 	"aixodia-engine/io/gateway"
 	"aixodia-engine/io/mobile"
 	"aixodia-engine/io/relay"
@@ -80,11 +81,12 @@ func main() {
 	store := session.NewD1()
 	sessionStore = store
 	session.EnsureTurns()
+	goals.Ensure()
 	config.SetStore(config.NewStore(db.KV{}))
 
 	startConfigReloader(ctx)
 
-	g := gateway.New(store, registry.New(), tools.Builtin())
+	g := gateway.New(store, registry.New(), tools.BuiltinWith(goals.NewD1()))
 	g.SetStateStore(db.State{})
 	g.SetStartedAt(startedAt)
 	g.SetLogReader(recentLogs)

@@ -77,7 +77,10 @@ func TestIsPublicIP(t *testing.T) {
 
 func TestBuiltinOffersShellAndRead(t *testing.T) {
 	b := Builtin()
-	for _, name := range []string{"current_time", "fetch_url", "shell", "read"} {
+	for _, name := range []string{
+		"current_time", "fetch_url", "shell", "read", "edit", "write",
+		"goal_add", "goal_edit", "goal_complete", "goal_drop",
+	} {
 		tool, ok := b[name]
 		if !ok {
 			t.Fatalf("Builtin() missing tool %q", name)
@@ -88,12 +91,131 @@ func TestBuiltinOffersShellAndRead(t *testing.T) {
 		if tool.Run == nil {
 			t.Errorf("tool %q has nil Run", name)
 		}
+		props, _ := tool.Def.Parameters["properties"].(map[string]any)
+		if _, ok := props["reason"]; !ok {
+			t.Errorf("tool %q has no reason parameter", name)
+		}
+		required, _ := tool.Def.Parameters["required"].([]any)
+		found := false
+		for _, r := range required {
+			if r == "reason" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("tool %q does not require reason", name)
+		}
 	}
 	// The v1 name must be gone: the command tool is "shell" only, matching the
 	// real OpenCode client, and leaving "bash" offered gave the model two
 	// identical tools to choose between.
 	if _, ok := b["bash"]; ok {
 		t.Error("Builtin() still offers the old \"bash\" tool")
+	}
+}
+
+func TestRunWriteCreatesParentsAndReplaces(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "deep", "nested", "file.txt")
+
+	out, err := runWrite(context.Background(), `{"filePath":"`+path+`","content":"first"}`)
+	if err != nil {
+		t.Fatalf("runWrite: %v", err)
+	}
+	if !strings.Contains(out, "wrote 5 bytes") {
+		t.Errorf("runWrite = %q", out)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != "first" {
+		t.Fatalf("after write got %q, %v", got, err)
+	}
+
+	if _, err := runWrite(context.Background(), `{"path":"`+path+`","content":"second"}`); err != nil {
+		t.Fatalf("runWrite overwrite: %v", err)
+	}
+	got, _ = os.ReadFile(path)
+	if string(got) != "second" {
+		t.Errorf("overwrite left %q", got)
+	}
+}
+
+func TestRunWriteRejectsBadPaths(t *testing.T) {
+	for _, args := range []string{
+		`{"filePath":"relative.txt","content":"x"}`,
+		`{"filePath":"","content":"x"}`,
+		`{"filePath":"/proc/self/mem","content":"x"}`,
+		`{"filePath":"/sys/kernel/x","content":"x"}`,
+	} {
+		if _, err := runWrite(context.Background(), args); err == nil {
+			t.Errorf("runWrite(%s) unexpectedly succeeded", args)
+		}
+	}
+}
+
+type fakeGoals struct {
+	content string
+	edited  string
+	status  string
+}
+
+func (f *fakeGoals) Add(content string) (string, error) {
+	f.content = content
+	return "g-test", nil
+}
+
+func (f *fakeGoals) Edit(id, content string) error {
+	f.edited = id + ":" + content
+	return nil
+}
+
+func (f *fakeGoals) Complete(id string) error {
+	f.status = "done:" + id
+	return nil
+}
+
+func (f *fakeGoals) Drop(id string) error {
+	f.status = "dropped:" + id
+	return nil
+}
+
+func TestGoalToolsUseTheStore(t *testing.T) {
+	store := &fakeGoals{}
+	b := BuiltinWith(store)
+
+	out, err := b["goal_add"].Run(context.Background(), `{"content":"ship the fix"}`)
+	if err != nil {
+		t.Fatalf("goal_add: %v", err)
+	}
+	if out != "goal_id: g-test" || store.content != "ship the fix" {
+		t.Errorf("goal_add = %q, stored %q", out, store.content)
+	}
+
+	if _, err := b["goal_edit"].Run(context.Background(), `{"goal_id":"g-test","content":"ship it well"}`); err != nil {
+		t.Fatalf("goal_edit: %v", err)
+	}
+	if store.edited != "g-test:ship it well" {
+		t.Errorf("goal_edit stored %q", store.edited)
+	}
+
+	if _, err := b["goal_complete"].Run(context.Background(), `{"goal_id":"g-test"}`); err != nil {
+		t.Fatalf("goal_complete: %v", err)
+	}
+	if store.status != "done:g-test" {
+		t.Errorf("goal_complete stored %q", store.status)
+	}
+
+	if _, err := b["goal_drop"].Run(context.Background(), `{"goal_id":"g-test"}`); err != nil {
+		t.Fatalf("goal_drop: %v", err)
+	}
+	if store.status != "dropped:g-test" {
+		t.Errorf("goal_drop stored %q", store.status)
+	}
+}
+
+func TestGoalToolsWithoutStoreFail(t *testing.T) {
+	b := Builtin()
+	if _, err := b["goal_add"].Run(context.Background(), `{"content":"x"}`); err == nil {
+		t.Error("goal_add without a store unexpectedly succeeded")
 	}
 }
 
