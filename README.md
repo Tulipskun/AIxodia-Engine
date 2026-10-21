@@ -69,3 +69,26 @@ go build ./... && go vet ./... && gofmt -l . && go test ./...
 bash aixodia_test.sh      # launcher
 bash install_test.sh      # installer (offline, file:// fixtures)
 ```
+
+## Terminal transport: WebRTC P2P (planned)
+
+Today the engine dials the Cloudflare Durable Objects room and the phone carries terminal traffic through that shared relay socket. The relay therefore sees terminal traffic for the full lifetime of each shell.
+
+The target is to use Durable Objects for **signaling only** and move terminal data to WebRTC DataChannel:
+
+1. The engine and Android client exchange SDP and ICE candidates through the room.
+2. WebRTC ICE attempts a direct path, using STUN for address discovery.
+3. Once the DataChannel opens, PTY input/output, resize events, and terminal control messages travel directly between Android and the engine.
+4. Use a configurable TURN server only when direct connectivity fails. Keep the current relay terminal path as a fallback during rollout and for clients that do not support P2P.
+5. Keep PTY ownership and shell-session lifecycle in the engine. Signaling must never execute commands or carry terminal output after P2P has been established.
+
+Implementation requirements:
+
+- Android: libwebrtc DataChannel transport integrated with TerminalSocket.
+- Linux engine: Pion WebRTC peer connection attached to the existing terminal sessions.
+- Signaling: authenticated, session-scoped messages; validate message sizes, peer roles, expiry, and session ownership.
+- Reliability: reconnect/re-attach to the same PTY session, bounded queues/backpressure, connection state reporting, and relay fallback.
+- Security: do not expose the PTY directly to the public network; do not reuse the Cloudflare API token as a peer-facing long-lived signaling credential.
+
+**Status:** design target, not implemented. The current engine still uses io/relay for terminal traffic. Do not describe relay traffic as eliminated until the Android client, engine, signaling Worker, fallback behavior, and end-to-end tests are implemented and verified.
+
