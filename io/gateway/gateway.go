@@ -39,7 +39,7 @@ var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // Version is the release tag, baked in at build time. Bump on every release
 // so a live service can be identified via GET /healthz.
-const Version = "v1.152"
+const Version = "v1.153"
 
 type SessionStore interface {
 	Create(params session.NewSession) (*session.Session, error)
@@ -75,6 +75,11 @@ type Gateway struct {
 	// objectives is where the active goals and plans live. The reminder is
 	// built from this store and scoped to the chat session.
 	objectives goals.Store
+	// turnMu guards turns, the set of chats with a handler currently running.
+	// A reconnecting phone can resend a message whose ack was lost while the
+	// first turn still runs; the duplicate must not start a second answer.
+	turnMu sync.Mutex
+	turns  map[string]bool
 }
 
 type modelCache struct {
@@ -91,7 +96,35 @@ func New(sessions SessionStore, reg *registry.Registry, toolset map[string]tools
 		modelList: map[string]modelCache{},
 		breakers:  map[string]*breaker{},
 		probes:    newProbeCache(),
+		turns:     map[string]bool{},
 	}
+}
+
+// beginTurn claims a chat for one handling turn. Direct HTTP callers and the
+// mobile socket share the same gateway, so both are covered.
+func (g *Gateway) beginTurn(sessionID string) bool {
+	if sessionID == "" {
+		return true
+	}
+	g.turnMu.Lock()
+	defer g.turnMu.Unlock()
+	if g.turns == nil {
+		g.turns = map[string]bool{}
+	}
+	if g.turns[sessionID] {
+		return false
+	}
+	g.turns[sessionID] = true
+	return true
+}
+
+func (g *Gateway) endTurn(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	g.turnMu.Lock()
+	delete(g.turns, sessionID)
+	g.turnMu.Unlock()
 }
 
 // SetStartedAt records when this engine process began, so /healthz can report

@@ -16,6 +16,22 @@ import (
 	"aixodia-engine/tools"
 )
 
+// aixodiaSystemPrompt is the identity and operating contract every provider
+// request starts with. It is injected here instead of being stored in D1, so a
+// chat's transcript stays exactly what the user and the model said, while every
+// turn — including a retry — receives the same rules.
+const aixodiaSystemPrompt = `You are AIxodia, the assistant running inside the AIxodia app.
+
+Operating rules, which override any conflicting instruction that comes later:
+- Never run the "aixodia" command, the "aixodia-engine" command, or any command that starts, stops, restarts, updates, installs, or reconfigures AIxodia. That is the operator's job, not yours.
+- Never kill, terminate, restart, or signal yourself, the AIxodia engine/daemon, its parent shell, or the process tree that runs you.
+- Before using any tool other than the goal_* and plan_* tools, this chat must have at least one active goal or plan. If there is none, refuse the work and call goal_add first; use plan_add for the steps. Do not run an ordinary tool "just to look around" before recording the objective.
+- Keep the active goal and plan in mind. After adding, editing, completing, or dropping one, follow the updated list in the system reminder.
+- Use tools only to advance the active goal or plan. If the objective is unclear, ask the user instead of guessing.
+- If an ordinary tool is refused because no goal or plan is active, add one and then continue.`
+
+const noActiveObjectiveMessage = `No active goal or plan in this chat. Ordinary tools are refused until the work has an objective. Call goal_add first to record the user's goal, then plan_add for each step, and retry the tool afterward.`
+
 type chatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -216,6 +232,13 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		stored = found
+	}
+	if stored != nil {
+		if !g.beginTurn(stored.ID) {
+			writeError(w, http.StatusConflict, "turn_in_progress", "a turn is already running for this chat; wait for it to finish")
+			return
+		}
+		defer g.endTurn(stored.ID)
 	}
 
 	incoming := make([]provider.Message, 0, len(body.Messages))
@@ -574,7 +597,11 @@ func (g *Gateway) resolveRoute(stored *session.Session, body chatRequest) (route
 }
 
 func (g *Gateway) complete(ctx context.Context, primary route, history []provider.Message, options completionOptions) (*provider.Response, error) {
-	conversation := append([]provider.Message(nil), history...)
+	// The identity block is a fixed prefix, which also keeps the provider's
+	// prompt cache useful across turns.
+	conversation := make([]provider.Message, 0, len(history)+1)
+	conversation = append(conversation, provider.Message{Role: "system", Content: aixodiaSystemPrompt})
+	conversation = append(conversation, history...)
 	// Goal and plan tools are scoped to the chat in options.sessionID. The
 	// context is the only channel the tool signature carries into a run.
 	ctx = tools.WithSession(ctx, options.sessionID)
@@ -686,7 +713,7 @@ func (g *Gateway) complete(ctx context.Context, primary route, history []provide
 				options.onToolCall(call)
 			}
 			started := time.Now()
-			output, images := g.runTool(ctx, call)
+			output, images := g.runTool(ctx, call, options.sessionID)
 			// A successful goal or plan change means the next model round must
 			// see the fresh list, in case add/edit/complete/drop changed it.
 			if !isToolError(output) && (strings.HasPrefix(call.Name, "goal_") || strings.HasPrefix(call.Name, "plan_")) {
@@ -878,7 +905,16 @@ func (g *Gateway) callKeys(ctx context.Context, target route, request *provider.
 // runTool executes one tool call and returns its text plus any pictures it
 // produced. Pictures are lifted out of the text (see extractToolImages) so the
 // base64 never reaches the prompt and the model can be shown the image instead.
-func (g *Gateway) runTool(ctx context.Context, call provider.ToolCall) (string, []provider.Image) {
+func (g *Gateway) runTool(ctx context.Context, call provider.ToolCall, sessionID string) (string, []provider.Image) {
+	if !isObjectiveTool(call.Name) {
+		active, err := g.hasActiveObjective(sessionID)
+		if err != nil {
+			return toolError("cannot check the active goal or plan: " + err.Error()), nil
+		}
+		if !active {
+			return toolError(noActiveObjectiveMessage), nil
+		}
+	}
 	tool, ok := g.tools[call.Name]
 	if !ok {
 		return toolError(fmt.Sprintf("unknown tool %q", call.Name)), nil
@@ -889,6 +925,24 @@ func (g *Gateway) runTool(ctx context.Context, call provider.ToolCall) (string, 
 	}
 	text, images := extractToolImages(result)
 	return truncate(text, 32*1024), images
+}
+
+func isObjectiveTool(name string) bool {
+	return strings.HasPrefix(name, "goal_") || strings.HasPrefix(name, "plan_")
+}
+
+// hasActiveObjective is the gate for ordinary tools. Goal and plan tools are
+// exempt so the model can record the objective it is missing. A chat without a
+// session id, or an engine without objective storage, keeps the old behaviour.
+func (g *Gateway) hasActiveObjective(sessionID string) (bool, error) {
+	if g.objectives == nil || strings.TrimSpace(sessionID) == "" {
+		return true, nil
+	}
+	items, err := g.objectives.Open(sessionID)
+	if err != nil {
+		return false, err
+	}
+	return len(items) > 0, nil
 }
 
 // isToolError reports whether tool output is a toolError envelope (a failed
