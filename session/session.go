@@ -45,7 +45,11 @@ type SessionUsage struct {
 }
 
 type Turn struct {
-	SessionID          string `json:"session_id"`
+	SessionID string `json:"session_id"`
+	// ID is the D1 row id: a number that only moves forward, so it is unique
+	// for every message and easy for the phone to use as a key. Seq stays the
+	// per-session order and the cursor history pages are read with.
+	ID                 int64  `json:"id"`
 	Seq                int    `json:"seq"`
 	Role               string `json:"role"`
 	Agent              string `json:"agent,omitempty"`

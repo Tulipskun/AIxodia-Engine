@@ -189,7 +189,7 @@ func (d *D1) SaveAgent(id string, patch AgentPatch) error {
 	return err
 }
 
-const turnColumns = `session_id,seq,role,agent,job_id,text,created_at,model,input_tokens,output_tokens,duration_ms,cache_read_tokens,cache_write_tokens,reasoning_tokens,input_includes_cache,generation_ms,reasoning_content,block`
+const turnColumns = `id,session_id,seq,role,agent,job_id,text,created_at,model,input_tokens,output_tokens,duration_ms,cache_read_tokens,cache_write_tokens,reasoning_tokens,input_includes_cache,generation_ms,reasoning_content,block`
 
 func (d *D1) Turns(id string) ([]Turn, error) {
 	rows, err := db.Query(`SELECT `+turnColumns+` FROM chat_turns WHERE session_id=? ORDER BY seq ASC`, id)
@@ -261,7 +261,7 @@ func (d *D1) AppendTurns(id string, turns []TurnInput) ([]Turn, error) {
 	// INSERT and still lose the HTTP answer, and the old retry then handed the
 	// same rows a fresh seq: one tool round was stored twice, with the same call
 	// ids, and the next provider request was refused for duplicate tool calls.
-	// With a fixed seq the retry collides and ON CONFLICT leaves the row alone.
+	// With a fixed seq the retry collides.
 	seq, err := d.nextSeq(id)
 	if err != nil {
 		return saved, err
@@ -315,9 +315,40 @@ func (d *D1) AppendTurns(id string, turns []TurnInput) ([]Turn, error) {
 		if err := d.touch(id); err != nil {
 			log.Printf("session: touch after append: %v", err)
 		}
-		return saved, nil
+		// Read the rows back so the caller gets the D1 row ids. They are the
+		// sequential message ids the phone keys rows by, and fabricating them
+		// here would guess a number only the database can assign.
+		stored, err := d.turnsBetween(id, seq, seq+len(turns))
+		if err != nil {
+			return saved, err
+		}
+		return stored, nil
+	}
+	// Every attempt reported an error, but D1 can commit an INSERT and lose
+	// every HTTP answer. Look at the seq range once more: if all the rows are
+	// there, the write landed and returning an error would make the caller
+	// append the same turn again under a new seq.
+	if stored, err := d.turnsBetween(id, seq, seq+len(turns)); err == nil && len(stored) == len(turns) {
+		if err := d.touch(id); err != nil {
+			log.Printf("session: touch after append: %v", err)
+		}
+		return stored, nil
 	}
 	return saved, lastErr
+}
+
+// turnsBetween reads the rows of one append in seq order. The upper bound is
+// exclusive, matching the half-open range the caller computed.
+func (d *D1) turnsBetween(id string, from, to int) ([]Turn, error) {
+	rows, err := db.Query(`SELECT `+turnColumns+` FROM chat_turns WHERE session_id=? AND seq>=? AND seq<? ORDER BY seq ASC`, id, from, to)
+	if err != nil {
+		return nil, err
+	}
+	turns := make([]Turn, 0, len(rows))
+	for _, row := range rows {
+		turns = append(turns, turnFromRow(row))
+	}
+	return turns, nil
 }
 
 func (d *D1) nextSeq(id string) (int, error) {
@@ -421,6 +452,7 @@ func sessionFromRow(row map[string]any) *Session {
 func turnFromRow(row map[string]any) Turn {
 	return Turn{
 		SessionID:          stringField(row, "session_id"),
+		ID:                 int64Field(row, "id"),
 		Seq:                intField(row, "seq"),
 		Role:               stringField(row, "role"),
 		Agent:              stringField(row, "agent"),

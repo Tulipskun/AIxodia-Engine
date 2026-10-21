@@ -132,6 +132,7 @@ func (m *memStore) AppendTurns(id string, turns []session.TurnInput) ([]session.
 	for _, turn := range turns {
 		m.turns[id] = append(m.turns[id], session.Turn{
 			SessionID:          id,
+			ID:                 int64(len(m.turns[id]) + 1),
 			Seq:                len(m.turns[id]) + 1,
 			Role:               turn.Role,
 			Text:               turn.Text,
