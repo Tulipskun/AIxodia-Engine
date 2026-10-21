@@ -159,6 +159,114 @@ else
 fi
 AIXODIA_HOME="$home" bash "$LAUNCHER" stop >/dev/null 2>&1
 
+# Stub engine that speaks the in-place update handshake. It execs into its
+# server so the pid the launcher started is the pid /healthz reports — the real
+# engine keeps its pid across an update by execing itself, and the launcher
+# refuses to signal anything whose pid does not match the pidfile.
+make_handshake_engine() {
+  cat > "$1" <<'STUB'
+#!/usr/bin/env bash
+if [ "${1:-}" = "update" ]; then
+  echo "installed the build published 2026-10-21T00:00:00Z"
+  exit 0
+fi
+echo "engine started"
+echo "relay: dialling wss://stub-relay.example/room/test"
+echo "relay: connected"
+exec python3 - <<'PY'
+import http.server, json, os, signal
+
+pid = os.getpid()
+
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"ok": True, "version": "aixodia-engine/1.1 started=1",
+                           "pid": pid, "update": "signal:USR1", "idle": True}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+def on_usr1(signum, frame):
+    # The two lines the launcher waits for: the build is swapped and the same
+    # pid carries on. A stub that is current prints the first line instead.
+    print("selfupdate: installing the build published 2026-10-21T00:00:00Z", flush=True)
+    print("engine started", flush=True)
+
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+print("listening on %d" % srv.server_port, flush=True)
+signal.signal(signal.SIGUSR1, on_usr1)
+srv.serve_forever()
+PY
+STUB
+  chmod +x "$1"
+}
+
+# --- update asks a handshake-capable engine to swap instead of restarting ----
+home=$(tmp_home); fakebin=$(tmp_home); bin=$fakebin/aixodia-engine
+make_handshake_engine "$bin"
+error_log=$home/stub.err
+CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_RELAY_WAIT=15 \
+  PATH="$fakebin:$PATH" bash "$LAUNCHER" start >"$home/start.out" 2>"$error_log"
+pid=$(cat "$home/aixodia.pid" 2>/dev/null || echo "")
+# The stub serves /healthz on a port it picks itself and prints into the log.
+port=$(sed -n 's/.*listening on \([0-9][0-9]*\).*/\1/p' "$home/aixodia.log" | tail -1)
+if [ -n "$port" ]; then
+  out=$(CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_LOCAL_URL="http://127.0.0.1:$port" \
+        AIXODIA_UPDATE_WAIT=10 PATH="$fakebin:$PATH" bash "$LAUNCHER" update 2>&1); rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "asking the running engine (pid $pid) to update in place"; then
+    pass "update asks the running engine instead of stopping it"
+  else
+    fail "update in place (rc=$rc, out=$out)"
+  fi
+  if printf '%s' "$out" | grep -q "updated in place (pid $pid)"; then
+    pass "update reports the in-place swap"
+  else
+    fail "update did not report the swap (out=$out)"
+  fi
+  if [ "$(cat "$home/aixodia.pid")" = "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    pass "the engine keeps its pid across an in-place update"
+  else
+    fail "in-place update changed the process (pid=$pid)"
+  fi
+else
+  fail "handshake stub did not report a port (log: $(tail -3 "$home/aixodia.log" 2>/dev/null))"
+fi
+AIXODIA_HOME="$home" bash "$LAUNCHER" stop >/dev/null 2>&1
+
+# --- a pidfile that disagrees with /healthz is not signalled -----------------
+home=$(tmp_home); fakebin=$(tmp_home); bin=$fakebin/aixodia-engine
+make_handshake_engine "$bin"
+CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_RELAY_WAIT=15 \
+  PATH="$fakebin:$PATH" bash "$LAUNCHER" start >/dev/null 2>&1
+engine_pid=$(cat "$home/aixodia.pid" 2>/dev/null || echo "")
+port=$(sed -n 's/.*listening on \([0-9][0-9]*\).*/\1/p' "$home/aixodia.log" | tail -1)
+echo "$$" > "$home/aixodia.pid"   # claims to be this test, not the engine
+if [ -n "$port" ]; then
+  out=$(env -u CF_TOKEN AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" \
+        AIXODIA_LOCAL_URL="http://127.0.0.1:$port" PATH="$fakebin:$PATH" bash "$LAUNCHER" update 2>&1); rc=$?
+  if printf '%s' "$out" | grep -q "does not answer the update handshake"; then
+    pass "a pidfile that disagrees with /healthz falls back to a restart"
+  else
+    fail "pidfile mismatch (rc=$rc, out=$out)"
+  fi
+  # The mismatch must not have been signalled: the engine is still the one that
+  # was started, and the tokenless fallback left it running.
+  if kill -0 "$engine_pid" 2>/dev/null; then
+    pass "a mismatched pidfile never signals the engine"
+  else
+    fail "the engine was killed by a mismatched pidfile (pid=$engine_pid)"
+  fi
+else
+  fail "handshake stub did not report a port for the mismatch case"
+fi
+kill "$engine_pid" 2>/dev/null
+rm -f "$home/aixodia.pid"
+
 echo
 if [ "$fails" -eq 0 ]; then
   echo "all launcher tests passed"

@@ -12,8 +12,9 @@ curl -fsSL https://raw.githubusercontent.com/Tulipskun/aixodia-engine/main/insta
 Installs to `/usr/local/bin`: `aixodia-engine`, `aixodia`, and `cloudflared` (if it
 is not already on your PATH). Linux x86_64 and arm64.
 
-Updating is the same command: it replaces the files. Restart a running engine
-afterwards to pick up the new build.
+Updating is the same command: `aixodia update` installs the published build and
+hands it to the running engine, which swaps the binary and carries on under the
+same pid. A running build too old to accept the handshake is restarted instead.
 
 ## Run
 
@@ -29,12 +30,19 @@ it, and gives the prompt back.
 aixodia status      # up? at which url
 aixodia logs        # tail the engine log
 aixodia stop        # shut it down
-aixodia update      # install the published build and restart into it
+aixodia update      # install the published build and update in place
 ```
+
+`aixodia update` does not stop the engine. It sends `SIGUSR1` to the pid the
+engine reports on `GET /healthz`, and the engine installs the build and execs
+itself: same pid, same arguments, same session. A chat in flight is not cut
+short — the engine notes the request and applies the build when the turn ends.
+Only a build that predates the handshake (no `update` key on `/healthz`) is
+stopped and started, which ends the attached session.
 
 The engine also installs a published build by itself, ten minutes at a time and
 only while no chat is in flight (`selfupdate: installing the build published
-...` in the log); `aixodia update` is the same download on demand.
+...` in the log); `aixodia update` is the same swap on demand.
 
 Only local state lives in `~/.aixodia/` (`aixodia.pid`, `aixodia.log`,
 `aixodia-logs.db`, `uploads/`). Chat history and settings are in D1; providers

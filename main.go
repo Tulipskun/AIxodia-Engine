@@ -105,6 +105,10 @@ func main() {
 	// One hub for every phone socket.
 	hub := mobile.NewHub()
 	mux := http.NewServeMux()
+	// /healthz is unauthenticated either way; this copy wins over the "/"
+	// catch-all and adds the pid and the update handshake, which the launcher
+	// needs before it can safely signal this process.
+	mux.HandleFunc("GET /healthz", healthzHandler)
 	mux.Handle("/ws", hub.Handler(token, chatViaGateway(gw, model)))
 	// The terminal checks the token itself: a pattern this specific wins over
 	// the "/" catch-all below, so RequireToken never sees this path.
@@ -185,7 +189,11 @@ func main() {
 
 	// Periodically check for a newer engine binary and restart in place
 	// without ending the session.
-	go selfupdate.RunLoop(ctx, func() bool { return activeChats.Load() == 0 })
+	idle := func() bool { return activeChats.Load() == 0 }
+	go selfupdate.RunLoop(ctx, idle)
+	// `aixodia update` reaches this process by pid and asks for the same swap,
+	// so a deploy on demand does not stop and start the engine.
+	selfupdate.NotifyUpdate(ctx, idle)
 
 	<-ctx.Done()
 
@@ -194,6 +202,24 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("http shutdown: %v", err)
 	}
+}
+
+// healthzHandler answers the unauthenticated liveness probe and names the
+// process behind it. `pid` is what `aixodia update` signals, and `update`
+// carries the handshake a launcher must find before it signals anything: on a
+// build that predates the handshake SIGUSR1 is not handled and would kill the
+// engine, so the launcher must read this first and fall back to its old
+// stop-and-start path when the key is absent.
+func healthzHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":      true,
+		"version": versionString(),
+		"pid":     os.Getpid(),
+		"update":  "signal:USR1",
+		"idle":    activeChats.Load() == 0,
+	})
 }
 
 // updateOnce installs the published build beside the running one and reports

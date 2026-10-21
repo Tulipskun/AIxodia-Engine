@@ -72,3 +72,14 @@ Also: Zen intermittently returns `429 "Upstream request failed: Endpoint is unav
 
 ## Runtime requirements
 - Needs `CF_TOKEN` (D1 read/write + Workers KV read/write), outbound HTTPS to `api.cloudflare.com` and the provider endpoints, and the relay. `cloudflared` is no longer used. No offline mode.
+
+## Deploy (you are the process you would be restarting)
+- On this host the agent **is** the running engine: `~/.aixodia/aixodia.pid` names `/usr/local/bin/aixodia-engine`, and every tool shell is a child of that pid (`ps -o ppid= -p $$` proves it). Never `pkill` it, never `pkill -f aixodia`, never `aixodia stop`: the answer being written dies with the process and the session drops mid-turn.
+- Deploy is: commit and push to `main`, wait for the workflow, then `aixodia update`.
+  - `.github/workflows/release.yml` triggers on `push: main`, builds `aixodia-engine-linux-amd64` and `-arm64`, and `--clobber`s the rolling release `engine-latest`.
+  - `aixodia update` = `aixodia-engine update` (`updateOnce`) → `selfupdate.NeedUpdate` compares the running executable's sha256 with the published asset; identical bytes print `already the published build` and nothing is swapped.
+  - Check the run finished (`gh run list --branch main`, or poll the asset's `updated_at`) before updating, otherwise the sha still matches the *previous* build and the command is a silent no-op.
+- `aixodia update` is the only sanctioned deploy path, and it no longer stops the engine: it reads `GET /healthz` for the pid and the `update` handshake, then sends `SIGUSR1`, and the running engine runs `selfupdate.Apply` (`Install` + `syscall.Exec`) — same pid, same args, same env, session intact. The launcher only falls back to `cmd_stop` + `cmd_start` when `/healthz` has no `update` key (a build that predates the handshake, where an unhandled SIGUSR1 would kill the process) or when its pid disagrees with the pidfile. Never send `SIGUSR1` to an engine by hand without reading `/healthz` first.
+- `selfupdate.NotifyUpdate` (wired in `main.go` next to `RunLoop`) is the signal handler: it refuses to apply while `activeChats` is non-zero, leaving the request for the next `RunLoop` tick so a chat in flight is never cut short. Both paths share the same `NeedUpdate`/`Apply`, so the on-demand and the every-ten-minutes deploy behave identically.
+- The old stop-and-start is what a deploy used to be; do not reintroduce it as the default, it ends the session attached to the engine.
+- The seamless path is the engine's own `selfupdate.RunLoop`: two minutes after boot, then every ten minutes, it calls `Apply` → `Install` + `syscall.Exec(target, os.Args, os.Environ())` — same pid, same args, same env, no gap — but only when `idle()` reports no chat in flight. A pushed build therefore lands on its own; `aixodia update` is the same swap on demand, not a restart.

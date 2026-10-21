@@ -16,6 +16,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -131,6 +132,14 @@ func NeedUpdate(ctx context.Context) (bool, Release, error) {
 	return true, rel, nil
 }
 
+// need and apply are the two halves of an update; a test swaps them so the
+// signal path can be exercised without the network or an exec of the test
+// binary over itself.
+var (
+	need  = NeedUpdate
+	apply = Apply
+)
+
 // Install downloads rel into target and swaps it into place, unless the
 // published bytes are the running executable's. It reports whether target now
 // holds a different binary.
@@ -186,6 +195,57 @@ func Apply(ctx context.Context, rel Release, target string) error {
 		return err
 	}
 	return syscall.Exec(target, os.Args, os.Environ())
+}
+
+// UpdateSignal is what a launcher sends to ask a running engine to update in
+// place. The pid file is the only handle `aixodia update` has on a process that
+// dials out, and no inbound port is certain to be this engine, so the signal is
+// the whole handshake.
+const UpdateSignal = syscall.SIGUSR1
+
+// NotifyUpdate makes `kill -USR1 <pid>` mean "install the published build and
+// continue as it". The engine swaps the binary and execs itself, so pid,
+// arguments and environment stay the ones the session is already attached to —
+// the same apply RunLoop performs on its own tick, on request instead of on the
+// clock. A build that matches the running one changes nothing and says so in
+// the log.
+//
+// The request does not cut a chat short. When idle reports work in flight the
+// signal only notes it: NeedUpdate is left unconsumed, so the next RunLoop tick
+// applies the same build as soon as the chat ends.
+func NotifyUpdate(ctx context.Context, idle func() bool) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, UpdateSignal)
+	go func() {
+		defer signal.Stop(ch)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ch:
+				log.Print("selfupdate: update requested on signal")
+				if idle != nil && !idle() {
+					log.Print("selfupdate: a chat is in flight; applying when it ends")
+					continue
+				}
+				ok, rel, err := need(ctx)
+				if err != nil {
+					log.Printf("selfupdate: %v", err)
+					continue
+				}
+				if !ok {
+					log.Print("selfupdate: already the published build")
+					continue
+				}
+				log.Printf("selfupdate: installing the build published %s", rel.UpdatedAt)
+				// On success this does not return: the new binary takes over
+				// with this pid, so the session the caller holds survives.
+				if err := apply(ctx, rel, TargetPath()); err != nil {
+					log.Printf("selfupdate: %v", err)
+				}
+			}
+		}
+	}()
 }
 
 func TargetPath() string {
