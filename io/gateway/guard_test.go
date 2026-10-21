@@ -57,6 +57,14 @@ func TestProviderRequestStartsWithAIxodiaPrompt(t *testing.T) {
 	}
 }
 
+func TestAIxodiaSystemPromptIsEnglishOnly(t *testing.T) {
+	for _, r := range aixodiaSystemPrompt {
+		if r > 127 {
+			t.Fatalf("system prompt contains non-ASCII character %q; keep it English-only", r)
+		}
+	}
+}
+
 func TestOrdinaryToolRefusedWithoutActiveObjective(t *testing.T) {
 	store := &memObjectives{items: map[string][]goals.Item{}}
 	g := &Gateway{tools: tools.BuiltinWith(store), objectives: store}
