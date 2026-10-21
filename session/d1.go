@@ -62,13 +62,55 @@ func (d *D1) Create(params NewSession) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A fresh chat has no turns, but the field is still present: the phone reads
+	// "no usage yet" from zeroes, not from a missing object it would have to
+	// distinguish from an old engine that cannot sum.
+	session.Usage = &SessionUsage{}
 	return &session, nil
 }
 
-const sessionColumns = `id,title,provider,model,reasoning,temperature,top_p,max_tokens,created_at,updated_at`
+// sessionSelect returns a chat and its whole cost. The cost is summed over the
+// stored turns in this one query, so the list a phone receives carries the
+// figures with the metadata: the phone only holds a page of rows and must not
+// have to add the rest up itself. The answer filter matches the phone's old
+// aggregate: questions and tool steps carry no usage of their own.
+//
+// InputIncludesCache is a per-provider convention, not a display choice. When
+// it is true the prompt already contains the cache read, so adding cache on top
+// would double the prompt. When it is false the provider reported the cache
+// beside the prompt, so the total is the sum of both. A cache write is not a
+// cache read: those tokens were not reused, so fresh_input still counts them.
+const sessionSelect = `
+SELECT s.id,s.title,s.provider,s.model,s.reasoning,s.temperature,s.top_p,s.max_tokens,s.created_at,s.updated_at,
+       COALESCE(u.prompt_tokens,0) AS usage_prompt_tokens,
+       COALESCE(u.cache_read,0) AS usage_cache_read,
+       COALESCE(u.fresh_input,0) AS usage_fresh_input,
+       COALESCE(u.output_tokens,0) AS usage_output_tokens,
+       COALESCE(u.total_ms,0) AS usage_total_ms,
+       COALESCE((
+           SELECT t.duration_ms FROM chat_turns t
+           WHERE t.session_id=s.id AND t.role != 'user' AND t.role NOT LIKE 'tool%'
+                 AND t.duration_ms > 0
+           ORDER BY t.seq DESC LIMIT 1
+       ),0) AS usage_last_turn_ms
+FROM chat_sessions s
+LEFT JOIN (
+    SELECT session_id,
+           SUM(CASE WHEN input_includes_cache = 1 THEN input_tokens
+                    ELSE input_tokens + cache_read_tokens + cache_write_tokens END) AS prompt_tokens,
+           SUM(cache_read_tokens) AS cache_read,
+           SUM(CASE WHEN input_includes_cache = 1
+                    THEN MAX(input_tokens - cache_read_tokens, 0)
+                    ELSE input_tokens + cache_write_tokens END) AS fresh_input,
+           SUM(output_tokens) AS output_tokens,
+           SUM(duration_ms) AS total_ms
+    FROM chat_turns
+    WHERE role != 'user' AND role NOT LIKE 'tool%'
+    GROUP BY session_id
+) u ON u.session_id = s.id`
 
 func (d *D1) Get(id string) (*Session, error) {
-	rows, err := db.Query(`SELECT `+sessionColumns+` FROM chat_sessions WHERE id=? LIMIT 1`, id)
+	rows, err := db.Query(sessionSelect+` WHERE s.id=? LIMIT 1`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +124,7 @@ func (d *D1) List() ([]Session, error) {
 	// updated_at is whole seconds, so many chats can share a timestamp. The id
 	// tiebreaker is the same one Room uses; without it the list order was left
 	// to D1 and could change between identical reads.
-	rows, err := db.Query(`SELECT ` + sessionColumns + ` FROM chat_sessions ORDER BY updated_at DESC, id DESC LIMIT 200`)
+	rows, err := db.Query(sessionSelect + ` ORDER BY s.updated_at DESC, s.id DESC LIMIT 200`)
 	if err != nil {
 		return nil, err
 	}
@@ -362,6 +404,14 @@ func sessionFromRow(row map[string]any) *Session {
 		MaxTokens:   intField(row, "max_tokens"),
 		CreatedAt:   int64Field(row, "created_at"),
 		UpdatedAt:   int64Field(row, "updated_at"),
+		Usage: &SessionUsage{
+			PromptTokens: intField(row, "usage_prompt_tokens"),
+			CacheRead:    intField(row, "usage_cache_read"),
+			FreshInput:   intField(row, "usage_fresh_input"),
+			OutputTokens: intField(row, "usage_output_tokens"),
+			TotalMS:      int64Field(row, "usage_total_ms"),
+			LastTurnMS:   int64Field(row, "usage_last_turn_ms"),
+		},
 	}
 }
 

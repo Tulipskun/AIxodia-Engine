@@ -164,6 +164,13 @@ type wireResponse struct {
 	Usage      struct {
 		InputTokens  int `json:"input_tokens"`
 		OutputTokens int `json:"output_tokens"`
+		// Anthropic reports the prompt in three parts: the uncached input, the
+		// cache this request read, and the cache it wrote. Only the first is
+		// input_tokens, so the cache must be carried beside it rather than
+		// silently dropped — otherwise every cached turn looked like a tiny
+		// fresh prompt and the strip's cache share was always zero.
+		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	} `json:"usage"`
 }
 
@@ -196,9 +203,14 @@ func (a *Adapter) Complete(ctx context.Context, req *provider.Request, prov prov
 		Model:        parsed.Model,
 		FinishReason: finishReason(parsed.StopReason),
 		Usage: provider.Usage{
+			// InputTokens is only the uncached part; the cache read/write parts
+			// stay beside it, so the engine's total is the whole prompt.
 			PromptTokens:     parsed.Usage.InputTokens,
 			CompletionTokens: parsed.Usage.OutputTokens,
-			TotalTokens:      parsed.Usage.InputTokens + parsed.Usage.OutputTokens,
+			CacheReadTokens:  parsed.Usage.CacheReadInputTokens,
+			CacheWriteTokens: parsed.Usage.CacheCreationInputTokens,
+			TotalTokens: parsed.Usage.InputTokens + parsed.Usage.CacheReadInputTokens +
+				parsed.Usage.CacheCreationInputTokens + parsed.Usage.OutputTokens,
 		},
 	}
 	var text strings.Builder
@@ -254,7 +266,9 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 				ID    string `json:"id"`
 				Model string `json:"model"`
 				Usage struct {
-					InputTokens int `json:"input_tokens"`
+					InputTokens              int `json:"input_tokens"`
+					CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+					CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 				} `json:"usage"`
 			} `json:"message"`
 			ContentBlock struct {
@@ -283,6 +297,8 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 			out.ID = event.Message.ID
 			out.Model = event.Message.Model
 			out.Usage.PromptTokens = event.Message.Usage.InputTokens
+			out.Usage.CacheReadTokens = event.Message.Usage.CacheReadInputTokens
+			out.Usage.CacheWriteTokens = event.Message.Usage.CacheCreationInputTokens
 		case "content_block_start":
 			b := &block{kind: event.ContentBlock.Type, id: event.ContentBlock.ID, name: event.ContentBlock.Name}
 			blocks[event.Index] = b
@@ -330,7 +346,8 @@ func (a *Adapter) Stream(ctx context.Context, req *provider.Request, prov provid
 			})
 		}
 	}
-	out.Usage.TotalTokens = out.Usage.PromptTokens + out.Usage.CompletionTokens
+	out.Usage.TotalTokens = out.Usage.PromptTokens + out.Usage.CacheReadTokens +
+		out.Usage.CacheWriteTokens + out.Usage.CompletionTokens
 	return out, nil
 }
 

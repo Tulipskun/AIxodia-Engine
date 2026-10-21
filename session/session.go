@@ -21,6 +21,27 @@ type Session struct {
 	MaxTokens   int      `json:"max_tokens,omitempty"`
 	CreatedAt   int64    `json:"created_at"`
 	UpdatedAt   int64    `json:"updated_at"`
+	// Usage is the chat's cost, summed by the store over every turn. It rides
+	// with the session so a phone that only holds the newest page of rows can
+	// still draw the whole chat's figures without loading the rest. The phone
+	// draws the strip from these figures and keeps its own copy in session
+	// metadata; it never adds a page of turns up itself.
+	Usage *SessionUsage `json:"usage,omitempty"`
+}
+
+// SessionUsage is one chat's cost. The two prompt conventions stay apart: a
+// provider that puts the cache inside its input total must not have that cache
+// added on top of it, so PromptTokens is the whole prompt either way while
+// FreshInput is only the part that was not served from cache.
+type SessionUsage struct {
+	PromptTokens int   `json:"prompt_tokens"`
+	CacheRead    int   `json:"cache_read"`
+	FreshInput   int   `json:"fresh_input"`
+	OutputTokens int   `json:"output_tokens"`
+	TotalMS      int64 `json:"total_ms"`
+	// LastTurnMS is the newest answer that reported a duration, not the
+	// longest: the strip calls it "last turn", not an average.
+	LastTurnMS int64 `json:"last_turn_ms"`
 }
 
 type Turn struct {

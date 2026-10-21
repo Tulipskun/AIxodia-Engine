@@ -76,6 +76,32 @@ func TestCompleteParsesToolUse(t *testing.T) {
 	}
 }
 
+// Anthropic reports the prompt in three parts. input_tokens is only the
+// uncached part, so a turn that was almost entirely cache-read used to look
+// like a tiny fresh prompt and a cache share of zero.
+func TestCompleteKeepsCacheReadAndWriteBesideThePrompt(t *testing.T) {
+	prov := fakeServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"msg_c","model":"claude-x","stop_reason":"end_turn",
+			"content":[{"type":"text","text":"hi"}],
+			"usage":{"input_tokens":20,"output_tokens":5,
+			         "cache_read_input_tokens":900,"cache_creation_input_tokens":80}}`)
+	})
+	resp, err := New().Complete(context.Background(), &provider.Request{Model: "claude-x"}, prov, "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Usage.PromptTokens != 20 || resp.Usage.CacheReadTokens != 900 ||
+		resp.Usage.CacheWriteTokens != 80 || resp.Usage.CompletionTokens != 5 {
+		t.Fatalf("usage = %+v", resp.Usage)
+	}
+	if resp.Usage.InputIncludesCache {
+		t.Error("Anthropic's input_tokens does not contain the cache; the flag must stay false")
+	}
+	if resp.Usage.TotalTokens != 1005 {
+		t.Errorf("total = %d, want the whole prompt plus output (1005)", resp.Usage.TotalTokens)
+	}
+}
+
 func TestStreamEmitsTextAndAssemblesToolInput(t *testing.T) {
 	prov := fakeServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
