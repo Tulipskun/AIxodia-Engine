@@ -406,11 +406,22 @@ func toMessages(messages []provider.Message) []message {
 		case "tool":
 			out = append(out, message{
 				Role:       "tool",
-				Content:    incoming.Content,
+				Content:    toolOutput(incoming.Content),
 				ToolCallID: incoming.ToolCallID,
 			})
 		case "assistant":
-			converted := message{Role: "assistant", Content: incoming.Content}
+			// A tool-call turn often has no text. Chat completions accepts
+			// null there, but not the empty string some compatible gateways
+			// (including the one behind opencode) reject as invalid content.
+			// An assistant turn with neither text nor calls is an empty
+			// answer kept for the record; it must not be replayed at all.
+			var content any
+			if len(incoming.Images) > 0 || strings.TrimSpace(incoming.Content) != "" {
+				content = contentOf(incoming)
+			} else if len(incoming.ToolCalls) == 0 {
+				continue
+			}
+			converted := message{Role: "assistant", Content: content}
 			if incoming.ReasoningContent != "" {
 				reasoning := incoming.ReasoningContent
 				converted.ReasoningContent = &reasoning
@@ -425,10 +436,23 @@ func toMessages(messages []provider.Message) []message {
 			}
 			out = append(out, converted)
 		default:
+			if len(incoming.Images) == 0 && strings.TrimSpace(incoming.Content) == "" {
+				continue
+			}
 			out = append(out, message{Role: incoming.Role, Content: contentOf(incoming)})
 		}
 	}
 	return out
+}
+
+// toolOutput keeps an empty tool result from reaching providers that require
+// message content to be a non-empty string. The model still sees that the call
+// ran; dropping the result would leave its function_call unanswered.
+func toolOutput(content string) string {
+	if strings.TrimSpace(content) == "" {
+		return "(no output)"
+	}
+	return content
 }
 
 // contentOf is a plain string unless the message carries pictures, in which
@@ -569,7 +593,7 @@ func buildResponsesRequest(req *provider.Request, stream bool) responsesRequest 
 			items = append(items, map[string]any{
 				"type":    "function_call_output",
 				"call_id": m.ToolCallID,
-				"output":  textContent(m.Content),
+				"output":  toolOutput(textContent(m.Content)),
 			})
 			continue
 		}
@@ -584,7 +608,7 @@ func buildResponsesRequest(req *provider.Request, stream bool) responsesRequest 
 				}
 				calls = append(calls, call)
 			}
-			if text := textContent(m.Content); text != "" {
+			if text := strings.TrimSpace(textContent(m.Content)); text != "" {
 				items = append(items, map[string]any{"role": "assistant", "content": text})
 			}
 			for _, call := range calls {
@@ -595,6 +619,14 @@ func buildResponsesRequest(req *provider.Request, stream bool) responsesRequest 
 					"arguments": call.Arguments,
 				})
 			}
+			continue
+		}
+		// An empty text item is invalid on every role, and null is only
+		// accepted on an assistant message. Empty turns are either an
+		// already-answered tool round or a failed answer kept for the record;
+		// neither belongs in the next request. A message with pictures is
+		// never empty: the parts array carries the images.
+		if len(m.Images) == 0 && strings.TrimSpace(textContent(m.Content)) == "" {
 			continue
 		}
 		items = append(items, map[string]any{"role": m.Role, "content": responsesContent(m)})
