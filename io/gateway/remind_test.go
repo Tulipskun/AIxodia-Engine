@@ -80,6 +80,20 @@ func TestPrepareMessagesInjectsActiveObjectivesBeforeTheQuestion(t *testing.T) {
 	}
 }
 
+func TestPrepareMessagesKeepsAUserAttachmentWithTheReminder(t *testing.T) {
+	store := &memObjectives{items: map[string][]goals.Item{
+		"chat-1": {{ID: "g-1111", Kind: goals.Goal, Content: "look at the picture"}},
+	}}
+	g := &Gateway{objectives: store}
+	conversation, _, _ := g.prepareMessages([]provider.Message{{
+		Role: "user", Content: "what is this?", Images: []provider.Image{{}},
+	}}, session.Window{Max: 100000}, "chat-1", &reminderState{})
+
+	if len(conversation) != 2 || !isReminder(conversation[0]) || len(conversation[1].Images) != 1 {
+		t.Fatalf("conversation = %#v, want reminder then the attached question", conversation)
+	}
+}
+
 func TestPrepareMessagesSkipsEmptyStoreUntilSomethingChanged(t *testing.T) {
 	g := &Gateway{objectives: &memObjectives{items: map[string][]goals.Item{}}}
 	state := &reminderState{}

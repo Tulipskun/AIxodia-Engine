@@ -59,7 +59,7 @@ func stripReminders(conversation []provider.Message) []provider.Message {
 func insertReminder(conversation []provider.Message, text string) []provider.Message {
 	conversation = stripReminders(conversation)
 	reminder := provider.Message{Role: "user", Content: text}
-	if n := len(conversation); n > 0 && isPlainUserMessage(conversation[n-1]) {
+	if n := len(conversation); n > 0 && isUserTurnStart(conversation, n-1) {
 		out := make([]provider.Message, 0, n+1)
 		out = append(out, conversation[:n-1]...)
 		out = append(out, reminder, conversation[n-1])
@@ -68,9 +68,19 @@ func insertReminder(conversation []provider.Message, text string) []provider.Mes
 	return append(conversation, reminder)
 }
 
-func isPlainUserMessage(message provider.Message) bool {
-	return message.Role == "user" && len(message.Images) == 0 &&
-		message.ToolCallID == "" && !isReminder(message)
+// isUserTurnStart reports whether this message is the user's own newest turn
+// (possibly with an attachment) rather than the caption the engine adds after a
+// tool returns a picture. The reminder goes inside that same trim turn so a
+// tight window cannot keep the reminder while dropping the question.
+func isUserTurnStart(conversation []provider.Message, i int) bool {
+	message := conversation[i]
+	if message.Role != "user" || message.ToolCallID != "" || isReminder(message) {
+		return false
+	}
+	if len(message.Images) > 0 && i > 0 && conversation[i-1].Role == "tool" {
+		return false
+	}
+	return true
 }
 
 // prepareMessages trims the conversation and, when needed, injects the active
