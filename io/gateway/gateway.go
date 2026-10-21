@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"aixodia-engine/config"
+	"aixodia-engine/goals"
 	"aixodia-engine/provider"
 	"aixodia-engine/provider/registry"
 	"aixodia-engine/session"
@@ -64,6 +65,9 @@ type Gateway struct {
 	// state is where the phone's settings live: D1's system_state in
 	// production. Chat history goes through SessionStore instead.
 	state StateStore
+	// objectives is where the active goals and plans live. The reminder is
+	// built from this store and scoped to the chat session.
+	objectives goals.Store
 }
 
 type modelCache struct {
@@ -97,6 +101,11 @@ type StateStore interface {
 
 // SetStateStore hands the gateway the state store opened at boot.
 func (g *Gateway) SetStateStore(s StateStore) { g.state = s }
+
+// SetObjectiveStore hands the gateway the goals and plans store opened at boot.
+// Without it goal and plan tools still exist but cannot run, and no reminder is
+// injected.
+func (g *Gateway) SetObjectiveStore(s goals.Store) { g.objectives = s }
 
 func (g *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()

@@ -13,6 +13,7 @@ import (
 	"aixodia-engine/config"
 	"aixodia-engine/provider"
 	"aixodia-engine/session"
+	"aixodia-engine/tools"
 )
 
 type chatMessage struct {
@@ -567,6 +568,9 @@ func (g *Gateway) fallbackRoute(stored *session.Session) *route {
 
 func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, history []provider.Message, options completionOptions) (*provider.Response, error) {
 	conversation := append([]provider.Message(nil), history...)
+	// Goal and plan tools are scoped to the chat in options.sessionID. The
+	// context is the only channel the tool signature carries into a run.
+	ctx = tools.WithSession(ctx, options.sessionID)
 	current := primary
 	usedFallback := false
 
@@ -591,13 +595,15 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 	// still wanted tools. Its last reply is then only tool calls, so one more
 	// call without tools asks it to answer from what it already has.
 	pending := false
+	remind := &reminderState{}
 
 	for round := 0; round < maxToolRounds; {
 		if options.onRequest != nil {
 			options.onRequest(round+1, session.StateWaiting)
 		}
-		messages := session.Trim(conversation, window)
-		whole := len(messages) == len(conversation)
+		var messages []provider.Message
+		var whole bool
+		conversation, messages, whole = g.prepareMessages(conversation, window, options.sessionID, remind)
 		request := &provider.Request{
 			Model:       current.model,
 			Messages:    messages,
@@ -680,6 +686,11 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 			}
 			started := time.Now()
 			output, images := g.runTool(ctx, call)
+			// A successful goal or plan change means the next model round must
+			// see the fresh list, in case add/edit/complete/drop changed it.
+			if !isToolError(output) && (strings.HasPrefix(call.Name, "goal_") || strings.HasPrefix(call.Name, "plan_")) {
+				remind.dirty = true
+			}
 			if options.onToolResult != nil {
 				options.onToolResult(call, output, time.Since(started).Milliseconds(), isToolError(output))
 			}
@@ -731,9 +742,10 @@ func (g *Gateway) complete(ctx context.Context, primary route, fallback *route, 
 		if options.onRequest != nil {
 			options.onRequest(extraRound, session.StateWaiting)
 		}
+		_, messages, _ := g.prepareMessages(conversation, window, options.sessionID, remind)
 		request := &provider.Request{
 			Model:       current.model,
-			Messages:    session.Trim(conversation, window),
+			Messages:    messages,
 			MaxTokens:   options.maxTokens,
 			Temperature: options.temperature,
 			TopP:        options.topP,

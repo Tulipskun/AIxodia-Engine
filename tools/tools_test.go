@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"aixodia-engine/goals"
 	"aixodia-engine/imageprep"
 )
 
@@ -75,12 +76,14 @@ func TestIsPublicIP(t *testing.T) {
 	}
 }
 
-func TestBuiltinOffersShellAndRead(t *testing.T) {
+func TestBuiltinOffersToolsAndReasonContract(t *testing.T) {
 	b := Builtin()
-	for _, name := range []string{
-		"current_time", "fetch_url", "shell", "read", "edit", "write",
+	ordinary := []string{"current_time", "fetch_url", "shell", "read", "edit", "write"}
+	objectives := []string{
 		"goal_add", "goal_edit", "goal_complete", "goal_drop",
-	} {
+		"plan_add", "plan_edit", "plan_complete", "plan_drop",
+	}
+	for _, name := range append(append([]string{}, ordinary...), objectives...) {
 		tool, ok := b[name]
 		if !ok {
 			t.Fatalf("Builtin() missing tool %q", name)
@@ -92,18 +95,17 @@ func TestBuiltinOffersShellAndRead(t *testing.T) {
 			t.Errorf("tool %q has nil Run", name)
 		}
 		props, _ := tool.Def.Parameters["properties"].(map[string]any)
-		if _, ok := props["reason"]; !ok {
-			t.Errorf("tool %q has no reason parameter", name)
-		}
+		_, hasReason := props["reason"]
 		required, _ := tool.Def.Parameters["required"].([]any)
-		found := false
+		requiresReason := false
 		for _, r := range required {
 			if r == "reason" {
-				found = true
+				requiresReason = true
 			}
 		}
-		if !found {
-			t.Errorf("tool %q does not require reason", name)
+		wantReason := name != "" && !strings.HasPrefix(name, "goal_") && !strings.HasPrefix(name, "plan_")
+		if hasReason != wantReason || requiresReason != wantReason {
+			t.Errorf("tool %q reason presence/required = %v/%v, want %v", name, hasReason, requiresReason, wantReason)
 		}
 	}
 	// The v1 name must be gone: the command tool is "shell" only, matching the
@@ -153,69 +155,104 @@ func TestRunWriteRejectsBadPaths(t *testing.T) {
 }
 
 type fakeGoals struct {
-	content string
-	edited  string
-	status  string
+	added  []string
+	edited string
+	status string
 }
 
-func (f *fakeGoals) Add(content string) (string, error) {
-	f.content = content
+func (f *fakeGoals) Add(sessionID string, kind goals.Kind, content string) (string, error) {
+	f.added = append(f.added, sessionID+":"+string(kind)+":"+content)
+	if kind == goals.Plan {
+		return "p-test", nil
+	}
 	return "g-test", nil
 }
 
-func (f *fakeGoals) Edit(id, content string) error {
-	f.edited = id + ":" + content
+func (f *fakeGoals) Edit(sessionID string, kind goals.Kind, id, content string) error {
+	f.edited = sessionID + ":" + string(kind) + ":" + id + ":" + content
 	return nil
 }
 
-func (f *fakeGoals) Complete(id string) error {
-	f.status = "done:" + id
+func (f *fakeGoals) Complete(sessionID string, kind goals.Kind, id string) error {
+	f.status = sessionID + ":" + string(kind) + ":done:" + id
 	return nil
 }
 
-func (f *fakeGoals) Drop(id string) error {
-	f.status = "dropped:" + id
+func (f *fakeGoals) Drop(sessionID string, kind goals.Kind, id string) error {
+	f.status = sessionID + ":" + string(kind) + ":dropped:" + id
 	return nil
 }
 
-func TestGoalToolsUseTheStore(t *testing.T) {
+func (f *fakeGoals) Open(string) ([]goals.Item, error) { return nil, nil }
+
+func TestObjectiveToolsUseTheSessionAndKind(t *testing.T) {
 	store := &fakeGoals{}
 	b := BuiltinWith(store)
+	ctx := WithSession(context.Background(), "chat-1")
 
-	out, err := b["goal_add"].Run(context.Background(), `{"content":"ship the fix"}`)
+	out, err := b["goal_add"].Run(ctx, `{"content":"ship the fix"}`)
 	if err != nil {
 		t.Fatalf("goal_add: %v", err)
 	}
-	if out != "goal_id: g-test" || store.content != "ship the fix" {
-		t.Errorf("goal_add = %q, stored %q", out, store.content)
+	if out != "goal_id: g-test" || len(store.added) != 1 || store.added[0] != "chat-1:goal:ship the fix" {
+		t.Errorf("goal_add = %q, added %v", out, store.added)
 	}
 
-	if _, err := b["goal_edit"].Run(context.Background(), `{"goal_id":"g-test","content":"ship it well"}`); err != nil {
+	out, err = b["plan_add"].Run(ctx, `{"content":"write a test"}`)
+	if err != nil {
+		t.Fatalf("plan_add: %v", err)
+	}
+	if out != "plan_id: p-test" || store.added[1] != "chat-1:plan:write a test" {
+		t.Errorf("plan_add = %q, added %v", out, store.added)
+	}
+
+	if _, err := b["goal_edit"].Run(ctx, `{"goal_id":"g-test","content":"ship it well"}`); err != nil {
 		t.Fatalf("goal_edit: %v", err)
 	}
-	if store.edited != "g-test:ship it well" {
+	if store.edited != "chat-1:goal:g-test:ship it well" {
 		t.Errorf("goal_edit stored %q", store.edited)
 	}
 
-	if _, err := b["goal_complete"].Run(context.Background(), `{"goal_id":"g-test"}`); err != nil {
+	if _, err := b["plan_edit"].Run(ctx, `{"plan_id":"p-test","content":"write two tests"}`); err != nil {
+		t.Fatalf("plan_edit: %v", err)
+	}
+	if store.edited != "chat-1:plan:p-test:write two tests" {
+		t.Errorf("plan_edit stored %q", store.edited)
+	}
+
+	if _, err := b["goal_complete"].Run(ctx, `{"goal_id":"g-test"}`); err != nil {
 		t.Fatalf("goal_complete: %v", err)
 	}
-	if store.status != "done:g-test" {
+	if store.status != "chat-1:goal:done:g-test" {
 		t.Errorf("goal_complete stored %q", store.status)
 	}
 
-	if _, err := b["goal_drop"].Run(context.Background(), `{"goal_id":"g-test"}`); err != nil {
-		t.Fatalf("goal_drop: %v", err)
+	if _, err := b["plan_drop"].Run(ctx, `{"plan_id":"p-test"}`); err != nil {
+		t.Fatalf("plan_drop: %v", err)
 	}
-	if store.status != "dropped:g-test" {
-		t.Errorf("goal_drop stored %q", store.status)
+	if store.status != "chat-1:plan:dropped:p-test" {
+		t.Errorf("plan_drop stored %q", store.status)
 	}
 }
 
-func TestGoalToolsWithoutStoreFail(t *testing.T) {
+func TestObjectiveToolsNeedASession(t *testing.T) {
+	store := &fakeGoals{}
+	b := BuiltinWith(store)
+	for _, name := range []string{"goal_add", "plan_add"} {
+		args := `{"content":"x"}`
+		if _, err := b[name].Run(context.Background(), args); err == nil {
+			t.Errorf("%s without a session unexpectedly succeeded", name)
+		}
+	}
+}
+
+func TestObjectiveToolsWithoutStoreFail(t *testing.T) {
 	b := Builtin()
-	if _, err := b["goal_add"].Run(context.Background(), `{"content":"x"}`); err == nil {
-		t.Error("goal_add without a store unexpectedly succeeded")
+	for _, name := range []string{"goal_add", "plan_add"} {
+		args := `{"content":"x"}`
+		if _, err := b[name].Run(WithSession(context.Background(), "chat-1"), args); err == nil {
+			t.Errorf("%s without a store unexpectedly succeeded", name)
+		}
 	}
 }
 

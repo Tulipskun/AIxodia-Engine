@@ -86,7 +86,9 @@ func main() {
 
 	startConfigReloader(ctx)
 
-	g := gateway.New(store, registry.New(), tools.BuiltinWith(goals.NewD1()))
+	objectiveStore := goals.NewD1()
+	g := gateway.New(store, registry.New(), tools.BuiltinWith(objectiveStore))
+	g.SetObjectiveStore(objectiveStore)
 	g.SetStateStore(db.State{})
 	g.SetStartedAt(startedAt)
 	g.SetLogReader(recentLogs)

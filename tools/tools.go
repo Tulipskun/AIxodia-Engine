@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"aixodia-engine/goals"
 	"aixodia-engine/imageprep"
 	"aixodia-engine/provider"
 )
@@ -28,21 +29,31 @@ type Tool struct {
 	Run func(ctx context.Context, args string) (string, error)
 }
 
-// GoalStore is where the goal tools keep their state. The engine passes a D1
-// store; tests can pass a map.
-type GoalStore interface {
-	Add(content string) (id string, err error)
-	Edit(id, content string) error
-	Complete(id string) error
-	Drop(id string) error
+// sessionKey carries the chat id into a tool run. Goals and plans are scoped to
+// the conversation that created them, and the tool signature has only a
+// context to carry that scope.
+type sessionKey struct{}
+
+// WithSession marks a run as belonging to one chat. The gateway calls it once
+// per turn; goal and plan tools refuse to run without it.
+func WithSession(ctx context.Context, sessionID string) context.Context {
+	return context.WithValue(ctx, sessionKey{}, strings.TrimSpace(sessionID))
 }
 
-// Builtin is the tool set the engine offers with no goal storage. It exists for
-// callers that only need the declarations (the provider's free-tier contract
-// injects shell and read); the running engine uses BuiltinWith.
+func sessionOf(ctx context.Context) (string, error) {
+	id, _ := ctx.Value(sessionKey{}).(string)
+	if strings.TrimSpace(id) == "" {
+		return "", fmt.Errorf("goal and plan tools need an active chat session")
+	}
+	return id, nil
+}
+
+// Builtin is the tool set the engine offers with no objective storage. It
+// exists for callers that only need the declarations (the provider's free-tier
+// contract injects shell and read); the running engine uses BuiltinWith.
 func Builtin() map[string]Tool { return BuiltinWith(nil) }
 
-func BuiltinWith(goals GoalStore) map[string]Tool {
+func BuiltinWith(store goals.Store) map[string]Tool {
 	// The command tool is "shell", not "bash": that is the name the real
 	// OpenCode client (v2) sends — v1's "bash" was renamed to "shell" — and the
 	// one the free-tier gate recognises. Offering "bash" as well only made the
@@ -189,138 +200,12 @@ func BuiltinWith(goals GoalStore) map[string]Tool {
 		"read":  {Def: readDef, Run: readFile},
 		"edit":  {Def: editDef, Run: runEdit},
 		"write": {Def: writeDef, Run: runWrite},
-		"goal_add": {
-			Def: provider.ToolDef{
-				Name: "goal_add",
-				Description: "Record a new goal before working on it. Use this when the user asks for something " +
-					"that will take several steps, so the objective survives across tool calls and turns. " +
-					"Returns the new goal_id.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"content": map[string]any{
-							"type":        "string",
-							"description": "What has to be achieved, in a short sentence.",
-						},
-					},
-					"required": []any{"content"},
-				},
-			},
-			Run: func(ctx context.Context, args string) (string, error) {
-				var input struct {
-					Content string `json:"content"`
-				}
-				if err := json.Unmarshal([]byte(args), &input); err != nil {
-					return "", fmt.Errorf("invalid arguments: %w", err)
-				}
-				if goals == nil {
-					return "", errNoGoalStore
-				}
-				id, err := goals.Add(input.Content)
-				if err != nil {
-					return "", err
-				}
-				return "goal_id: " + id, nil
-			},
-		},
-		"goal_edit": {
-			Def: provider.ToolDef{
-				Name:        "goal_edit",
-				Description: "Replace the content of an open goal. Use this when the user changes what the goal should be.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"goal_id": map[string]any{
-							"type":        "string",
-							"description": "The goal_id returned by goal_add.",
-						},
-						"content": map[string]any{
-							"type":        "string",
-							"description": "The complete new content of the goal.",
-						},
-					},
-					"required": []any{"goal_id", "content"},
-				},
-			},
-			Run: func(ctx context.Context, args string) (string, error) {
-				var input struct {
-					GoalID  string `json:"goal_id"`
-					Content string `json:"content"`
-				}
-				if err := json.Unmarshal([]byte(args), &input); err != nil {
-					return "", fmt.Errorf("invalid arguments: %w", err)
-				}
-				if goals == nil {
-					return "", errNoGoalStore
-				}
-				if err := goals.Edit(input.GoalID, input.Content); err != nil {
-					return "", err
-				}
-				return "goal " + input.GoalID + " updated", nil
-			},
-		},
-		"goal_complete": {
-			Def: provider.ToolDef{
-				Name:        "goal_complete",
-				Description: "Mark a goal complete once its work is actually finished. Returns a confirmation.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"goal_id": map[string]any{
-							"type":        "string",
-							"description": "The goal_id returned by goal_add.",
-						},
-					},
-					"required": []any{"goal_id"},
-				},
-			},
-			Run: func(ctx context.Context, args string) (string, error) {
-				var input struct {
-					GoalID string `json:"goal_id"`
-				}
-				if err := json.Unmarshal([]byte(args), &input); err != nil {
-					return "", fmt.Errorf("invalid arguments: %w", err)
-				}
-				if goals == nil {
-					return "", errNoGoalStore
-				}
-				if err := goals.Complete(input.GoalID); err != nil {
-					return "", err
-				}
-				return "goal " + input.GoalID + " completed", nil
-			},
-		},
-		"goal_drop": {
-			Def: provider.ToolDef{
-				Name:        "goal_drop",
-				Description: "Mark a goal dropped when the user cancels it. Returns a confirmation.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"goal_id": map[string]any{
-							"type":        "string",
-							"description": "The goal_id returned by goal_add.",
-						},
-					},
-					"required": []any{"goal_id"},
-				},
-			},
-			Run: func(ctx context.Context, args string) (string, error) {
-				var input struct {
-					GoalID string `json:"goal_id"`
-				}
-				if err := json.Unmarshal([]byte(args), &input); err != nil {
-					return "", fmt.Errorf("invalid arguments: %w", err)
-				}
-				if goals == nil {
-					return "", errNoGoalStore
-				}
-				if err := goals.Drop(input.GoalID); err != nil {
-					return "", err
-				}
-				return "goal " + input.GoalID + " dropped", nil
-			},
-		},
+	}
+	for name, tool := range objectiveTools(store, goals.Goal, "goal") {
+		m[name] = tool
+	}
+	for name, tool := range objectiveTools(store, goals.Plan, "plan") {
+		m[name] = tool
 	}
 	for name, tool := range m {
 		m[name] = withReason(tool)
@@ -328,12 +213,196 @@ func BuiltinWith(goals GoalStore) map[string]Tool {
 	return m
 }
 
-var errNoGoalStore = fmt.Errorf("goal storage is not configured")
+// objectiveTools builds the mirrored goal_* and plan_* tools. They differ only
+// in the list they touch and the noun in their descriptions and output, so a
+// plan cannot be completed through a goal tool or vice versa. These tools do
+// not take a reason: changing a goal or plan is itself the intent.
+func objectiveTools(store goals.Store, kind goals.Kind, noun string) map[string]Tool {
+	idField := noun + "_id"
+	addDescription := "Record the user's overall goal before working on it. Use this when the user asks " +
+		"for something that will take several steps, so the objective survives across tool calls and turns. " +
+		"Use plan_add for the separate steps. Returns the new " + idField + "."
+	if kind == goals.Plan {
+		addDescription = "Record one step toward the current goal. Plans are a separate list from goals. " +
+			"Returns the new " + idField + "."
+	}
+	add := provider.ToolDef{
+		Name:        noun + "_add",
+		Description: addDescription,
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"content": map[string]any{
+					"type":        "string",
+					"description": "What has to be achieved or done, in a short sentence.",
+				},
+			},
+			"required": []any{"content"},
+		},
+	}
+	edit := provider.ToolDef{
+		Name:        noun + "_edit",
+		Description: "Replace the content of an open " + noun + ". Use this when the user changes what it should be.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				idField: map[string]any{
+					"type":        "string",
+					"description": "The " + idField + " returned by " + noun + "_add.",
+				},
+				"content": map[string]any{
+					"type":        "string",
+					"description": "The complete new content of the " + noun + ".",
+				},
+			},
+			"required": []any{idField, "content"},
+		},
+	}
+	complete := provider.ToolDef{
+		Name: noun + "_complete",
+		Description: "Mark a " + noun + " complete once its work is actually finished. " +
+			"It is removed from the active list. Returns a confirmation.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				idField: map[string]any{
+					"type":        "string",
+					"description": "The " + idField + " returned by " + noun + "_add.",
+				},
+			},
+			"required": []any{idField},
+		},
+	}
+	drop := provider.ToolDef{
+		Name:        noun + "_drop",
+		Description: "Mark a " + noun + " dropped when the user cancels it. It is removed from the active list. Returns a confirmation.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				idField: map[string]any{
+					"type":        "string",
+					"description": "The " + idField + " returned by " + noun + "_add.",
+				},
+			},
+			"required": []any{idField},
+		},
+	}
+	// Both field names are decoded even though only one is used: the wire
+	// argument is chosen at runtime by the helper, and a struct tag cannot be.
+	type objectiveInput struct {
+		GoalID  string `json:"goal_id"`
+		PlanID  string `json:"plan_id"`
+		Content string `json:"content"`
+	}
+	decode := func(args string) (objectiveInput, string, error) {
+		var input objectiveInput
+		if err := json.Unmarshal([]byte(args), &input); err != nil {
+			return input, "", fmt.Errorf("invalid arguments: %w", err)
+		}
+		id := input.GoalID
+		if kind == goals.Plan {
+			id = input.PlanID
+		}
+		return input, id, nil
+	}
+	fail := func() error {
+		if store == nil {
+			return fmt.Errorf("%s storage is not configured", noun)
+		}
+		return nil
+	}
+	return map[string]Tool{
+		noun + "_add": {
+			Def: add,
+			Run: func(ctx context.Context, args string) (string, error) {
+				input, _, err := decode(args)
+				if err != nil {
+					return "", err
+				}
+				if err := fail(); err != nil {
+					return "", err
+				}
+				sessionID, err := sessionOf(ctx)
+				if err != nil {
+					return "", err
+				}
+				id, err := store.Add(sessionID, kind, input.Content)
+				if err != nil {
+					return "", err
+				}
+				return idField + ": " + id, nil
+			},
+		},
+		noun + "_edit": {
+			Def: edit,
+			Run: func(ctx context.Context, args string) (string, error) {
+				input, id, err := decode(args)
+				if err != nil {
+					return "", err
+				}
+				if err := fail(); err != nil {
+					return "", err
+				}
+				sessionID, err := sessionOf(ctx)
+				if err != nil {
+					return "", err
+				}
+				if err := store.Edit(sessionID, kind, id, input.Content); err != nil {
+					return "", err
+				}
+				return noun + " " + id + " updated", nil
+			},
+		},
+		noun + "_complete": {
+			Def: complete,
+			Run: func(ctx context.Context, args string) (string, error) {
+				_, id, err := decode(args)
+				if err != nil {
+					return "", err
+				}
+				if err := fail(); err != nil {
+					return "", err
+				}
+				sessionID, err := sessionOf(ctx)
+				if err != nil {
+					return "", err
+				}
+				if err := store.Complete(sessionID, kind, id); err != nil {
+					return "", err
+				}
+				return noun + " " + id + " completed", nil
+			},
+		},
+		noun + "_drop": {
+			Def: drop,
+			Run: func(ctx context.Context, args string) (string, error) {
+				_, id, err := decode(args)
+				if err != nil {
+					return "", err
+				}
+				if err := fail(); err != nil {
+					return "", err
+				}
+				sessionID, err := sessionOf(ctx)
+				if err != nil {
+					return "", err
+				}
+				if err := store.Drop(sessionID, kind, id); err != nil {
+					return "", err
+				}
+				return noun + " " + id + " dropped", nil
+			},
+		},
+	}
+}
 
-// withReason adds the one parameter every tool shares: the model has to say
-// briefly why it is calling the tool. The reason is part of the contract (and
-// required) so the call is explainable even when the tool itself fails.
+// withReason adds the one parameter every ordinary tool shares: the model has
+// to say briefly why it is calling the tool. Goal and plan tools are exempt:
+// changing a goal or plan is the intent, and the reminder carries the list.
 func withReason(tool Tool) Tool {
+	if strings.HasPrefix(tool.Def.Name, "goal_") || strings.HasPrefix(tool.Def.Name, "plan_") {
+		return tool
+	}
 	props, ok := tool.Def.Parameters["properties"].(map[string]any)
 	if !ok {
 		return tool
