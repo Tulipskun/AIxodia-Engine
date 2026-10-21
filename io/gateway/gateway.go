@@ -39,7 +39,7 @@ var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // Version is the release tag, baked in at build time. Bump on every release
 // so a live service can be identified via GET /healthz.
-const Version = "v1.150"
+const Version = "v1.151"
 
 type SessionStore interface {
 	Create(params session.NewSession) (*session.Session, error)
