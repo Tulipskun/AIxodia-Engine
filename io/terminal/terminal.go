@@ -47,8 +47,12 @@ type Server struct {
 }
 
 type session struct {
-	id         string
-	pid        int
+	id  string
+	pid int
+	// start is the process start time from /proc/<pid>/stat. Checking it with
+	// the pid catches the case a shell died and the kernel reused its number
+	// for an unrelated process: kill(pid, 0) would still say the pid exists.
+	start      uint64
 	shell      string
 	dir        string
 	pty        *PTY
@@ -90,9 +94,10 @@ type Info struct {
 	CreatedAt int64  `json:"created_at"`
 }
 
-// List returns every session the engine still holds, oldest first. Finished
-// shells are included with alive=false until the reaper drops them, so a client
-// can tell "exited" from "never existed".
+// List returns every live session the engine holds, oldest first. A shell whose
+// process is gone is dropped first, even when its pty reader has not noticed
+// yet, so a killed terminal can never be listed as reattachable. The alive flag
+// stays on Info for older clients, but a row from this method is always alive.
 func (s *Server) List() []Info {
 	s.mu.Lock()
 	s.reapLocked(false)
@@ -125,6 +130,50 @@ func (s *Server) List() []Info {
 		return out[i].CreatedAt < out[j].CreatedAt
 	})
 	return out
+}
+
+// processStart reads the start time of a process from /proc. Linux is the only
+// platform this package supports (see pty.go), and the start time is what makes
+// a pid check safe against reuse after a kill.
+func processStart(pid int) (uint64, bool) {
+	if pid <= 0 {
+		return 0, false
+	}
+	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, false
+	}
+	text := string(raw)
+	// comm can contain spaces and parentheses, so the fields start after the
+	// last ')'. state is field 3 and starttime is field 22; after the cut the
+	// starttime is at index 19.
+	cut := strings.LastIndexByte(text, ')')
+	if cut < 0 {
+		return 0, false
+	}
+	fields := strings.Fields(text[cut+1:])
+	if len(fields) < 20 {
+		return 0, false
+	}
+	if state := fields[0]; state == "Z" || state == "X" {
+		return 0, false
+	}
+	start, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil || start == 0 {
+		return 0, false
+	}
+	return start, true
+}
+
+// processAlive reports whether pid is still the shell this session started.
+// A recorded start time of zero means it could not be read when the shell was
+// created; the pid alone is then the best identity available.
+func processAlive(pid int, start uint64) bool {
+	now, ok := processStart(pid)
+	if !ok {
+		return false
+	}
+	return start == 0 || now == start
 }
 
 // ListHandler serves GET /v1/terminals for the relay's rpc channel. The relay
@@ -222,8 +271,9 @@ func (s *Server) acquireSession(id string, cols, rows uint16, dir, sh string) (*
 	if err != nil {
 		return nil, false, err
 	}
+	start, _ := processStart(p.Pid())
 	sess := &session{
-		id: id, pid: p.Pid(), shell: sh, dir: dir, pty: p,
+		id: id, pid: p.Pid(), start: start, shell: sh, dir: dir, pty: p,
 		subs:  map[*subscriber]struct{}{},
 		modes: newModeTracker(),
 		cols:  cols, rows: rows, createdAt: time.Now(), lastAct: time.Now(),
@@ -235,16 +285,18 @@ func (s *Server) acquireSession(id string, cols, rows uint16, dir, sh string) (*
 	return sess, false, nil
 }
 
-// reapLocked drops finished sessions, and — when makeRoom is set — sessions no
-// client has attached to for idleReapAfter. Without the second case a session
-// the phone stopped tracking (a closed tab whose close never arrived, an app
-// that was cleared) keeps its shell and its slot for the life of the engine.
-// The caller holds s.mu; the session lock is taken underneath, never above.
+// reapLocked drops finished sessions, sessions whose shell pid is no longer
+// running, and — when makeRoom is set — sessions no client has attached to for
+// idleReapAfter. Without the pid check a shell killed from outside (kill -9,
+// an OOM kill) could stay listed until its pty reader happened to wake, and the
+// phone would reattach to a dead tab. The caller holds s.mu; the session lock is
+// taken underneath, never above.
 func (s *Server) reapLocked(makeRoom bool) {
 	now := time.Now()
 	for id, sess := range s.sess {
 		sess.mu.Lock()
-		reap := sess.dead ||
+		alive := !sess.dead && processAlive(sess.pid, sess.start)
+		reap := !alive ||
 			(makeRoom && len(sess.subs) == 0 && now.Sub(sess.lastAct) > s.idleAfter())
 		sess.mu.Unlock()
 		if !reap {

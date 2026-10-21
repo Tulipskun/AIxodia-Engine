@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -368,6 +369,50 @@ func TestTerminalListDropsAFinishedShell(t *testing.T) {
 			t.Fatalf("list after exit = %+v, want the shell gone or dead", list)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A shell killed from outside must not stay on the list just because the pty
+// reader has not reported EOF yet. The pid check is what makes the tab vanish
+// instead of reattaching the next phone to a dead session id.
+func TestTerminalListDropsAKilledPid(t *testing.T) {
+	s := testServer(t)
+	sess, _, err := s.acquireSession("killed", 80, 24, termDir(), "/bin/sh")
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if got := s.List(); len(got) != 1 || !got[0].Alive {
+		t.Fatalf("list before kill = %+v, want one alive shell", got)
+	}
+	if err := syscall.Kill(sess.pid, syscall.SIGKILL); err != nil {
+		t.Fatalf("kill shell: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if got := s.List(); len(got) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("killed shell is still listed: %+v", s.List())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A pid that now belongs to a different process must not resurrect a session.
+// The start time recorded when the shell was born is the only way to tell.
+func TestTerminalListRejectsAReusedPid(t *testing.T) {
+	s := testServer(t)
+	sess, _, err := s.acquireSession("reused", 80, 24, termDir(), "/bin/sh")
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.pty.Close() })
+	sess.mu.Lock()
+	sess.start++
+	sess.mu.Unlock()
+	if got := s.List(); len(got) != 0 {
+		t.Fatalf("list with a reused pid = %+v, want none", got)
 	}
 }
 
