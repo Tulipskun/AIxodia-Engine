@@ -10,6 +10,7 @@
 #   aixodia status      # is it up, and at which url
 #   aixodia logs        # tail the engine log
 #   aixodia stop        # shut it down
+#   aixodia update      # install the published build and restart into it
 set -uo pipefail
 
 AIXODIA_HOME="${AIXODIA_HOME:-$HOME/.aixodia}"
@@ -120,6 +121,33 @@ cmd_status() {
   return 1
 }
 
+# cmd_update installs the published build through the engine's own `update`
+# entry point, then restarts a running engine so it maps the new file. The
+# swap alone would leave the old binary running until the next start.
+cmd_update() {
+  local resolved
+  resolved="$(command -v "$ENGINE_BIN" 2>/dev/null || true)"
+  [ -n "$resolved" ] || die "engine binary '$ENGINE_BIN' not found — reinstall with the install script"
+
+  "$resolved" update || return 1
+
+  local pid
+  if pid="$(running_pid)"; then
+    # The restart needs the token the engine is serving with; without it the
+    # running process would have to be stopped and could not be brought back.
+    if [ -z "${CF_TOKEN:-}" ]; then
+      echo "aixodia: installed, but the engine (pid $pid) still runs the old build" >&2
+      echo "aixodia: export CF_TOKEN and run: aixodia stop; aixodia" >&2
+      return 1
+    fi
+    echo "aixodia: restarting (pid $pid) so it runs the new build"
+    cmd_stop
+    cmd_start
+  else
+    echo "aixodia: the next start uses the new build"
+  fi
+}
+
 cmd_logs() {
   if [ -f "$LOG_FILE" ]; then tail -n "${1:-40}" "$LOG_FILE"; else echo "aixodia: no log yet"; fi
 }
@@ -128,9 +156,10 @@ case "${1:-}" in
   stop) cmd_stop ;;
   status) cmd_status ;;
   logs) cmd_logs "${2:-40}" ;;
+  update) cmd_update ;;
   ""|start|up) cmd_start ;;
   *)
-    echo "usage: aixodia [start|stop|status|logs]" >&2
+    echo "usage: aixodia [start|stop|status|logs|update]" >&2
     exit 2
     ;;
 esac

@@ -43,6 +43,13 @@ var (
 )
 
 func main() {
+	// `aixodia-engine update` is what the launcher's `aixodia update` runs: it
+	// installs the published build and stops there, so nothing has to be
+	// running and the launcher owns the restart.
+	if len(os.Args) > 1 && os.Args[1] == "update" {
+		os.Exit(updateOnce(context.Background()))
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -193,6 +200,32 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("http shutdown: %v", err)
 	}
+}
+
+// updateOnce installs the published build beside the running one and reports
+// what happened. It needs no token and starts nothing: the binary is there for
+// the next start, or for the launcher to restart the engine into.
+func updateOnce(ctx context.Context) int {
+	ok, rel, err := selfupdate.NeedUpdate(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "selfupdate: %v\n", err)
+		return 1
+	}
+	if !ok {
+		fmt.Println("already the published build")
+		return 0
+	}
+	changed, err := selfupdate.Install(ctx, rel, selfupdate.TargetPath())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "selfupdate: %v\n", err)
+		return 1
+	}
+	if !changed {
+		fmt.Println("already the published build")
+		return 0
+	}
+	fmt.Printf("installed the build published %s\n", rel.UpdatedAt)
+	return 0
 }
 
 func startConfigReloader(ctx context.Context) {

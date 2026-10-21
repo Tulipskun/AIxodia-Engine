@@ -17,6 +17,10 @@ tmp_home() { mktemp -d; }
 make_stub_engine() {
   cat > "$1" <<'STUB'
 #!/usr/bin/env bash
+if [ "${1:-}" = "update" ]; then
+  echo "installed the build published 2026-10-21T00:00:00Z"
+  exit 0
+fi
 echo "engine started"
 echo "relay: dialling wss://stub-relay.example/room/test"
 echo "relay: connected"
@@ -98,6 +102,62 @@ if [ ! -f "$home/aixodia.pid" ]; then
 else
   fail "stop left the pidfile"
 fi
+
+# --- update with no engine running: installs and stops there ----------------
+home=$(tmp_home); fakebin=$(tmp_home); bin=$fakebin/aixodia-engine
+make_stub_engine "$bin"
+out=$(AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" PATH="$fakebin:$PATH" bash "$LAUNCHER" update 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "installed the build published"; then
+  pass "update installs the published build"
+else
+  fail "update install (rc=$rc, out=$out)"
+fi
+if printf '%s' "$out" | grep -q "the next start uses the new build"; then
+  pass "update says the next start picks it up"
+else
+  fail "update without a running engine (out=$out)"
+fi
+
+# --- update with the engine running: it is restarted into the new build -----
+home=$(tmp_home); fakebin=$(tmp_home); bin=$fakebin/aixodia-engine
+make_stub_engine "$bin"
+env CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_RELAY_WAIT=15 \
+  PATH="$fakebin:$PATH" bash "$LAUNCHER" start >/dev/null 2>&1
+before=$(cat "$home/aixodia.pid" 2>/dev/null || echo "")
+out=$(CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_RELAY_WAIT=15 \
+      PATH="$fakebin:$PATH" bash "$LAUNCHER" update 2>&1); rc=$?
+after=$(cat "$home/aixodia.pid" 2>/dev/null || echo "")
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "restarting (pid $before)"; then
+  pass "update restarts the running engine"
+else
+  fail "update restart (rc=$rc, out=$out)"
+fi
+if [ -n "$after" ] && [ "$after" != "$before" ] && kill -0 "$after" 2>/dev/null; then
+  pass "the restarted engine is a new pid"
+else
+  fail "restarted pid (before=$before after=$after)"
+fi
+AIXODIA_HOME="$home" bash "$LAUNCHER" stop >/dev/null 2>&1
+
+# --- update without CF_TOKEN while running leaves the engine up --------------
+home=$(tmp_home); fakebin=$(tmp_home); bin=$fakebin/aixodia-engine
+make_stub_engine "$bin"
+env CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_RELAY_WAIT=15 \
+  PATH="$fakebin:$PATH" bash "$LAUNCHER" start >/dev/null 2>&1
+pid=$(cat "$home/aixodia.pid" 2>/dev/null || echo "")
+out=$(env -u CF_TOKEN AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" PATH="$fakebin:$PATH" \
+      bash "$LAUNCHER" update 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "still runs the old build"; then
+  pass "update without CF_TOKEN warns instead of stopping the engine"
+else
+  fail "update without CF_TOKEN (rc=$rc, out=$out)"
+fi
+if kill -0 "$pid" 2>/dev/null; then
+  pass "the engine is still up after a tokenless update"
+else
+  fail "tokenless update killed the engine (pid=$pid)"
+fi
+AIXODIA_HOME="$home" bash "$LAUNCHER" stop >/dev/null 2>&1
 
 echo
 if [ "$fails" -eq 0 ]; then

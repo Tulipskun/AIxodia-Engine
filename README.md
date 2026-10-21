@@ -29,7 +29,12 @@ it, and gives the prompt back.
 aixodia status      # up? at which url
 aixodia logs        # tail the engine log
 aixodia stop        # shut it down
+aixodia update      # install the published build and restart into it
 ```
+
+The engine also installs a published build by itself, ten minutes at a time and
+only while no chat is in flight (`selfupdate: installing the build published
+...` in the log); `aixodia update` is the same download on demand.
 
 State lives in `~/.aixodia/` (`aixodia.pid`, `aixodia.log`, `aixodia.db`,
 `uploads/`).

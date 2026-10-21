@@ -2,6 +2,8 @@
 // without ending the host session. It compares the running executable against
 // the published release asset and, when they differ, downloads, verifies by
 // sha256 against the running copy, swaps and execs the new binary in place.
+// `aixodia update` uses the same download through Install, and lets the
+// launcher decide when the engine restarts.
 package selfupdate
 
 import (
@@ -11,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -128,33 +131,34 @@ func NeedUpdate(ctx context.Context) (bool, Release, error) {
 	return true, rel, nil
 }
 
-// Apply downloads rel, verifies it differs from the running binary, swaps it
-// into target and execs it in place.
-func Apply(ctx context.Context, rel Release, target string) error {
+// Install downloads rel into target and swaps it into place, unless the
+// published bytes are the running executable's. It reports whether target now
+// holds a different binary.
+func Install(ctx context.Context, rel Release, target string) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", rel.URL, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	req.Header.Set("User-Agent", "aixodia-engine/1.0")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("download: %s", resp.Status)
+		return false, fmt.Errorf("download: %s", resp.Status)
 	}
 	tmp := target + ".new"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
 	if err != nil {
-		return err
+		return false, err
 	}
 	h := sha256.New()
 	w := io.MultiWriter(f, h)
 	if _, err := io.Copy(w, resp.Body); err != nil {
 		f.Close()
 		os.Remove(tmp)
-		return err
+		return false, err
 	}
 	f.Close()
 	got := hex.EncodeToString(h.Sum(nil))
@@ -163,14 +167,24 @@ func Apply(ctx context.Context, rel Release, target string) error {
 	if cur != "" && got == cur {
 		os.Remove(tmp)
 		writeState(rel.UpdatedAt)
-		return nil // same binary, nothing to do
+		return false, nil // same binary, nothing to do
 	}
 
 	if err := os.Rename(tmp, target); err != nil {
 		os.Remove(tmp)
-		return err
+		return false, err
 	}
 	writeState(rel.UpdatedAt)
+	return true, nil
+}
+
+// Apply installs rel and, when the binary changed, replaces this process with
+// it: same pid, same arguments, same environment.
+func Apply(ctx context.Context, rel Release, target string) error {
+	changed, err := Install(ctx, rel, target)
+	if err != nil || !changed {
+		return err
+	}
 	return syscall.Exec(target, os.Args, os.Environ())
 }
 
@@ -184,9 +198,39 @@ func TargetPath() string {
 	return "/usr/local/bin/aixodia-engine"
 }
 
+// RunLoop checks the published build every ten minutes, once the engine has had
+// two minutes to finish starting, and installs it when it changed and no chat
+// is in flight. A check that fails repeats every tick, so it is logged when the
+// error changes, not on every attempt.
 func RunLoop(ctx context.Context, idle func() bool) {
 	tick := time.NewTicker(10 * time.Minute)
 	defer tick.Stop()
+
+	var lastErr string
+	note := func(err error) {
+		if err == nil {
+			if lastErr != "" {
+				log.Print("selfupdate: the release is reachable again")
+				lastErr = ""
+			}
+			return
+		}
+		if msg := err.Error(); msg != lastErr {
+			log.Printf("selfupdate: %v", err)
+			lastErr = msg
+		}
+	}
+	poll := func() {
+		ok, rel, err := NeedUpdate(ctx)
+		note(err)
+		if err != nil || !ok {
+			return
+		}
+		log.Printf("selfupdate: installing the build published %s", rel.UpdatedAt)
+		// On success this does not return: the new binary takes over.
+		note(Apply(ctx, rel, TargetPath()))
+	}
+
 	select {
 	case <-ctx.Done():
 		return
@@ -194,9 +238,7 @@ func RunLoop(ctx context.Context, idle func() bool) {
 	}
 	for {
 		if idle == nil || idle() {
-			if ok, rel, err := NeedUpdate(ctx); err == nil && ok {
-				_ = Apply(ctx, rel, TargetPath())
-			}
+			poll()
 		}
 		select {
 		case <-ctx.Done():
