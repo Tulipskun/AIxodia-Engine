@@ -7,6 +7,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"aixodia-engine/db"
@@ -16,7 +17,13 @@ import (
 // D1 is the chat store: sessions and their turns live in Cloudflare D1, so a
 // fresh engine — and the phone — find the same history. D1 is reached over its
 // HTTP query API; there is no local database in the engine any more.
-type D1 struct{}
+type D1 struct {
+	// Appends serialise within the process: nextSeq is a read followed by an
+	// insert, and two answers for one chat that overlapped could pick the same
+	// seq. One INSERT then failed and its retry put the answer after a newer
+	// question, which the phone showed as a thread out of order.
+	appendMu sync.Mutex
+}
 
 func NewD1() *D1 { return &D1{} }
 
@@ -72,7 +79,10 @@ func (d *D1) Get(id string) (*Session, error) {
 }
 
 func (d *D1) List() ([]Session, error) {
-	rows, err := db.Query(`SELECT ` + sessionColumns + ` FROM chat_sessions ORDER BY updated_at DESC LIMIT 200`)
+	// updated_at is whole seconds, so many chats can share a timestamp. The id
+	// tiebreaker is the same one Room uses; without it the list order was left
+	// to D1 and could change between identical reads.
+	rows, err := db.Query(`SELECT ` + sessionColumns + ` FROM chat_sessions ORDER BY updated_at DESC, id DESC LIMIT 200`)
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +182,8 @@ func (d *D1) AppendTurns(id string, turns []TurnInput) ([]Turn, error) {
 	if len(turns) == 0 {
 		return nil, nil
 	}
+	d.appendMu.Lock()
+	defer d.appendMu.Unlock()
 	var saved []Turn
 	var lastErr error
 	for attempt := 0; attempt < 3 && len(saved) < len(turns); attempt++ {
