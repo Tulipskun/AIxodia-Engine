@@ -642,6 +642,38 @@ func TestTerminalClampsResize(t *testing.T) {
 	readOutput(t, conn, br, "STILL-1", 10*time.Second)
 }
 
+// A client that measures itself before its view has been laid out proposes a
+// one-row window (the xterm fit addon floors at 1). Applying that leaves the
+// shell painting every line onto the same row, so the engine keeps the size it
+// already had and lets the client's next, real measurement win.
+func TestTerminalIgnoresAOneRowResize(t *testing.T) {
+	srv := serveTerminal(t, testServer(t))
+	conn, br := dialTerminal(t, srv.URL, testToken, "?cols=100&rows=30")
+	_ = nextTextFrame(t, conn, br, 10*time.Second)
+
+	sendText(t, conn, resizeFrame{Type: "resize", Cols: 49, Rows: 1})
+	sendBinary(t, conn, "printf 'SIZE-%s\\n' \"$(stty size)\"\n")
+	readOutput(t, conn, br, "SIZE-30 100", 10*time.Second)
+
+	sendText(t, conn, resizeFrame{Type: "resize", Cols: 49, Rows: 48})
+	sendBinary(t, conn, "printf 'REAL-%s\\n' \"$(stty size)\"\n")
+	readOutput(t, conn, br, "REAL-48 49", 10*time.Second)
+}
+
+// The same measurement can arrive on the open handshake, before there is a
+// session to keep: start the shell at the placeholder size instead of one row.
+func TestTerminalOpensAtTheDefaultSizeWhenTheHandshakeIsOneRow(t *testing.T) {
+	srv := serveTerminal(t, testServer(t))
+	conn, br := dialTerminal(t, srv.URL, testToken, "?cols=49&rows=1")
+	ready := nextTextFrame(t, conn, br, 10*time.Second)
+	// The width is the client's to name; only the row count was a guess.
+	if ready["cols"] != float64(49) || ready["rows"] != float64(24) {
+		t.Fatalf("ready = %v, want 49x24", ready)
+	}
+	sendBinary(t, conn, "printf 'SIZE-%s\\n' \"$(stty size)\"\n")
+	readOutput(t, conn, br, "SIZE-24 49", 10*time.Second)
+}
+
 func TestTerminalIgnoresPartialResize(t *testing.T) {
 	srv := serveTerminal(t, testServer(t))
 	conn, br := dialTerminal(t, srv.URL, testToken, "")

@@ -23,6 +23,13 @@ const (
 	readChunk        = 32 << 10
 	minSize          = 1
 	maxSize          = 1000
+	// The smallest window worth giving a shell. A client that measures itself
+	// before the view has been laid out proposes 1 row (the fit addon's floor),
+	// and a one-row pty paints every line onto the same row for the rest of the
+	// session. No phone window is this small, so such a size is a measurement
+	// that has not settled yet: keep the size the shell already has.
+	minWireCols = 10
+	minWireRows = 2
 	// How long a shell with no attached client stays alive before being reaped.
 	idleReapAfter = 30 * time.Minute
 	// Ring buffer of pty output kept for reattach. Four megabytes is roughly a
@@ -52,6 +59,16 @@ type Server struct {
 	// Tmux keeps shells alive across an engine restart. It is off in tests and
 	// on machines without tmux, where the direct pty path still works.
 	Tmux bool
+	// Logf, when set, receives one line per attach and per size the engine
+	// refused to apply. Sizes are the only way to tell a client that measured
+	// itself wrong from a shell that was resized by someone else.
+	Logf func(format string, args ...any)
+}
+
+func (s *Server) logf(format string, args ...any) {
+	if s.Logf != nil {
+		s.Logf(format, args...)
+	}
 }
 
 type session struct {
@@ -474,6 +491,7 @@ func (s *Server) Handler() http.Handler {
 			conn.Close()
 			return
 		}
+		s.logf("terminal %s: attach %dx%d", id, cols, rows)
 		s.serve(conn, br, r, sess, id, cols, rows, dir, sh, kick)
 	})
 }
@@ -491,10 +509,10 @@ func (s *Server) Attach(conn net.Conn, id string, cols, rows int) error {
 	// force the 80x24 placeholder onto a running program. A new shell still
 	// gets the defaults inside acquireSession.
 	c, r := uint16(0), uint16(0)
-	if cols > 0 {
+	if cols >= minWireCols {
 		c = uint16(clamp(cols))
 	}
-	if rows > 0 {
+	if rows >= minWireRows {
 		r = uint16(clamp(rows))
 	}
 	dir, sh := termDir(), s.shell()
@@ -509,6 +527,7 @@ func (s *Server) Attach(conn net.Conn, id string, cols, rows int) error {
 	sess.mu.Lock()
 	effC, effR := sess.cols, sess.rows
 	sess.mu.Unlock()
+	s.logf("terminal %s: attach %dx%d", id, effC, effR)
 	go s.serve(conn, bufio.NewReader(conn), nil, sess, id, effC, effR, dir, sh, kick)
 	return nil
 }
@@ -580,6 +599,13 @@ func (s *Server) serve(conn net.Conn, br *bufio.Reader, r *http.Request, sess *s
 			switch in.Type {
 			case "resize":
 				if in.Cols == nil || in.Rows == nil {
+					break
+				}
+				if *in.Cols < minWireCols || *in.Rows < minWireRows {
+					// A size this small is a client that measured an unlaid-out
+					// view, not a window. Applying it would give the shell one
+					// row; the client resends once its box is real.
+					s.logf("terminal %s: resize %dx%d ignored", id, *in.Cols, *in.Rows)
 					break
 				}
 				c, rr := uint16(clamp(*in.Cols)), uint16(clamp(*in.Rows))
@@ -710,6 +736,14 @@ func wantedSize(r *http.Request) (uint16, uint16) {
 	}
 	if v, err := strconv.Atoi(r.URL.Query().Get("rows")); err == nil {
 		rows = v
+	}
+	// A client that measured an unlaid-out view asks for a one-row window.
+	// Starting a shell at that size is the same mistake as resizing one to it.
+	if cols < minWireCols {
+		cols = 80
+	}
+	if rows < minWireRows {
+		rows = 24
 	}
 	return uint16(clamp(cols)), uint16(clamp(rows))
 }

@@ -122,6 +122,9 @@ func main() {
 	// The terminal checks the token itself: a pattern this specific wins over
 	// the "/" catch-all below, so RequireToken never sees this path.
 	termSrv := terminal.NewServer(token)
+	// Sizes are the only record of what the phone asked for: a client that
+	// measured itself before layout shows up here as a one-line resize.
+	termSrv.Logf = func(format string, args ...any) { LogInfo(format, args...) }
 	if _, err := exec.LookPath("tmux"); err == nil && os.Getenv("AIXODIA_TMUX") != "0" {
 		termSrv.Tmux = true
 	}
