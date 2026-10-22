@@ -60,16 +60,17 @@ func New(handler http.Handler, store Store) *Manager {
 		ctx:     ctx,
 		cancel:  cancel,
 		runs:    map[string]*activeRun{},
-		approvalTools: map[string]bool{
-			"shell": true,
-			"write": true,
-			"edit":  true,
-		},
+		// No tool waits for a human. This engine runs unattended: a paused
+		// call would hang the run until someone opened the app, which is not
+		// what the owner asked for. SetApprovalTools puts names back if that
+		// ever changes.
+		approvalTools: map[string]bool{},
 	}
 }
 
 // SetApprovalTools replaces the set of tool names that pause for a human
-// decision. read/fetch_url/current_time are never in the default set.
+// decision. The default set is empty; read/fetch_url/current_time are never
+// worth asking about.
 func (m *Manager) SetApprovalTools(names []string) {
 	next := map[string]bool{}
 	for _, name := range names {

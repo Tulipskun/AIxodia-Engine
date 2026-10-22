@@ -19,6 +19,8 @@ func TestApprovalGateWaitsForDecision(t *testing.T) {
 	if err := m.Start(); err != nil {
 		t.Fatal(err)
 	}
+	// The gate is opt-in: no tool name pauses unless it is listed here.
+	m.SetApprovalTools([]string{"shell"})
 	created, _, err := m.Create(StartRequest{SessionID: "s1", ClientRunID: "c1", Message: "run a command"})
 	if err != nil {
 		t.Fatal(err)
@@ -88,6 +90,35 @@ func TestApprovalGateWaitsForDecision(t *testing.T) {
 	}
 	if !sawWaiting || !sawDenied {
 		t.Fatalf("approval log waiting=%v denied=%v events=%+v", sawWaiting, sawDenied, backlog)
+	}
+	m.Cancel(created.ID)
+}
+
+// Unattended is the default: nothing pauses, and a mutating tool answers yes
+// on the spot instead of waiting for someone to open the app.
+func TestNoToolWaitsByDefault(t *testing.T) {
+	store := newMemoryStore()
+	m := New(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}), store)
+	if err := m.Start(); err != nil {
+		t.Fatal(err)
+	}
+	created, _, err := m.Create(StartRequest{SessionID: "s1", ClientRunID: "c1", Message: "run a command"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"shell", "write", "edit"} {
+		allowed, reason, err := m.ApprovalGate(context.Background(), created.ID, provider.ToolCall{
+			ID: "call_" + name, Name: name, Arguments: `{}`,
+		})
+		if err != nil || !allowed {
+			t.Fatalf("%s: allowed=%v reason=%q err=%v", name, allowed, reason, err)
+		}
+	}
+	meta, ok, _ := m.Get(created.ID)
+	if ok && meta.Status == StatusWaitingApproval {
+		t.Fatalf("run paused for approval: %+v", meta)
 	}
 	m.Cancel(created.ID)
 }
