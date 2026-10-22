@@ -17,4 +17,5 @@ Steps
 4. Fix stale docs: README says the terminal uses WebView xterm.js (it is native) and mentions the old /ws relay; update the relay and /room lines in AGENTS.md. Keep the README sentence that says there is no P2P/WebRTC/TURN path.
 5. Remove /ws and /room in a separate, last code commit: an old APK still installed would stop connecting.
 6. Do not touch the deployed Worker; the owner deletes it with `npx wrangler delete --name aixodia-relay`.
-7. Final commit: delete this TASK.md.
+7. Delete the remote branch feat/terminal-webrtc-p2p (the owner's Claude session could not: its git proxy refuses ref deletion): `git push origin --delete feat/terminal-webrtc-p2p`. It holds only the abandoned WebRTC work (tip 0ba071e). If you cannot push, say so in your report.
+8. Final commit: delete this TASK.md.
