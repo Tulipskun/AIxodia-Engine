@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -88,6 +89,35 @@ type Gateway struct {
 	// first turn still runs; the duplicate must not start a second answer.
 	turnMu sync.Mutex
 	turns  map[string]bool
+	// approval is consulted before a mutating tool runs. It is nil for the
+	// direct chat route; the run manager installs a gate that can pause the
+	// turn and wait for POST /v1/runs/{id}/approve.
+	approval ApprovalGate
+}
+
+// ApprovalGate decides whether one tool call may run. A run id is carried in
+// the request context so the gate can find the run it belongs to. Returning
+// false with a reason turns the result into a normal tool error the model can
+// read and react to.
+type ApprovalGate func(ctx context.Context, runID string, call provider.ToolCall) (allowed bool, reason string, err error)
+
+// SetApprovalGate installs the human-in-the-loop gate. Without one every tool
+// runs as before.
+func (g *Gateway) SetApprovalGate(gate ApprovalGate) { g.approval = gate }
+
+type runIDContextKey struct{}
+
+// WithRunID labels a chat request with the run that owns it.
+func WithRunID(ctx context.Context, runID string) context.Context {
+	if runID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, runIDContextKey{}, runID)
+}
+
+func runIDFrom(ctx context.Context) string {
+	id, _ := ctx.Value(runIDContextKey{}).(string)
+	return id
 }
 
 type modelCache struct {

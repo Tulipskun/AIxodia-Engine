@@ -28,6 +28,23 @@ type PTY struct {
 // dir is the shell's working directory, or "" to inherit this process's. The
 // caller owns the result and must Close it.
 func StartPTY(shell string, args []string, cols, rows uint16, dir string) (*PTY, error) {
+	return startOnPTY(exec.Command(shell, args...), cols, rows, dir)
+}
+
+// StartTmux attaches the pty to a tmux session, creating it when this is the
+// first attach. The tmux server outlives the engine, so a shell keeps running
+// while the daemon restarts or the phone is away; the pty here is only the
+// client that carries its screen.
+func StartTmux(name, shell string, cols, rows uint16, dir string) (*PTY, error) {
+	args := []string{"-L", "aixodia", "new-session", "-A", "-s", name}
+	if dir != "" {
+		args = append(args, "-c", dir)
+	}
+	args = append(args, shell, "-l")
+	return startOnPTY(exec.Command("tmux", args...), cols, rows, dir)
+}
+
+func startOnPTY(cmd *exec.Cmd, cols, rows uint16, dir string) (*PTY, error) {
 	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open /dev/ptmx: %w", err)
@@ -49,7 +66,6 @@ func StartPTY(shell string, args []string, cols, rows uint16, dir string) (*PTY,
 		return nil, fmt.Errorf("open pty slave: %w", err)
 	}
 
-	cmd := exec.Command(shell, args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
 	if dir != "" {
 		cmd.Dir = dir
@@ -65,7 +81,7 @@ func StartPTY(shell string, args []string, cols, rows uint16, dir string) (*PTY,
 	slave.Close()
 	if started != nil {
 		master.Close()
-		return nil, fmt.Errorf("start %s: %w", shell, started)
+		return nil, fmt.Errorf("start %s: %w", cmd.Path, started)
 	}
 
 	p := &PTY{master: master, cmd: cmd}
@@ -136,10 +152,11 @@ func (p *PTY) Wait() int {
 // so nothing is left as a zombie, and it is safe to call twice.
 func (p *PTY) Close() error {
 	_ = p.master.Close()
-	if p.cmd.Process != nil && p.cmd.ProcessState == nil {
+	if p.cmd.Process != nil {
 		// A negative pid is the process group, which Setsid made the shell
-		// lead. It is safe while the shell is unreaped, because its group id
-		// is still reserved.
+		// lead. Do not inspect ProcessState here: Wait may be writing it from
+		// the read loop, and checking it raced with that write. Killing an
+		// already-reaped group simply returns ESRCH.
 		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
 	}
 	_ = p.Wait()

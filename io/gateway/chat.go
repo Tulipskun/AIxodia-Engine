@@ -214,6 +214,7 @@ func (t *trailWriter) rest(trail []provider.Message) []provider.Message {
 }
 
 func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(WithRunID(r.Context(), r.Header.Get("X-Aixodia-Run")))
 	var body chatRequest
 	if err := decodeBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -918,6 +919,20 @@ func (g *Gateway) runTool(ctx context.Context, call provider.ToolCall, sessionID
 	tool, ok := g.tools[call.Name]
 	if !ok {
 		return toolError(fmt.Sprintf("unknown tool %q", call.Name)), nil
+	}
+	if g.approval != nil {
+		if runID := runIDFrom(ctx); runID != "" {
+			allowed, reason, err := g.approval(ctx, runID, call)
+			if err != nil {
+				return toolError("approval failed: " + err.Error()), nil
+			}
+			if !allowed {
+				if strings.TrimSpace(reason) == "" {
+					reason = "the user denied this call"
+				}
+				return toolError("tool denied: " + reason), nil
+			}
+		}
 	}
 	result, err := tool.Run(ctx, call.Arguments)
 	if err != nil {

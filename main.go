@@ -28,6 +28,7 @@ import (
 	"aixodia-engine/io/relay"
 	"aixodia-engine/io/terminal"
 	"aixodia-engine/provider/registry"
+	"aixodia-engine/run"
 	"aixodia-engine/selfupdate"
 	"aixodia-engine/session"
 	"aixodia-engine/tools"
@@ -101,6 +102,14 @@ func main() {
 	}
 	g.SetUploadDir(uploadDir)
 	gw := g.Handler()
+	// Runs are the phone's long-lived turns: creating one returns immediately,
+	// its events are numbered and replayable, and closing the app no longer
+	// closes the turn. They call the same gateway handler in-process.
+	runMgr := run.New(gw, run.NewD1Store())
+	if err := runMgr.Start(); err != nil {
+		log.Fatalf("run: %v", err)
+	}
+	g.SetApprovalGate(runMgr.ApprovalGate)
 	const model = "Opencode/big-pickle"
 	// One hub for every phone socket.
 	hub := mobile.NewHub()
@@ -113,14 +122,25 @@ func main() {
 	// The terminal checks the token itself: a pattern this specific wins over
 	// the "/" catch-all below, so RequireToken never sees this path.
 	termSrv := terminal.NewServer(token)
+	if _, err := exec.LookPath("tmux"); err == nil && os.Getenv("AIXODIA_TMUX") != "0" {
+		termSrv.Tmux = true
+	}
 	mux.Handle("/terminal", termSrv.Handler())
+	mux.Handle("/v1/terminals/ticket", gateway.RequireToken(token, termSrv.TicketHandler()))
 	mux.Handle("/v1/terminals", gateway.RequireToken(token, termSrv.ListHandler()))
+	mux.Handle("/v1/terminals/", gateway.RequireToken(token, termSrv.CloseHandler()))
+	mux.Handle("/v1/runs", gateway.RequireToken(token, runMgr.Handler()))
+	mux.Handle("/v1/runs/", gateway.RequireToken(token, runMgr.Handler()))
 	mux.Handle("/", gateway.RequireToken(token, gw))
 	// The phone's own socket: one connection carries chat, terminal streams and
 	// every HTTP call as an rpc frame, which is what keeps a phone behind a
 	// quick tunnel to one handshake and one token.
 	rpcMux := http.NewServeMux()
+	rpcMux.Handle("/v1/terminals/ticket", gateway.RequireToken(token, termSrv.TicketHandler()))
 	rpcMux.Handle("/v1/terminals", gateway.RequireToken(token, termSrv.ListHandler()))
+	rpcMux.Handle("/v1/terminals/", gateway.RequireToken(token, termSrv.CloseHandler()))
+	rpcMux.Handle("/v1/runs", gateway.RequireToken(token, runMgr.Handler()))
+	rpcMux.Handle("/v1/runs/", gateway.RequireToken(token, runMgr.Handler()))
 	rpcMux.Handle("/", gateway.RequireToken(token, gw))
 	room := relay.Handler(relay.Config{
 		Token:    token,
@@ -170,13 +190,14 @@ func main() {
 
 	// Periodically check for a newer engine binary and restart in place
 	// without ending the session.
-	idle := func() bool { return activeChats.Load() == 0 }
+	idle := func() bool { return activeChats.Load() == 0 && runMgr.Active() == 0 }
 	go selfupdate.RunLoop(ctx, idle)
 	// `aixodia update` reaches this process by pid and asks for the same swap,
 	// so a deploy on demand does not stop and start the engine.
 	selfupdate.NotifyUpdate(ctx, idle)
 
 	<-ctx.Done()
+	runMgr.Close()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

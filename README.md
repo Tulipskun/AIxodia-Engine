@@ -51,16 +51,38 @@ and their API keys are in Workers KV.
 ## Configuration
 
 Only `CF_TOKEN` is required. Everything else has a working default, and the
-usual engine variables (`AIXODIA_MODEL`, `AIXODIA_DB_PATH`, `AIXODIA_UPLOADS`)
-are respected when set.
+usual engine variables (`AIXODIA_MODEL`, `AIXODIA_DB_PATH`, `AIXODIA_UPLOADS`,
+`AIXODIA_TMUX`) are respected when set.
 
-Chat history, settings and the note a session leaves for the one that replaces
-it live in **D1** (`chat_sessions`, `chat_turns`, `system_state`). Providers and
-their API keys live in **Workers KV**: namespace `aixodia-providers`, one key
-`providers` holding the whole list. D1's `system_state` also carries the daemon
-discovery keys (`daemon/url`, `daemon/version`, `daemon/heartbeat`), which is how
-the phone finds the current tunnel. `CF_TOKEN` therefore needs D1 and Workers KV
+
+Chat history, settings, run logs and the note a session leaves for the one that
+replaces it live in **D1** (`chat_sessions`, `chat_turns`, `system_state`,
+`runs`, `run_events`). Providers and their API keys live in
+**Workers KV**: namespace `aixodia-providers`, one key `providers` holding the
+whole list. D1's `system_state` also carries the daemon discovery keys
+(`daemon/url`, `daemon/version`, `daemon/heartbeat`), which is how the phone
+finds the current tunnel. `CF_TOKEN` therefore needs D1 and Workers KV
 read/write.
+
+## Runs and terminal
+
+Chat is a run, not a request that dies with the phone. The phone creates one
+with `POST /v1/runs`, receives `id` immediately, and reads numbered events from
+`GET /v1/runs/{id}/events?after=<seq>` (SSE, replay first, live afterwards).
+Closing the app does not stop the worker. `POST /v1/runs/{id}/cancel` stops a
+turn, and tools listed in the approval gate (`shell`, `write`, `edit`) pause
+with `waiting_approval` until `POST /v1/runs/{id}/approve`. Every event is in
+D1 before it can be missed; a restart marks unfinished runs `interrupted` rather
+than pretending a goroutine survived.
+
+Terminals use a dedicated WebSocket at `/terminal`, not the old shared relay
+socket. The phone asks `POST /v1/terminals/ticket` for a single-use, 90-second
+ticket, then the WebView's xterm.js opens `/terminal?ticket=...&id=...`. Output
+is replayed from a 4 MiB ring and the shell is kept in tmux (`aix-<id>`, private
+`socket aixodia`) when tmux is installed and `AIXODIA_TMUX` is not `0`.
+`GET /v1/terminals` lists live and surviving sessions; `DELETE
+/v1/terminals/{id}` ends one. The old `/ws` relay remains for compatibility with
+the previous app build; this build's chat and terminal no longer use it.
 
 ## Development
 
@@ -70,25 +92,10 @@ bash aixodia_test.sh      # launcher
 bash install_test.sh      # installer (offline, file:// fixtures)
 ```
 
-## Terminal transport: WebRTC P2P (planned)
+## Terminal transport
 
-Today the engine dials the Cloudflare Durable Objects room and the phone carries terminal traffic through that shared relay socket. The relay therefore sees terminal traffic for the full lifetime of each shell.
-
-The target is to use Durable Objects for **signaling only** and move terminal data to WebRTC DataChannel:
-
-1. The engine and Android client exchange SDP and ICE candidates through the room.
-2. WebRTC ICE attempts a direct path, using STUN for address discovery.
-3. Once the DataChannel opens, PTY input/output, resize events, and terminal control messages travel directly between Android and the engine.
-4. Use a configurable TURN server only when direct connectivity fails. Keep the current relay terminal path as a fallback during rollout and for clients that do not support P2P.
-5. Keep PTY ownership and shell-session lifecycle in the engine. Signaling must never execute commands or carry terminal output after P2P has been established.
-
-Implementation requirements:
-
-- Android: libwebrtc DataChannel transport integrated with TerminalSocket.
-- Linux engine: Pion WebRTC peer connection attached to the existing terminal sessions.
-- Signaling: authenticated, session-scoped messages; validate message sizes, peer roles, expiry, and session ownership.
-- Reliability: reconnect/re-attach to the same PTY session, bounded queues/backpressure, connection state reporting, and relay fallback.
-- Security: do not expose the PTY directly to the public network; do not reuse the Cloudflare API token as a peer-facing long-lived signaling credential.
-
-**Status:** design target, not implemented. The current engine still uses io/relay for terminal traffic. Do not describe relay traffic as eliminated until the Android client, engine, signaling Worker, fallback behavior, and end-to-end tests are implemented and verified.
+There is no P2P/WebRTC/TURN path. The terminal is a normal WebSocket over the
+same Cloudflare quick tunnel as the API, with a short-lived single-use ticket
+instead of putting the long-lived API token in a WebView URL. Shell ownership
+stays in the engine and, with tmux, survives an engine restart.
 

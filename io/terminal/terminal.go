@@ -25,8 +25,12 @@ const (
 	maxSize          = 1000
 	// How long a shell with no attached client stays alive before being reaped.
 	idleReapAfter = 30 * time.Minute
-	// Ring buffer of pty output kept for reattach.
-	ringCap = 64 << 10
+	// Ring buffer of pty output kept for reattach. Four megabytes is roughly a
+	// long build log; the old 64 KiB lost everything before the last screen.
+	ringCap = 4 << 20
+	// A terminal ticket lets a WebView open a socket without carrying the
+	// long-lived API token in a URL.
+	ticketTTL = 90 * time.Second
 )
 
 // risReset is RIS (ESC c): everything back to how a fresh terminal looks.
@@ -38,12 +42,16 @@ type Server struct {
 	token     string
 	mu        sync.Mutex
 	sess      map[string]*session
+	tickets   map[string]time.Time
 	Limit     int
 	PingEvery time.Duration
 	// IdleAfter overrides how long an unattached shell is kept before the
 	// reaper ends it. Zero means idleReapAfter.
 	IdleAfter time.Duration
 	Shell     string
+	// Tmux keeps shells alive across an engine restart. It is off in tests and
+	// on machines without tmux, where the direct pty path still works.
+	Tmux bool
 }
 
 type session struct {
@@ -76,7 +84,61 @@ type subscriber struct {
 }
 
 func NewServer(token string) *Server {
-	return &Server{token: token, sess: map[string]*session{}}
+	return &Server{token: token, sess: map[string]*session{}, tickets: map[string]time.Time{}}
+}
+
+// IssueTicket returns a one-use bearer for a WebView WebSocket. The token is
+// long-lived and a browser socket cannot set an Authorization header, so the
+// app asks for this over the normal authenticated HTTP path instead.
+func (s *Server) IssueTicket() (string, time.Time) {
+	expires := time.Now().Add(ticketTTL)
+	ticket := randomTicket()
+	s.mu.Lock()
+	now := time.Now()
+	for value, at := range s.tickets {
+		if now.After(at) {
+			delete(s.tickets, value)
+		}
+	}
+	s.tickets[ticket] = expires
+	s.mu.Unlock()
+	return ticket, expires
+}
+
+func (s *Server) consumeTicket(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	expires, ok := s.tickets[value]
+	if !ok {
+		return false
+	}
+	delete(s.tickets, value)
+	return time.Now().Before(expires)
+}
+
+// TicketHandler serves POST /v1/terminals/ticket. It is mounted behind
+// RequireToken, and the ticket it returns is single-use and short-lived.
+func (s *Server) TicketHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !wsock.BearerOK(r, s.token) {
+			http.Error(w, "token rejected", http.StatusUnauthorized)
+			return
+		}
+		ticket, expires := s.IssueTicket()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ticket":     ticket,
+			"expires_at": expires.Unix(),
+		})
+	})
 }
 
 // Info is one shell as the engine sees it. The phone shows the pid beside a
@@ -108,6 +170,7 @@ func (s *Server) List() []Info {
 	s.mu.Unlock()
 
 	out := make([]Info, 0, len(sessions))
+	seen := make(map[string]bool, len(sessions))
 	for _, sess := range sessions {
 		sess.mu.Lock()
 		info := Info{
@@ -121,7 +184,15 @@ func (s *Server) List() []Info {
 			CreatedAt: sess.createdAt.Unix(),
 		}
 		sess.mu.Unlock()
+		seen[info.ID] = true
 		out = append(out, info)
+	}
+	if s.Tmux {
+		for _, info := range listTmux() {
+			if !seen[info.ID] {
+				out = append(out, info)
+			}
+		}
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].CreatedAt == out[j].CreatedAt {
@@ -179,6 +250,34 @@ func processAlive(pid int, start uint64) bool {
 // ListHandler serves GET /v1/terminals for the relay's rpc channel. The relay
 // already authenticated the socket, and the mux wraps this in RequireToken, but
 // checking again keeps the direct HTTP path honest too.
+// CloseHandler serves DELETE /v1/terminals/{id}. It is how the phone closes a
+// tab that is not the one currently attached to its WebView.
+func (s *Server) CloseHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !wsock.BearerOK(r, s.token) {
+			http.Error(w, "token rejected", http.StatusUnauthorized)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/v1/terminals/")
+		id = strings.TrimSpace(strings.Trim(id, "/"))
+		if id == "" {
+			http.Error(w, "id required", http.StatusBadRequest)
+			return
+		}
+		s.mu.Lock()
+		sess := s.sess[id]
+		s.mu.Unlock()
+		if sess != nil {
+			s.drop(id, sess)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+}
+
 func (s *Server) ListHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -267,7 +366,13 @@ func (s *Server) acquireSession(id string, cols, rows uint16, dir, sh string) (*
 			return nil, false, errors.New("too many terminals")
 		}
 	}
-	p, err := StartPTY(sh, []string{"-l"}, cols, rows, dir)
+	var p *PTY
+	var err error
+	if s.Tmux {
+		p, err = startTmux(id, sh, cols, rows, dir)
+	} else {
+		p, err = StartPTY(sh, []string{"-l"}, cols, rows, dir)
+	}
 	if err != nil {
 		return nil, false, err
 	}
@@ -306,6 +411,9 @@ func (s *Server) reapLocked(makeRoom bool) {
 		// A dead session's master is still open until this closes it; the shell
 		// itself is already gone.
 		_ = sess.pty.Close()
+		if s.Tmux {
+			killTmux(id)
+		}
 	}
 }
 
@@ -318,11 +426,14 @@ func (s *Server) drop(id string, sess *session) {
 	}
 	s.mu.Unlock()
 	_ = sess.pty.Close()
+	if s.Tmux {
+		killTmux(id)
+	}
 }
 
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !wsock.BearerOK(r, s.token) {
+		if !wsock.BearerOK(r, s.token) && !s.consumeTicket(r.URL.Query().Get("ticket")) {
 			http.Error(w, "token rejected", http.StatusUnauthorized)
 			return
 		}

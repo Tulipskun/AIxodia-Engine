@@ -728,3 +728,57 @@ func TestTerminalTwoAtOnce(t *testing.T) {
 		t.Fatalf("terminal B saw terminal A's output: %q", outB)
 	}
 }
+
+func TestTicketIsSingleUse(t *testing.T) {
+	s := testServer(t)
+	srv := httptest.NewServer(s.TicketHandler())
+	t.Cleanup(srv.Close)
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL, nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("ticket: %v", err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Ticket string `json:"ticket"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode ticket: %v", err)
+	}
+	if body.Ticket == "" {
+		t.Fatal("empty ticket")
+	}
+	if !s.consumeTicket(body.Ticket) {
+		t.Fatal("the ticket was not accepted")
+	}
+	if s.consumeTicket(body.Ticket) {
+		t.Fatal("a ticket was accepted twice")
+	}
+}
+
+func TestCloseHandlerEndsAShell(t *testing.T) {
+	s := testServer(t)
+	sess, _, err := s.acquireSession("kill-via-http", 80, 24, termDir(), "/bin/sh")
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	srv := httptest.NewServer(s.CloseHandler())
+	t.Cleanup(srv.Close)
+
+	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/v1/terminals/kill-via-http", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("close status = %d, want 204", resp.StatusCode)
+	}
+	if s.List() != nil && len(s.List()) != 0 {
+		t.Fatalf("list = %+v, want empty", s.List())
+	}
+	_ = sess
+}
