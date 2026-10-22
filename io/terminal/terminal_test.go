@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"syscall"
 	"testing"
@@ -306,6 +307,32 @@ func TestTmuxReattachRepaintsTheWholeFrame(t *testing.T) {
 	// after its five-second status tick. The reconnect has to show the frame
 	// now, not leave the user looking at a blank sheet.
 	readOutput(t, conn2, br2, "FRAME-42", 2*time.Second)
+}
+
+// The status bar is a bottom row of session name, host and clock. It must be
+// off before the tmux client attaches, because a bar painted by the first
+// frame stays on screen until something else redraws.
+func TestTmuxStatusBarIsOffBeforeTheClientAttaches(t *testing.T) {
+	if !tmuxAvailable() {
+		t.Skip("tmux is not installed")
+	}
+	const id = "tmux-status"
+	t.Cleanup(func() { killTmux(id) })
+
+	s := testServer(t)
+	s.Tmux = true
+	if _, _, err := s.acquireSession(id, 90, 25, termDir(), "/bin/sh"); err != nil {
+		t.Fatalf("acquire tmux session: %v", err)
+	}
+	out, err := exec.Command(
+		"tmux", "-L", tmuxSocket, "show-options", "-t", tmuxName(id), "status",
+	).Output()
+	if err != nil {
+		t.Fatalf("show tmux status option: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "status off" {
+		t.Fatalf("tmux status = %q, want status off", got)
+	}
 }
 
 func TestTerminalReadyNamesTheShellPid(t *testing.T) {

@@ -75,6 +75,11 @@ func listTmux() []Info {
 	return out
 }
 
+// tmuxHasSession reports whether the private server already holds name.
+func tmuxHasSession(name string) bool {
+	return exec.Command("tmux", "-L", tmuxSocket, "has-session", "-t", name).Run() == nil
+}
+
 // startTmux opens the pty that carries a tmux client. new-session -A attaches
 // to the named session when it already exists, which is exactly the reattach
 // after the engine replaced itself.
@@ -83,16 +88,26 @@ func startTmux(id, shell string, cols, rows uint16, dir string) (*PTY, error) {
 		return nil, fmt.Errorf("tmux is not installed")
 	}
 	name := tmuxName(id)
-	p, err := StartTmux(name, shell, cols, rows, dir)
-	if err != nil {
-		return nil, err
+	// The status bar is a row of a phone screen spent on a session name, a
+	// host and a clock. It used to be switched off after the client had already
+	// attached, which raced the first frame: the bar was painted once and
+	// stayed at the bottom until something else redrew. Create the session
+	// detached, turn that row off, and only then attach.
+	if !tmuxHasSession(name) {
+		args := []string{"-L", tmuxSocket, "new-session", "-d", "-s", name}
+		if dir != "" {
+			args = append(args, "-c", dir)
+		}
+		args = append(args, shell, "-l")
+		if out, err := exec.Command("tmux", args...).CombinedOutput(); err != nil {
+			// Another attach may have created it between the check and here.
+			if !tmuxHasSession(name) {
+				return nil, fmt.Errorf("create tmux session: %v: %s", err, strings.TrimSpace(string(out)))
+			}
+		}
 	}
-	// The status bar is a row of a phone screen spent on a session name and a
-	// clock, and it sits at the bottom of a terminal that is otherwise all
-	// shell. It is set per session, so it sticks for a session that is already
-	// running and for the ones this engine creates later.
 	_ = exec.Command("tmux", "-L", tmuxSocket, "set-option", "-t", name, "status", "off").Run()
-	return p, nil
+	return StartTmux(name, shell, cols, rows, dir)
 }
 
 func randomTicket() string {
