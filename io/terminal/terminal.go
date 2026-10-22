@@ -364,15 +364,17 @@ func (s *Server) shell() string {
 }
 
 // acquireSession reuses a live session id or starts a shell for it. The bool is
-// whether the program should be nudged to repaint: true on a reattach at the
-// size it already had, where the kernel sends no SIGWINCH and a full-screen
-// program would otherwise leave the client with a partial frame from the ring.
+// whether the program should be nudged to repaint after the client is attached:
+// true for a reattach at the size it already had, where the kernel sends no
+// SIGWINCH and a full-screen program would otherwise leave the client with a
+// partial frame from the ring. Tmux always needs the nudge: its own first frame
+// can be written before the client is registered, and its ring is not replayed.
 func (s *Server) acquireSession(id string, cols, rows uint16, dir, sh string) (*session, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if sess, ok := s.sess[id]; ok && !sess.dead {
 		sess.lastAct = time.Now()
-		kick := false
+		kick := s.Tmux
 		// A returning client may be a different size than the shell was left
 		// at (rotation, keyboard, another phone). Apply it before the replay:
 		// the pty sends SIGWINCH, a full-screen program repaints, and the bytes
@@ -429,7 +431,10 @@ func (s *Server) acquireSession(id string, cols, rows uint16, dir, sh string) (*
 	s.sess[id] = sess
 	go sess.readLoop()
 	go sess.pingLoop(s.pingEvery())
-	return sess, false, nil
+	// A tmux client can paint its first frame before serve() registers this
+	// subscriber; ask for that frame again once it is attached. A direct pty is
+	// already painting its first prompt, so no nudge is needed.
+	return sess, s.Tmux, nil
 }
 
 // reapLocked drops finished sessions, sessions whose shell pid is no longer
@@ -591,7 +596,10 @@ func (s *Server) serve(conn net.Conn, br *bufio.Reader, r *http.Request, sess *s
 	sess.mu.Unlock()
 	// A reattach at the size the shell already had leaves the kernel nothing to
 	// signal, so a full-screen program would keep only the slice of its last
-	// frame that fits in the ring. Ask it to redraw the whole screen.
+	// frame that fits in the ring. Ask it to redraw the whole screen. Under
+	// tmux this is also what replaces the frame tmux painted before this
+	// subscriber existed: the ring is dropped there, so without the nudge a
+	// returning client can sit on RIS and an empty screen.
 	if kick {
 		_ = sess.pty.Kick()
 	}

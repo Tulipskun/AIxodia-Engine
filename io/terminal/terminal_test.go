@@ -279,6 +279,35 @@ func TestTerminalReattachReplaysFromAReset(t *testing.T) {
 	}
 }
 
+// A tmux client's first frame can be painted before the new subscriber is
+// registered, and the ring is intentionally not replayed under tmux. The
+// attach nudge is what makes a reconnect show the whole screen instead of an
+// empty one.
+func TestTmuxReattachRepaintsTheWholeFrame(t *testing.T) {
+	if !tmuxAvailable() {
+		t.Skip("tmux is not installed")
+	}
+	const id = "tmux-frame"
+	t.Cleanup(func() { killTmux(id) })
+
+	s := testServer(t)
+	s.Tmux = true
+	srv := serveTerminal(t, s)
+
+	conn, br := dialTerminal(t, srv.URL, testToken, "?id="+id+"&cols=90&rows=25")
+	_ = nextTextFrame(t, conn, br, 10*time.Second)
+	sendBinary(t, conn, "printf 'FRAME-%s\\n' 42\n")
+	readOutput(t, conn, br, "FRAME-42", 10*time.Second)
+	_ = conn.Close()
+
+	conn2, br2 := dialTerminal(t, srv.URL, testToken, "?id="+id+"&cols=90&rows=25")
+	_ = nextTextFrame(t, conn2, br2, 10*time.Second)
+	// Without the attach nudge tmux eventually notices on its own, but only
+	// after its five-second status tick. The reconnect has to show the frame
+	// now, not leave the user looking at a blank sheet.
+	readOutput(t, conn2, br2, "FRAME-42", 2*time.Second)
+}
+
 func TestTerminalReadyNamesTheShellPid(t *testing.T) {
 	s := testServer(t)
 	srv := serveTerminal(t, s)
