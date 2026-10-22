@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"bytes"
 	"fmt"
 	"strconv"
 	"strings"
@@ -201,6 +202,7 @@ func groundBoundary(b []byte, limit int) int {
 		strEsc
 	)
 	state := ground
+	osc := false
 	best := 0
 	for i := 0; i < len(b); i++ {
 		c := b[i]
@@ -215,6 +217,8 @@ func groundBoundary(b []byte, limit int) int {
 				state = csi
 			case c == ']' || c == 'P' || c == '_' || c == '^' || c == 'X':
 				state = str
+				// Only OSC can end with BEL; the others end with ST alone.
+				osc = c == ']'
 			case c == 0x1b:
 				// A second ESC restarts a sequence rather than ending it.
 			default:
@@ -227,6 +231,11 @@ func groundBoundary(b []byte, limit int) int {
 		case str:
 			if c == 0x1b {
 				state = strEsc
+			} else if c == 0x07 && osc {
+				// A title or hyperlink written with BEL. Without this the
+				// parser never leaves the string, the boundary freezes at that
+				// point, and the ring stops being trimmed at all.
+				state = ground
 			}
 		case strEsc:
 			if c == '\\' {
@@ -240,4 +249,41 @@ func groundBoundary(b []byte, limit int) int {
 		}
 	}
 	return best
+}
+
+// stripQueries removes the sequences that ask the terminal a question: device
+// attributes (CSI c), cursor position and status (CSI n). A program asked them
+// once and got its answer; replaying the question makes the client answer a
+// second time, and that answer reaches the program as keyboard input — the
+// prompt then shows fragments like "1;2c0;276;0c". Only complete sequences are
+// dropped; anything unterminated is left to the caller's boundary handling.
+func stripQueries(b []byte) []byte {
+	if !bytes.ContainsRune(b, 0x1b) {
+		return b
+	}
+	out := make([]byte, 0, len(b))
+	for i := 0; i < len(b); {
+		if b[i] != 0x1b || i+1 >= len(b) || b[i+1] != '[' {
+			out = append(out, b[i])
+			i++
+			continue
+		}
+		j := i + 2
+		for j < len(b) && (b[j] < 0x40 || b[j] > 0x7e) {
+			j++
+		}
+		if j >= len(b) {
+			// Unterminated: keep it out of the replay rather than let the
+			// client parse half a sequence as text.
+			break
+		}
+		switch b[j] {
+		case 'c', 'n':
+			i = j + 1 // a question, not a drawing command
+		default:
+			out = append(out, b[i:j+1]...)
+			i = j + 1
+		}
+	}
+	return out
 }

@@ -93,3 +93,33 @@ func TestModeTrackerKnowsTheAlternateScreen(t *testing.T) {
 		t.Fatal("47h did not enter the alternate screen")
 	}
 }
+
+// A title or hyperlink closed with BEL used to leave the boundary parser stuck
+// inside the string, which froze the ring's trim point and let the buffer grow
+// without limit.
+func TestGroundBoundaryLeavesABelTerminatedTitle(t *testing.T) {
+	b := []byte("\x1b]0;aixodia\x07$ ls\r\n")
+	if got := groundBoundary(b, len(b)); got != len(b) {
+		t.Fatalf("boundary = %d, want %d", got, len(b))
+	}
+}
+
+func TestStripQueriesKeepsDrawingAndDropsQuestions(t *testing.T) {
+	in := []byte("\x1b[?1;2c\x1b[>0;276;0c\x1b[6n\x1b[1;32mhello\x1b[0m\x1b[?25h")
+	got := string(stripQueries(in))
+	want := "\x1b[1;32mhello\x1b[0m\x1b[?25h"
+	if got != want {
+		t.Fatalf("stripQueries = %q, want %q", got, want)
+	}
+}
+
+// Under tmux the tail is tmux's own output from an earlier attach, including
+// the questions it asked the terminal then. Replaying them makes the terminal
+// answer late, and that answer is typed into the shell.
+func TestReplayFrameUnderTmuxIsTheResetAndModesOnly(t *testing.T) {
+	got := replayFrame(true, []byte("\x1b[?2004h"), []byte("\x1b[?1;2c$ ls\r\n"))
+	want := "\x1bc\x1b[?2004h"
+	if string(got) != want {
+		t.Fatalf("replay = %q, want %q", got, want)
+	}
+}

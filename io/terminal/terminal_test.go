@@ -814,3 +814,35 @@ func TestCloseHandlerEndsAShell(t *testing.T) {
 	}
 	_ = sess
 }
+
+// A program that asks the terminal what it is gets an answer from the client.
+// Replaying the question on reattach made the client answer a second time, and
+// the late answer arrived at the shell as keyboard input: the prompt showed
+// "1;2c0;276;0c" with nothing typed.
+func TestTerminalReplayDropsTheTerminalsQuestions(t *testing.T) {
+	srv := serveTerminal(t, testServer(t))
+	conn, br := dialTerminal(t, srv.URL, testToken, "?id=ask&cols=90&rows=25")
+	_ = nextTextFrame(t, conn, br, 10*time.Second)
+	sendBinary(t, conn, "printf '\\033[c\\033[>c\\033[6nASKED\\n'\n")
+	readOutput(t, conn, br, "ASKED", 10*time.Second)
+	conn.Close()
+
+	conn2, br2 := dialTerminal(t, srv.URL, testToken, "?id=ask&cols=90&rows=25")
+	_ = nextTextFrame(t, conn2, br2, 10*time.Second)
+	op, payload, err := readFrame(t, conn2, br2, 10*time.Second)
+	if err != nil {
+		t.Fatalf("read replay: %v", err)
+	}
+	if op != wsock.OpBinary {
+		t.Fatalf("replay op = %d, want binary", op)
+	}
+	got := string(payload)
+	if !strings.Contains(got, "ASKED") {
+		t.Fatalf("replay does not carry the shell's tail: %q", got)
+	}
+	for _, question := range []string{"\x1b[c", "\x1b[>c", "\x1b[6n"} {
+		if strings.Contains(got, question) {
+			t.Fatalf("replay repeats the terminal's question %q: %q", question, got)
+		}
+	}
+}

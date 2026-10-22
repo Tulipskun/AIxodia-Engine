@@ -82,7 +82,17 @@ func startTmux(id, shell string, cols, rows uint16, dir string) (*PTY, error) {
 	if !tmuxAvailable() {
 		return nil, fmt.Errorf("tmux is not installed")
 	}
-	return StartTmux(tmuxName(id), shell, cols, rows, dir)
+	name := tmuxName(id)
+	p, err := StartTmux(name, shell, cols, rows, dir)
+	if err != nil {
+		return nil, err
+	}
+	// The status bar is a row of a phone screen spent on a session name and a
+	// clock, and it sits at the bottom of a terminal that is otherwise all
+	// shell. It is set per session, so it sticks for a session that is already
+	// running and for the ones this engine creates later.
+	_ = exec.Command("tmux", "-L", tmuxSocket, "set-option", "-t", name, "status", "off").Run()
+	return p, nil
 }
 
 func randomTicket() string {

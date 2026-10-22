@@ -45,6 +45,31 @@ const (
 // screen it already had.
 var risReset = []byte("\x1bc")
 
+// replayFrame is what a client gets on attach: a reset so it never draws on top
+// of a screen it already had, the modes the program turned on before the ring
+// began, and the tail of the output.
+//
+// The tail must not carry the terminal's own questions back to it. tmux asks
+// the terminal what it is (DA1/DA2) and where the cursor is when a client
+// attaches; those queries are in the output, so they are in the ring. Replaying
+// them makes the terminal answer again, and the late answer reaches tmux when
+// it is no longer waiting for one — it lands in the shell as if it had been
+// typed, and the prompt echoes "1;2c0;276;0c". tmux redraws the whole client
+// screen by itself, so under tmux the tail is dropped outright; without tmux
+// only the queries are stripped.
+func replayFrame(tmux bool, modes, ring []byte) []byte {
+	if tmux {
+		ring = nil
+	} else {
+		ring = stripQueries(ring)
+	}
+	out := make([]byte, 0, len(risReset)+len(modes)+len(ring))
+	out = append(out, risReset...)
+	out = append(out, modes...)
+	out = append(out, ring...)
+	return out
+}
+
 type Server struct {
 	token     string
 	mu        sync.Mutex
@@ -555,14 +580,10 @@ func (s *Server) serve(conn net.Conn, br *bufio.Reader, r *http.Request, sess *s
 	// Replay onto a known state. A client may be reattaching to a screen it
 	// already has — after a dropped link, or after the engine restarted under
 	// an open window — so drawing the tail on top of the old screen duplicates
-	// prompts and paints a full-screen app's frame over the previous one. RIS
-	// resets the client first; the modes then re-enter the alternate screen
-	// before the tail is drawn into it. It is all one binary frame so the
-	// order reset -> modes -> output cannot be split by the transport.
-	replay := make([]byte, 0, len(risReset)+len(modes)+len(ring))
-	replay = append(replay, risReset...)
-	replay = append(replay, modes...)
-	replay = append(replay, ring...)
+	// prompts and paints a full-screen app's frame over the previous one. It is
+	// all one binary frame so the order reset -> modes -> output cannot be
+	// split by the transport.
+	replay := replayFrame(s.Tmux, modes, ring)
 	if len(replay) > 0 {
 		_ = wsock.WriteFrame(conn, wsock.OpBinary, replay)
 	}
