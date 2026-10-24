@@ -2,12 +2,13 @@ package session
 
 import (
 	"encoding/json"
+	"strconv"
 	"unicode"
 
 	"aixodia-engine/provider"
 )
 
-// DefaultMaxTokens is the budget a request is trimmed to. It sits below the
+// DefaultMaxTokens is the budget a request is compacted to. It sits below the
 // context window of the models the engine talks to, so the estimate that sizes
 // the newest messages has room to be wrong without the request being refused.
 const DefaultMaxTokens = 156000
@@ -154,13 +155,14 @@ func (w Window) Size(messages []provider.Message) int {
 	return Tokens(messages)
 }
 
-// Trim keeps the leading system messages plus the newest turns that fit inside
-// the window. It is a sliding window: when a conversation outgrows its budget
-// the oldest history is dropped, never the question being asked.
+// Compact compacts a conversation that has reached the window. It replaces the
+// sliding trim: instead of dropping the oldest turns until the budget fits, it
+// keeps the newer turns that fit and hands the kept rounds back as the reason the
+// model gave for them, not as the result text the call produced.
 //
 // The provider's own count decides whether the conversation fits, because it
 // measured the prompt exactly; the estimate only has to size what was added
-// after that measurement. Once a trim is needed the boundary is chosen from the
+// after that measurement. Once a compact is needed the boundary is chosen from the
 // estimate, since a suffix no longer matches the measured prefix.
 //
 // A turn starts at a user message and runs until the next one, so an assistant
@@ -168,7 +170,7 @@ func (w Window) Size(messages []provider.Message) int {
 // upstream refuses a request whose first non-system message is an assistant or a
 // tool, and refuses a tool result whose call was cut away, so a boundary is only
 // ever placed on a turn edge — never inside one.
-func Trim(messages []provider.Message, window Window) []provider.Message {
+func Compact(messages []provider.Message, window Window) []provider.Message {
 	if window.Max <= 0 {
 		window.Max = DefaultMaxTokens
 	}
@@ -210,12 +212,58 @@ func Trim(messages []provider.Message, window Window) []provider.Message {
 		start++
 	}
 
-	trimmed := make([]provider.Message, 0, system)
-	trimmed = append(trimmed, messages[:system]...)
+	compacted := make([]provider.Message, 0, system)
+	compacted = append(compacted, messages[:system]...)
 	for _, turn := range turns[start:] {
-		trimmed = append(trimmed, turn...)
+		for _, message := range turn {
+			compacted = append(compacted, message)
+		}
 	}
-	return trimmed
+
+	// A kept round answers its call with the reason the model wrote for it, not
+	// with the full output the call produced; the result text is what makes the
+	// window grow, and the reason is all the next question ever needs.
+	calls := toolCalls(compacted)
+	for i := range compacted {
+		if compacted[i].Role != "tool" {
+			continue
+		}
+		if call, ok := calls[compacted[i].ToolCallID]; ok {
+			if reason := toolReason(call); reason != "" {
+				compacted[i].Content = reason
+			}
+		}
+	}
+	return compacted
+}
+
+// toolCalls indexes a conversation's tool calls by the call id a tool result
+// answers, so a compacted round can hand the result back as the call's reason.
+func toolCalls(messages []provider.Message) map[string]provider.ToolCall {
+	calls := map[string]provider.ToolCall{}
+	for _, message := range messages {
+		for _, call := range message.ToolCalls {
+			calls[call.ID] = call
+		}
+	}
+	return calls
+}
+
+// toolReason reads the short reason a model wrote for a call out of the
+// arguments the call carried, which is where the tool's own parameters and the
+// shared "reason" both arrive as JSON.
+func toolReason(call provider.ToolCall) string {
+	var fields map[string]any
+	if json.Unmarshal([]byte(call.Arguments), &fields) != nil {
+		return ""
+	}
+	switch value := fields["reason"].(type) {
+	case string:
+		return value
+	case float64:
+		return strconv.FormatFloat(value, 'f', -1, 64)
+	}
+	return ""
 }
 
 // Anchor reports what the provider last measured in a stored history. A turn

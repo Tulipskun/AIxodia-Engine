@@ -26,7 +26,7 @@ func resultOf(id string) provider.Message {
 	return provider.Message{Role: "tool", ToolCallID: id, ToolName: "shell", Content: "ok"}
 }
 
-// checkWindow fails when a trimmed history is one the upstream would refuse:
+// checkWindow fails when a compacted history is one the upstream would refuse:
 // it may not open on an assistant or tool message, and every tool result must
 // still have the call it answers ahead of it.
 func checkWindow(t *testing.T, messages []provider.Message) {
@@ -97,13 +97,13 @@ func TestWindowSizeAnchorsOnTheProviderCount(t *testing.T) {
 	}
 }
 
-func TestTrimKeepsEverythingUnderBudget(t *testing.T) {
+func TestCompactKeepsEverythingUnderBudget(t *testing.T) {
 	messages := []provider.Message{
 		sized("system", 40),
 		sized("user", 40),
 		sized("assistant", 40),
 	}
-	got := Trim(messages, Window{Max: 100000})
+	got := Compact(messages, Window{Max: 100000})
 	if len(got) != len(messages) {
 		t.Fatalf("got %d messages, want the whole conversation: %+v", len(got), got)
 	}
@@ -116,7 +116,7 @@ func TestTrimKeepsEverythingUnderBudget(t *testing.T) {
 
 // The provider's own count settles the fit even when the estimate would have
 // trimmed: the count measured the prompt, the estimate guessed at it.
-func TestTrimTrustsTheProviderCount(t *testing.T) {
+func TestCompactTrustsTheProviderCount(t *testing.T) {
 	messages := []provider.Message{
 		sized("system", 40),
 		sized("user", 4000),
@@ -125,15 +125,15 @@ func TestTrimTrustsTheProviderCount(t *testing.T) {
 	// The estimate says the conversation is far over budget; the provider's
 	// count says it is a fifth of it.
 	window := Window{Max: 100000, Usage: 500, Messages: len(messages)}
-	got := Trim(messages, window)
+	got := Compact(messages, window)
 	if len(got) != len(messages) {
 		t.Fatalf("got %d messages, want the count to keep them all: %+v", len(got), got)
 	}
 }
 
-// The window slides from the newest side: the oldest turn goes first, and the
-// turn being asked stays.
-func TestTrimDropsTheOldestTurn(t *testing.T) {
+// The compact keeps the newest turns that fit: the oldest turn goes first, and
+// the turn being asked stays.
+func TestCompactDropsTheOldestTurn(t *testing.T) {
 	messages := []provider.Message{
 		sized("system", 40),
 		sized("user", 400),
@@ -146,7 +146,7 @@ func TestTrimDropsTheOldestTurn(t *testing.T) {
 	turn := Tokens(messages[1:3])
 	// Two turns fit beside the system block; the third does not.
 	window := Window{Max: Tokens(messages[:1]) + 2*turn + 1}
-	got := Trim(messages, window)
+	got := Compact(messages, window)
 	want := []provider.Message{messages[0], messages[3], messages[4], messages[5], messages[6]}
 	if len(got) != len(want) {
 		t.Fatalf("got %d messages, want %d: %+v", len(got), len(want), got)
@@ -161,7 +161,7 @@ func TestTrimDropsTheOldestTurn(t *testing.T) {
 // A tool call and the results answering it are one turn. A budget that cannot
 // hold the whole turn drops all of it, instead of leaving a window that opens
 // on an assistant or on an orphaned result.
-func TestTrimNeverSplitsAToolTurn(t *testing.T) {
+func TestCompactNeverSplitsAToolTurn(t *testing.T) {
 	messages := []provider.Message{
 		sized("system", 40),
 		sized("user", 400),
@@ -172,7 +172,7 @@ func TestTrimNeverSplitsAToolTurn(t *testing.T) {
 	}
 	newest := Tokens(messages[4:])
 	window := Window{Max: Tokens(messages[:1]) + newest + 1}
-	got := Trim(messages, window)
+	got := Compact(messages, window)
 	want := []provider.Message{messages[0], messages[4], messages[5]}
 	if len(got) != len(want) {
 		t.Fatalf("got %d messages, want %d: %+v", len(got), len(want), got)
@@ -185,9 +185,9 @@ func TestTrimNeverSplitsAToolTurn(t *testing.T) {
 	checkWindow(t, got)
 }
 
-// The newest turn is kept even when it alone is over budget: trimming it away
+// The newest turn is kept even when it alone is over budget: compacting it away
 // would send a request with nothing to answer.
-func TestTrimAlwaysKeepsTheNewestTurn(t *testing.T) {
+func TestCompactAlwaysKeepsTheNewestTurn(t *testing.T) {
 	messages := []provider.Message{
 		sized("system", 40),
 		sized("user", 400),
@@ -195,7 +195,7 @@ func TestTrimAlwaysKeepsTheNewestTurn(t *testing.T) {
 		sized("user", 400),
 		sized("assistant", 400),
 	}
-	got := Trim(messages, Window{Max: Tokens(messages[:1]) + 1})
+	got := Compact(messages, Window{Max: Tokens(messages[:1]) + 1})
 	if len(got) != 3 {
 		t.Fatalf("got %d messages, want the system block plus the newest turn: %+v", len(got), got)
 	}
@@ -206,7 +206,7 @@ func TestTrimAlwaysKeepsTheNewestTurn(t *testing.T) {
 
 // Over a sweep of budgets the window is always something the upstream accepts,
 // and it never drops the message the model was asked to answer.
-func TestTrimWindowIsAlwaysSendable(t *testing.T) {
+func TestCompactWindowIsAlwaysSendable(t *testing.T) {
 	messages := []provider.Message{
 		sized("system", 200),
 		sized("user", 400),
@@ -224,7 +224,7 @@ func TestTrimWindowIsAlwaysSendable(t *testing.T) {
 	}
 	last := messages[len(messages)-1]
 	for budget := 1; budget <= 2000; budget += 17 {
-		got := Trim(messages, Window{Max: budget})
+		got := Compact(messages, Window{Max: budget})
 		checkWindow(t, got)
 		if len(got) == 0 || got[len(got)-1].Content != last.Content || got[len(got)-1].Role != last.Role {
 			t.Fatalf("budget %d: newest message was trimmed away: %+v", budget, got)
@@ -258,5 +258,38 @@ func TestAnchorFindsTheNewestSingleRoundPrompt(t *testing.T) {
 	}
 	if want := len(MessagesFromTurns(turns[:5])); messages != want {
 		t.Fatalf("anchor messages = %d, want %d (the messages the prompt carried)", messages, want)
+	}
+}
+
+// Auto-compact hands a kept tool round back as the reason the model wrote for
+// the call instead of the result text, so the next question knows what was done
+// without paying for the output the call produced.
+func TestCompactReplacesToolResultsWithTheToolReason(t *testing.T) {
+	messages := []provider.Message{
+		sized("system", 40),
+		sized("user", 400),
+		{
+			Role: "assistant",
+			ToolCalls: []provider.ToolCall{{
+				ID:        "c1",
+				Name:      "shell",
+				Arguments: `{"command":"ls","reason":"list the working directory"}`,
+			}},
+		},
+		{Role: "tool", ToolCallID: "c1", ToolName: "shell", Content: "file-a\nfile-b"},
+	}
+	window := Window{Max: Tokens(messages) - 1}
+	got := Compact(messages, window)
+	if len(got) != len(messages) {
+		t.Fatalf("got %d messages, want the kept turn whole: %+v", len(got), got)
+	}
+	var tool provider.Message
+	for _, message := range got {
+		if message.Role == "tool" {
+			tool = message
+		}
+	}
+	if tool.Content != "list the working directory" {
+		t.Fatalf("tool result = %q, want the call's reason", tool.Content)
 	}
 }

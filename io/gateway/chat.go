@@ -668,9 +668,9 @@ func (g *Gateway) complete(ctx context.Context, primary route, history []provide
 		}
 		// The provider counted exactly the prompt it received. When that prompt
 		// was the whole conversation, the count describes the head of the
-		// conversation and anchors the next round; when it was a trimmed window,
-		// it describes messages that are no longer a prefix, so it is dropped
-		// rather than asked to size something it never saw.
+		// conversation and anchors the next round; when it was a compacted
+		// window, it describes messages that are no longer a prefix, so it is
+		// dropped rather than asked to size something it never saw.
 		switch {
 		case !whole:
 			window = session.Window{Max: window.Max}

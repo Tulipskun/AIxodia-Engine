@@ -55,10 +55,10 @@ func stripReminders(conversation []provider.Message) []provider.Message {
 }
 
 // appendReminder puts one fresh reminder at the very end of the request, after
-// trimming room for it. The tail is the cache-friendly position: the next
+// room for it is left. The tail is the cache-friendly position: the next
 // request keeps every earlier message as a prefix, so replacing the reminder
 // only invalidates the last message instead of the user's question. The
-// reminder is trimmed separately from the conversation so the newest turn
+// reminder is sized separately from the conversation so the newest turn
 // always survives even when the window is tight.
 func appendReminder(conversation []provider.Message, text string, window session.Window) ([]provider.Message, bool) {
 	conversation = stripReminders(conversation)
@@ -70,14 +70,14 @@ func appendReminder(conversation []provider.Message, text string, window session
 	if window.Max < 1 {
 		window.Max = 1
 	}
-	trimmed := session.Trim(conversation, window)
-	out := make([]provider.Message, 0, len(trimmed)+1)
-	out = append(out, trimmed...)
+	compacted := session.Compact(conversation, window)
+	out := make([]provider.Message, 0, len(compacted)+1)
+	out = append(out, compacted...)
 	out = append(out, reminder)
-	return out, len(trimmed) == len(conversation)
+	return out, len(compacted) == len(conversation)
 }
 
-// prepareMessages trims the conversation and, when needed, injects the active
+// prepareMessages compacts the conversation and, when needed, injects the active
 // goals and plans as a <system-remind> user message at the tail. A reminder is
 // injected when a goal or plan tool changed something, or when this turn has
 // not looked at the store yet. It is not injected for a chat that has no active
@@ -86,14 +86,14 @@ func (g *Gateway) prepareMessages(conversation []provider.Message, window sessio
 	if window.Max <= 0 {
 		window.Max = session.DefaultMaxTokens
 	}
-	// Older reminders are transient too. Strip them before trimming so the
+	// Older reminders are transient too. Strip them before compacting so the
 	// newest turn is the user's question, not a stale reminder from the last
 	// round.
 	base := stripReminders(conversation)
 	if len(base) != len(conversation) {
 		// A provider count from the previous round covered the reminder that
 		// was just removed, so it no longer describes this conversation's
-		// prefix. Size the trimmed window from the estimate instead.
+		// prefix. Size the compacted window from the estimate instead.
 		window = session.Window{Max: window.Max}
 	}
 	need := state.dirty || (!state.checkedEmpty && state.text == "")
@@ -120,7 +120,7 @@ func (g *Gateway) prepareMessages(conversation []provider.Message, window sessio
 		return out, out, wholeConversation && len(base) == len(conversation)
 	}
 
-	messages := session.Trim(base, window)
+	messages := session.Compact(base, window)
 	return messages, messages, len(messages) == len(base) && len(base) == len(conversation)
 }
 
