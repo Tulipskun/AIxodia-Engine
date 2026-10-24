@@ -121,6 +121,15 @@ type outFrame struct {
 	GenerationMS       int64          `json:"generation_ms,omitempty"`
 	Turns              []session.Turn `json:"turns,omitempty"`
 	TurnsSynced        bool           `json:"turns_synced"`
+	// Daemon is the control frame that carries this daemon's own state to a
+	// phone: the tunnel it published, its version, and the heartbeat that says
+	// it is alive. Kind "daemon" is connection state, not chat output, and is
+	// how a phone learns about a new tunnel without polling the D1 row.
+	DaemonURL       string `json:"daemon_url,omitempty"`
+	DaemonVersion   string `json:"daemon_version,omitempty"`
+	DaemonHeartbeat int64  `json:"daemon_heartbeat,omitempty"`
+	DaemonStarted   int64  `json:"daemon_started"`
+	DaemonOnline    bool   `json:"daemon_online"`
 }
 
 type toolCallJSON struct {
@@ -158,6 +167,29 @@ func (h *Hub) remove(p *peer) {
 	h.mu.Lock()
 	delete(h.peers, p)
 	h.mu.Unlock()
+}
+
+// BroadcastDaemon pushes one daemon frame to every connected phone, so
+// discovery listens for the daemon's own announcements instead of reading the
+// D1 row on a timer. No phones connected, no frame sent.
+func (h *Hub) BroadcastDaemon(ctx context.Context, url string, version string, heartbeat int64, started int64, online bool) error {
+	frame := outFrame{
+		Kind:            "daemon",
+		DaemonURL:       url,
+		DaemonVersion:   version,
+		DaemonHeartbeat: heartbeat,
+		DaemonStarted:   started,
+		DaemonOnline:    online,
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var firstErr error
+	for p := range h.peers {
+		if err := p.send(frame); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // Handler upgrades /ws to a WebSocket after checking the bearer token. It is a

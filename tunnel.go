@@ -121,6 +121,16 @@ func (k *keeper) alive() bool {
 	return k.cur != nil && k.cur.Alive()
 }
 
+// URL is the tunnel this keeper currently has up, empty while it has none.
+func (k *keeper) URL() string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.cur == nil {
+		return ""
+	}
+	return k.cur.URL()
+}
+
 func (k *keeper) set(t *tunnel) {
 	k.mu.Lock()
 	k.cur = t

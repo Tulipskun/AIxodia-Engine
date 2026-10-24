@@ -180,6 +180,9 @@ func main() {
 			return
 		}
 		log.Print("daemon url saved")
+		// The tunnel just changed under the phones, so push the new address to
+		// the ones connected now instead of waiting for the next heartbeat poll.
+		_ = hub.BroadcastDaemon(context.Background(), tunnelURL, versionString(), time.Now().Unix(), startedAt, true)
 		// The note names a URL that is already reachable, so it is written
 		// after the daemon keys; it is written once per process, not on every
 		// reconnect.
@@ -189,7 +192,9 @@ func main() {
 		}
 	})
 	go keeper.run(ctx)
-	go startHeartbeat(ctx, stop, keeper.alive)
+	go startHeartbeat(ctx, stop, keeper.alive, func(version string, heartbeat int64) {
+		_ = hub.BroadcastDaemon(context.Background(), keeper.URL(), version, heartbeat, startedAt, true)
+	})
 
 	// Periodically check for a newer engine binary and restart in place
 	// without ending the session.
@@ -503,6 +508,10 @@ type heartbeatDeps struct {
 	newer func(started int64) (bool, error)
 	touch func(version string, at int64) error
 	now   func() int64
+	// announce pushes the daemon state to the phones after a heartbeat beat
+	// lands, so discovery moves from reading the D1 row to listening for the
+	// daemon instead of polling.
+	announce func(version string, heartbeat int64)
 }
 
 // heartbeatOnce performs one heartbeat and reports whether this engine should
@@ -524,6 +533,8 @@ func heartbeatOnce(started int64, alive func() bool, deps heartbeatDeps) bool {
 	}
 	if err := deps.touch(versionString(), deps.now()); err != nil {
 		log.Printf("heartbeat: %v", err)
+	} else if deps.announce != nil {
+		deps.announce(versionString(), deps.now())
 	}
 	return true
 }
@@ -531,11 +542,12 @@ func heartbeatOnce(started int64, alive func() bool, deps heartbeatDeps) bool {
 // startHeartbeat keeps the daemon keys current so the app can find
 // this daemon and read its uptime. It only writes while the tunnel is alive,
 // and it stops this instance when a newer engine has taken the keys.
-func startHeartbeat(ctx context.Context, stop context.CancelFunc, alive func() bool) {
+func startHeartbeat(ctx context.Context, stop context.CancelFunc, alive func() bool, announce func(version string, heartbeat int64)) {
 	deps := heartbeatDeps{
-		newer: newerDaemonRunning,
-		touch: db.TouchDaemon,
-		now:   func() int64 { return time.Now().Unix() },
+		newer:    newerDaemonRunning,
+		touch:    db.TouchDaemon,
+		now:      func() int64 { return time.Now().Unix() },
+		announce: announce,
 	}
 	beat := func() bool {
 		if heartbeatOnce(startedAt, alive, deps) {

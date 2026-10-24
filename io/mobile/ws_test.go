@@ -342,3 +342,44 @@ func TestAttachmentNoteListsEveryFile(t *testing.T) {
 		t.Errorf("note has %d file lines, want 3:\n%s", lines, got)
 	}
 }
+
+// The daemon announces itself by pushing a frame to every connected phone, so
+// discovery can listen instead of reading the D1 row on a timer.
+func TestBroadcastDaemonPushesToEveryPhone(t *testing.T) {
+	hub := NewHub()
+	mux := http.NewServeMux()
+	mux.Handle("/ws", hub.Handler("good", fakeChat))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c1, r1, code1 := dialWS(t, srv, "good")
+	defer c1.Close()
+	c2, r2, code2 := dialWS(t, srv, "good")
+	defer c2.Close()
+	if code1 != http.StatusSwitchingProtocols || code2 != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade codes: %d %d", code1, code2)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if err := hub.BroadcastDaemon(context.Background(), "https://t1.trycloudflare.com", "engine started=100", 1234, 100, true); err != nil {
+		t.Fatalf("broadcast: %v", err)
+	}
+	for _, tc := range []struct {
+		conn net.Conn
+		r    *bufio.Reader
+	}{
+		{c1, r1},
+		{c2, r2},
+	} {
+		tc.conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_, payload, err := wsock.ReadFrame(tc.r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var f outFrame
+		if err := json.Unmarshal(payload, &f); err != nil {
+			t.Fatal(err)
+		}
+		if f.Kind != "daemon" || f.DaemonURL != "https://t1.trycloudflare.com" || f.DaemonVersion != "engine started=100" || f.DaemonHeartbeat != 1234 || f.DaemonStarted != 100 || !f.DaemonOnline {
+			t.Fatalf("bad daemon frame: %+v", f)
+		}
+	}
+}
