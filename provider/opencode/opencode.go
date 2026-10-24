@@ -51,12 +51,27 @@ func (a *Adapter) userAgent() string {
 
 // torHTTPClient routes outbound requests through the local Tor SOCKS5 proxy.
 func torHTTPClient() *http.Client {
+	// Only route through Tor when it is actually running on this host;
+	// otherwise fall back to the default client so tests and Tor-less
+	// hosts keep working.
+	if !torAvailable() {
+		return nil
+	}
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return dialTor(ctx, addr)
 		},
 	}
 	return &http.Client{Transport: tr, Timeout: 120 * time.Second}
+}
+
+func torAvailable() bool {
+	conn, err := net.DialTimeout("tcp", "127.0.0.1:9050", 200*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 
 func dialTor(ctx context.Context, addr string) (net.Conn, error) {
