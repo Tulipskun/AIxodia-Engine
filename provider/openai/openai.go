@@ -24,6 +24,10 @@ type Adapter struct {
 	Client *http.Client
 }
 
+// OnRateLimited is invoked when an upstream returns 429, so a provider that
+// rotates its egress (e.g. Tor) can request a new exit IP before retrying.
+var OnRateLimited func()
+
 // client is the HTTP client to send with, shared unless one was given.
 func (a *Adapter) client() *http.Client {
 	if a.Client != nil {
@@ -774,7 +778,7 @@ func (a *Adapter) CompleteViaResponses(ctx context.Context, req *provider.Reques
 			httpRequest.Header.Set(k, v)
 		}
 	}
-	resp, err := http.DefaultClient.Do(httpRequest)
+	resp, err := a.client().Do(httpRequest)
 	if err != nil {
 		return nil, err
 	}
@@ -857,7 +861,7 @@ func (a *Adapter) StreamViaResponses(ctx context.Context, req *provider.Request,
 			httpRequest.Header.Set(k, v)
 		}
 	}
-	resp, err := http.DefaultClient.Do(httpRequest)
+	resp, err := a.client().Do(httpRequest)
 	if err != nil {
 		return nil, err
 	}
@@ -993,5 +997,27 @@ func (a *Adapter) doRequest(ctx context.Context, prov provider.Provider, key str
 			httpRequest.Header.Set(name, value)
 		}
 	}
-	return a.client().Do(httpRequest)
+	resp, err := a.client().Do(httpRequest)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusTooManyRequests && OnRateLimited != nil {
+		resp.Body.Close()
+		OnRateLimited()
+		// retry once
+		httpRequest2, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if key != "" {
+			httpRequest2.Header.Set("Authorization", "Bearer "+key)
+		}
+		httpRequest2.Header.Set("Content-Type", "application/json")
+		httpRequest2.Header.Set("Accept", "application/json")
+		httpRequest2.Header.Set("User-Agent", provider.UserAgent)
+		if a.HeaderFunc != nil {
+			for name, value := range a.HeaderFunc() {
+				httpRequest2.Header.Set(name, value)
+			}
+		}
+		return a.client().Do(httpRequest2)
+	}
+	return resp, nil
 }
