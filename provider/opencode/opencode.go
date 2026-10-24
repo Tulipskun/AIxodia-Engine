@@ -3,11 +3,9 @@ package opencode
 import (
 	"context"
 	"crypto/rand"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -49,84 +47,9 @@ func (a *Adapter) userAgent() string {
 	return clientAgentMeasured
 }
 
-// torHTTPClient routes outbound requests through the local Tor SOCKS5 proxy.
-func torHTTPClient() *http.Client {
-	// Only route through Tor when it is actually running on this host;
-	// otherwise fall back to the default client so tests and Tor-less
-	// hosts keep working.
-	if !torAvailable() {
-		return nil
-	}
-	tr := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return dialTor(ctx, addr)
-		},
-	}
-	return &http.Client{Transport: tr, Timeout: 120 * time.Second}
-}
-
-func torAvailable() bool {
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:9050", 200*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
-}
-
-func dialTor(ctx context.Context, addr string) (net.Conn, error) {
-	conn, err := net.Dial("tcp", "127.0.0.1:9050")
-	if err != nil {
-		return nil, err
-	}
-	host, portStr, _ := net.SplitHostPort(addr)
-	if host == "127.0.0.1" || host == "localhost" || host == "::1" {
-		return net.Dial("tcp", addr)
-	}
-	var port uint16
-	fmt.Sscanf(portStr, "%d", &port)
-	// SOCKS5 handshake (no auth)
-	conn.Write([]byte{0x05, 0x01, 0x00})
-	buf := make([]byte, 2)
-	if _, err := conn.Read(buf); err != nil {
-		conn.Close()
-		return nil, err
-	}
-	// CONNECT request
-	req := []byte{0x05, 0x01, 0x00, 0x03}
-	req = append(req, byte(len(host)))
-	req = append(req, []byte(host)...)
-	p := make([]byte, 2)
-	binary.BigEndian.PutUint16(p, port)
-	req = append(req, p...)
-	if _, err := conn.Write(req); err != nil {
-		conn.Close()
-		return nil, err
-	}
-	resp := make([]byte, 10)
-	if _, err := conn.Read(resp); err != nil || resp[1] != 0x00 {
-		conn.Close()
-		return nil, fmt.Errorf("socks5 connect failed")
-	}
-	return conn, nil
-}
-
-// rotateTorCircuit asks Tor for a new exit IP.
-func rotateTorCircuit() {
-	conn, err := net.Dial("tcp", "127.0.0.1:9051")
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-	conn.Write([]byte("AUTHENTICATE \"\"\r\n"))
-	conn.Write([]byte("SIGNAL NEWNYM\r\n"))
-	buf := make([]byte, 256)
-	conn.Read(buf)
-}
 func New() *Adapter {
 	a := &Adapter{session: newID("ses_"), sessionAt: time.Now()}
-	a.inner = &openai.Adapter{HeaderFunc: a.headers, Client: torHTTPClient()}
-	openai.OnRateLimited = rotateTorCircuit
+	a.inner = &openai.Adapter{HeaderFunc: a.headers}
 	return a
 }
 
