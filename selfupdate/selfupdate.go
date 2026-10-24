@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -154,6 +155,7 @@ func NeedUpdate(ctx context.Context) (bool, Release, error) {
 // signal path can be exercised without the network or an exec of the test
 // binary over itself.
 var (
+	mu    sync.RWMutex
 	need  = NeedUpdate
 	apply = Apply
 )
@@ -246,7 +248,10 @@ func NotifyUpdate(ctx context.Context, idle func() bool) {
 					log.Print("selfupdate: a chat is in flight; applying when it ends")
 					continue
 				}
-				ok, rel, err := need(ctx)
+				mu.RLock()
+				n, a := need, apply
+				mu.RUnlock()
+				ok, rel, err := n(ctx)
 				if err != nil {
 					log.Printf("selfupdate: %v", err)
 					continue
@@ -258,7 +263,7 @@ func NotifyUpdate(ctx context.Context, idle func() bool) {
 				log.Printf("selfupdate: installing the build published %s", rel.UpdatedAt)
 				// On success this does not return: the new binary takes over
 				// with this pid, so the session the caller holds survives.
-				if err := apply(ctx, rel, TargetPath()); err != nil {
+				if err := a(ctx, rel, TargetPath()); err != nil {
 					log.Printf("selfupdate: %v", err)
 				}
 			}

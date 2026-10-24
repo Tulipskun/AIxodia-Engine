@@ -458,12 +458,15 @@ func runBash(ctx context.Context, args string) (string, error) {
 	// and the call hanging).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Kill the process group if the context is cancelled (timeout or caller).
-	go func() {
-		<-ctx.Done()
+	// Cancel is wired through the context by CommandContext and runs from the
+	// Wait path once the process has started, so the group kill cannot race
+	// against the write cmd.Process takes inside Start.
+	cmd.Cancel = func() error {
 		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		}
-	}()
+		return nil
+	}
 	out, err := cmd.CombinedOutput()
 	text := string(out)
 	if len(text) > 32*1024 {

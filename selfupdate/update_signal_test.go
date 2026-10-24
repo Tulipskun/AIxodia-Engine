@@ -25,16 +25,24 @@ func waitFor(t *testing.T, cond func() bool, what string) {
 // the process in place. Swapping apply keeps the test from execing itself.
 func TestUpdateSignalAppliesThePublishedBuild(t *testing.T) {
 	savedNeed, savedApply := need, apply
-	defer func() { need, apply = savedNeed, savedApply }()
+	defer func() {
+		mu.Lock()
+		defer mu.Unlock()
+		need, apply = savedNeed, savedApply
+	}()
 
 	rel := Release{URL: "http://example.invalid/engine", UpdatedAt: "2026-10-21T00:00:00Z"}
+	mu.Lock()
 	need = func(context.Context) (bool, Release, error) { return true, rel, nil }
+	mu.Unlock()
 
 	applied := make(chan string, 1)
+	mu.Lock()
 	apply = func(_ context.Context, got Release, target string) error {
 		applied <- got.UpdatedAt
 		return nil
 	}
+	mu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -57,16 +65,24 @@ func TestUpdateSignalAppliesThePublishedBuild(t *testing.T) {
 // left for the next tick, so nothing is installed while the turn runs.
 func TestUpdateSignalWaitsForAnIdleEngine(t *testing.T) {
 	savedNeed, savedApply := need, apply
-	defer func() { need, apply = savedNeed, savedApply }()
+	defer func() {
+		mu.Lock()
+		defer mu.Unlock()
+		need, apply = savedNeed, savedApply
+	}()
 
+	mu.Lock()
 	need = func(context.Context) (bool, Release, error) {
 		return true, Release{UpdatedAt: "2026-10-21T00:00:00Z"}, nil
 	}
+	mu.Unlock()
 	applied := make(chan struct{}, 1)
+	mu.Lock()
 	apply = func(context.Context, Release, string) error {
 		applied <- struct{}{}
 		return nil
 	}
+	mu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -86,14 +102,22 @@ func TestUpdateSignalWaitsForAnIdleEngine(t *testing.T) {
 // Apply, which would swap a binary for the one already running.
 func TestUpdateSignalDoesNothingWhenTheBuildMatches(t *testing.T) {
 	savedNeed, savedApply := need, apply
-	defer func() { need, apply = savedNeed, savedApply }()
+	defer func() {
+		mu.Lock()
+		defer mu.Unlock()
+		need, apply = savedNeed, savedApply
+	}()
 
 	called := false
+	mu.Lock()
 	need = func(context.Context) (bool, Release, error) { return false, Release{}, nil }
+	mu.Unlock()
+	mu.Lock()
 	apply = func(context.Context, Release, string) error {
 		called = true
 		return nil
 	}
+	mu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
