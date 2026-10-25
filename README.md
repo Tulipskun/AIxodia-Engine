@@ -6,7 +6,7 @@ quick tunnel in front of it, and tells the phone the tunnel URL via D1.
 ## Install / update
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Tulipskun/aixodia-engine/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Tulipskun/aixodia-engine/main/install.sh | bash
 ```
 
 Installs to `/usr/local/bin`: `aixodia-engine`, `aixodia`, and `cloudflared` (if it
@@ -50,9 +50,7 @@ and their API keys are in Workers KV.
 
 ## Configuration
 
-Only `CF_TOKEN` is required. Everything else has a working default, and the
-usual engine variables (`AIXODIA_MODEL`, `AIXODIA_DB_PATH`, `AIXODIA_UPLOADS`,
-`AIXODIA_TMUX`) are respected when set.
+Only `CF_TOKEN` is required. No other environment variables are used.
 
 
 Chat history, settings, run logs and the note a session leaves for the one that

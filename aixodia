@@ -13,11 +13,11 @@
 #   aixodia update      # install the published build and restart into it
 set -uo pipefail
 
-AIXODIA_HOME="${AIXODIA_HOME:-$HOME/.aixodia}"
+AIXODIA_HOME="$HOME/.aixodia"
 PID_FILE="$AIXODIA_HOME/aixodia.pid"
 LOG_FILE="$AIXODIA_HOME/aixodia.log"
-ENGINE_BIN="${AIXODIA_ENGINE_BIN:-aixodia-engine}"
-TUNNEL_WAIT="${AIXODIA_TUNNEL_WAIT:-${AIXODIA_RELAY_WAIT:-90}}"
+ENGINE_BIN="aixodia-engine"
+TUNNEL_WAIT="90"
 
 die() { echo "aixodia: $*" >&2; exit 1; }
 
@@ -121,7 +121,7 @@ cmd_status() {
 # address to ask; it defaults to the one the engine serves.
 healthz() {
   command -v curl >/dev/null 2>&1 || return 1
-  curl -fsS --max-time 5 "${AIXODIA_LOCAL_URL:-http://127.0.0.1:8787}/healthz" 2>/dev/null
+  curl -fsS --max-time 5 "http://127.0.0.1:8787/healthz" 2>/dev/null
 }
 
 # update_pid prints the pid of the engine that answers /healthz, but only when
@@ -177,9 +177,9 @@ cmd_update() {
     # itself with "engine started" after taking the pid over.
     local mark waited tail_text
     mark="$(wc -c <"$LOG_FILE" 2>/dev/null || echo 0)"
-    kill -"${AIXODIA_UPDATE_SIGNAL:-USR1}" "$live" 2>/dev/null || die "cannot signal pid $live"
+    kill -USR1 "$live" 2>/dev/null || die "cannot signal pid $live"
     waited=0
-    while [ "$waited" -lt "${AIXODIA_UPDATE_WAIT:-180}" ]; do
+    while [ "$waited" -lt "180" ]; do
       tail_text="$(tail -c +"$((mark + 1))" "$LOG_FILE" 2>/dev/null || true)"
       case "$tail_text" in
         *"already the published build"*)
@@ -197,7 +197,7 @@ $(tail -n 15 "$LOG_FILE")"
       sleep 1
       waited=$((waited + 1))
     done
-    echo "aixodia: no answer from pid $live after ${AIXODIA_UPDATE_WAIT:-180}s — follow it with: aixodia logs" >&2
+    echo "aixodia: no answer from pid $live after 180s — follow it with: aixodia logs" >&2
     return 1
   fi
 

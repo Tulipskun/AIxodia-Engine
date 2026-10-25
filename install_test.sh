@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for install.sh. Run: bash install_test.sh
-# Downloads are served from file:// fixtures, so nothing touches the network
-# and nothing is written outside a temp prefix.
+# Downloads are served by a fake curl, so nothing touches the network and
+# nothing is written outside a temp prefix.
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -9,21 +9,24 @@ fails=0
 pass() { echo "ok   - $1"; }
 fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
 
-srv=$(mktemp -d)
-printf '#!/usr/bin/env bash\necho engine\n' > "$srv/aixodia-engine"
-printf '#!/usr/bin/env bash\necho launcher\n' > "$srv/aixodia"
-printf '#!/usr/bin/env bash\necho cloudflared\n' > "$srv/cloudflared"
-chmod +x "$srv"/*
-missing="file://$srv/does-not-exist"
-
 # --- fresh install drops the binaries and the tunnel helper in the prefix ----
 prefix=$(mktemp -d)
-out=$(PATH=/usr/bin:/bin \
-      AIXODIA_PREFIX="$prefix" AIXODIA_PLATFORM=linux-amd64 \
-      AIXODIA_ENGINE_URL="file://$srv/aixodia-engine" \
-      AIXODIA_CLOUDFLARED_URL="file://$srv/cloudflared" \
-      AIXODIA_RAW_BASE="file://$srv" \
-      bash "$HERE/install.sh" 2>&1); rc=$?
+fakecurl=$(mktemp -d)
+cat > "$fakecurl/curl" <<'FAKE'
+#!/usr/bin/env bash
+# stand-in curl: writes a dummy file and succeeds
+out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -*) shift ;;
+    *) shift ;;
+  esac
+done
+[ -n "$out" ] && printf 'x\n' > "$out"
+FAKE
+chmod +x "$fakecurl/curl"
+out=$(PATH="$fakecurl:/usr/bin:/bin" bash "$HERE/install.sh" "$prefix" 2>&1); rc=$?
 if [ "$rc" -eq 0 ]; then
   pass "install exits 0"
 else
@@ -39,11 +42,15 @@ done
 
 # --- a failed download fails the install ------------------------------------
 prefix=$(mktemp -d)
-out=$(AIXODIA_PREFIX="$prefix" AIXODIA_PLATFORM=linux-amd64 \
-      AIXODIA_ENGINE_URL="$missing" \
-      AIXODIA_CLOUDFLARED_URL="file://$srv/cloudflared" \
-      AIXODIA_RAW_BASE="file://$srv" \
-      bash "$HERE/install.sh" 2>&1); rc=$?
+fakecurl=$(mktemp -d)
+cat > "$fakecurl/curl" <<'FAKE'
+#!/usr/bin/env bash
+# stand-in curl: always fails
+die() { printf 'curl: %s\n' "$*" >&2; exit 1; }
+die "simulated failure"
+FAKE
+chmod +x "$fakecurl/curl"
+out=$(PATH="$fakecurl:/usr/bin:/bin" bash "$HERE/install.sh" "$prefix" 2>&1); rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi "cannot download"; then
   pass "a failed download fails loudly"
 else
@@ -64,15 +71,14 @@ while [ $# -gt 0 ]; do
     *) url="$1"; shift ;;
   esac
 done
-printf '%s\n' "$url" >> "$RECORD"
-printf 'x\n' > "$out"
+printf '%s\n' "$url" >> "${RECORD:?}"
+[ -n "$out" ] && printf 'x\n' > "$out"
 FAKE
 chmod +x "$fakecurl/curl"
 want=amd64
 case "$(uname -m)" in aarch64|arm64) want=arm64 ;; esac
 prefix=$(mktemp -d)
-PATH="$fakecurl:/usr/bin:/bin" RECORD="$record" AIXODIA_PREFIX="$prefix" \
-  bash "$HERE/install.sh" >/dev/null 2>&1
+PATH="$fakecurl:/usr/bin:/bin" RECORD="$record" bash "$HERE/install.sh" "$prefix" >/dev/null 2>&1
 if grep -q "aixodia-engine-linux-$want" "$record"; then
   pass "engine download matches the host arch ($want)"
 else

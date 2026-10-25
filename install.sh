@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # aixodia installer — one line:
 #
-#   curl -fsSL https://raw.githubusercontent.com/Tulipskun/aixodia-engine/main/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/Tulipskun/aixodia-engine/main/install.sh | bash
 #
-# Installs to /usr/local/bin:
+# (run with sudo to install to /usr/local/bin; without sudo it installs to
+#  ~/.local/bin)
+#
+# Installs:
 #   aixodia-engine  the engine binary (it serves 127.0.0.1:8787)
 #   aixodia         the launcher (start / stop / status / logs / update)
 #   cloudflared     the tunnel helper, if it is not already installed
@@ -13,16 +16,18 @@
 # signals it to exec itself (same pid, session intact).
 set -euo pipefail
 
-REPO_SLUG="${AIXODIA_REPO_SLUG:-Tulipskun/aixodia-engine}"
-REF="${AIXODIA_REF:-main}"
-RAW_BASE="${AIXODIA_RAW_BASE:-https://raw.githubusercontent.com/$REPO_SLUG/$REF}"
-PREFIX="${AIXODIA_PREFIX:-}"
-if [ -z "$PREFIX" ]; then
-  if [ "$(id -u)" -eq 0 ]; then
-    PREFIX="/usr/local/bin"
-  else
-    PREFIX="$HOME/.local/bin"
-  fi
+REPO_SLUG="Tulipskun/aixodia-engine"
+REF="main"
+RAW_BASE="https://raw.githubusercontent.com/$REPO_SLUG/$REF"
+
+# An optional first argument overrides the install prefix (used by tests). In
+# normal use the prefix is chosen from the invoking user.
+if [ -n "${1:-}" ]; then
+  PREFIX="$1"
+elif [ "$(id -u)" -eq 0 ]; then
+  PREFIX="/usr/local/bin"
+else
+  PREFIX="$HOME/.local/bin"
 fi
 
 log() { printf '==> %s\n' "$*"; }
@@ -40,17 +45,14 @@ fi
 
 os="$(uname -s)"
 arch="$(uname -m)"
-PLATFORM="${AIXODIA_PLATFORM:-}"
-if [ -z "$PLATFORM" ]; then
-  case "$os/$arch" in
-    Linux/x86_64) PLATFORM=linux-amd64 ;;
-    Linux/aarch64 | Linux/arm64) PLATFORM=linux-arm64 ;;
-    *) die "unsupported platform: $os/$arch (only Linux x86_64 and arm64 builds are published)" ;;
-  esac
-fi
+case "$os/$arch" in
+  Linux/x86_64) PLATFORM=linux-amd64 ;;
+  Linux/aarch64 | Linux/arm64) PLATFORM=linux-arm64 ;;
+  *) die "unsupported platform: $os/$arch (only Linux x86_64 and arm64 builds are published)" ;;
+esac
 
-ENGINE_URL="${AIXODIA_ENGINE_URL:-https://github.com/$REPO_SLUG/releases/download/engine-latest/aixodia-engine-$PLATFORM}"
-CLOUDFLARED_URL="${AIXODIA_CLOUDFLARED_URL:-https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-$PLATFORM}"
+ENGINE_URL="https://github.com/$REPO_SLUG/releases/download/engine-latest/aixodia-engine-$PLATFORM"
+CLOUDFLARED_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-$PLATFORM"
 
 mkdir -p "$PREFIX"
 TMP="$(mktemp -d)"
