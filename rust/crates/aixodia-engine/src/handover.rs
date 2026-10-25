@@ -138,12 +138,32 @@ fn uptime() -> String {
     }
 }
 
+/// The production store: the same D1-backed session store the gateway uses.
+#[async_trait::async_trait]
+impl UnfinishedStore for aixodia_session::D1 {
+    async fn unfinished(&self, limit: i64) -> anyhow::Result<Vec<UnfinishedTurn>> {
+        Ok(aixodia_session::D1::unfinished(self, limit)
+            .await
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?)
+    }
+}
+
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     use aixodia_db::StateStore;
+
+    /// The note's two globals are process-wide, so the tests that replace them
+    /// must not run at the same time and clear each other's store.
+    fn serial() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
 
     /// Answers only the one call the note makes: the questions the previous
     /// session left unanswered.
@@ -194,6 +214,7 @@ mod tests {
     // and it lists the unfinished turns the session store reports.
     #[tokio::test]
     async fn publish_handover_writes_the_note() {
+        let _serial = serial();
         let _restore = Restore {
             started: crate::tunnel::started_at(),
         };
@@ -229,6 +250,7 @@ mod tests {
 
     #[tokio::test]
     async fn publish_handover_survives_an_unopened_store() {
+        let _serial = serial();
         let _restore = Restore {
             started: crate::tunnel::started_at(),
         };

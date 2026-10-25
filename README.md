@@ -85,10 +85,17 @@ the previous app build; this build's chat and terminal no longer use it.
 ## Development
 
 ```bash
-go build ./... && go vet ./... && gofmt -l . && go test ./...
-bash aixodia_test.sh      # launcher
-bash install_test.sh      # installer (offline, file:// fixtures)
+cd rust
+cargo build --workspace
+cargo test --workspace
+cargo fmt --check
+cargo clippy --workspace --all-targets
+bash ../aixodia_test.sh   # launcher
 ```
+
+The engine is Rust (`rust/`). The `aixodia-engine` binary is built by
+`.github/workflows/release.yml` and published to the rolling `engine-latest`
+release, which is what `install.sh` downloads.
 
 ## Terminal transport
 
@@ -96,14 +103,3 @@ There is no P2P/WebRTC/TURN path. The terminal is a normal WebSocket over the
 same Cloudflare quick tunnel as the API, with a short-lived single-use ticket
 instead of putting the long-lived API token in a WebView URL. Shell ownership
 stays in the engine and, with tmux, survives an engine restart.
-
-
-## Rust port (in progress)
-
-`rust/` is a port of the engine to Rust, built beside the Go code so both can be
-compared. It is not deployed and the release workflow still builds the Go binary.
-See `rust/MILESTONES.md` for what is ported and what is next.
-
-```bash
-cd rust && cargo build --workspace && cargo test --workspace
-```

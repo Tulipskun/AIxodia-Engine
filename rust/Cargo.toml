@@ -11,6 +11,8 @@ members = [
     "crates/aixodia-io",
     "crates/aixodia-run",
     "crates/aixodia-wsock",
+    "crates/aixodia-terminal",
+    "crates/aixodia-relay",
     "crates/aixodia-mobile",
     "crates/aixodia-selfupdate",
     "crates/aixodia-engine",

@@ -374,9 +374,21 @@ impl Gateway {
 }
 
 async fn healthz(State(g): State<Arc<Gateway>>) -> Response {
+    // The launcher reads `pid` before signalling and `update` before deciding
+    // that SIGUSR1 is safe: on a build that predates the handshake the signal
+    // would kill the process. `idle` is the same check `/v1/runs` uses to avoid
+    // a swap mid-turn.
+    let idle = g.turns.lock().unwrap_or_else(|e| e.into_inner()).is_empty();
     write_json(
         StatusCode::OK,
-        json!({"ok": true, "version": VERSION, "started": g.started_at()}),
+        json!({
+            "ok": true,
+            "version": VERSION,
+            "started": g.started_at(),
+            "pid": std::process::id(),
+            "update": "signal:USR1",
+            "idle": idle,
+        }),
     )
 }
 
@@ -666,7 +678,10 @@ pub async fn require_token(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    if request.uri().path() == "/healthz" {
+    // The terminal and room sockets authenticate themselves: a terminal may
+    // carry a single-use ticket instead of the long-lived bearer, and the room
+    // checks the same bearer before its upgrade.
+    if matches!(request.uri().path(), "/healthz" | "/terminal" | "/room") {
         return next.run(request).await;
     }
     if !bearer_ok(request.headers(), &token) {

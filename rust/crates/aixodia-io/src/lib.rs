@@ -16,6 +16,7 @@ pub mod gateway;
 pub mod models;
 pub mod remind;
 pub mod restart;
+pub mod session_store;
 pub mod toolimage;
 pub mod upload;
 
@@ -27,7 +28,7 @@ mod gateway_tests;
 
 pub use chat::{ChatRequest, ChatSink, CompletionOptions, NullSink, TrailWriter};
 pub use gateway::{
-    new_completion_id, turn_page, ApprovalGate, Gateway, LogReader, SessionStore, StateStore,
-    SESSION_ID_PATTERN, VERSION,
+    new_completion_id, require_token, turn_page, ApprovalGate, Gateway, LogReader, SessionStore,
+    StateStore, SESSION_ID_PATTERN, VERSION,
 };
 pub use upload::max_upload;

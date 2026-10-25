@@ -11,9 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aixodia_session::{Block, Turn};
-use aixodia_wsock::{
-    Error as WsError, MessageWriter, ServerConn, UpgradedStream, OP_CLOSE, OP_TEXT,
-};
+use aixodia_wsock::{Error as WsError, MessageWriter, ServerConn, OP_CLOSE, OP_TEXT};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
@@ -223,7 +221,10 @@ pub trait FrameWriter: Send + Sync {
 }
 
 #[async_trait::async_trait]
-impl FrameWriter for MessageWriter<WriteHalf<UpgradedStream>> {
+impl<S> FrameWriter for MessageWriter<WriteHalf<S>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     async fn write_frame(&mut self, op: u8, payload: &[u8]) -> Result<(), WsError> {
         self.write_message(op, payload).await
     }
@@ -341,7 +342,10 @@ impl Hub {
 
     /// Serves an already-upgraded connection. The socket policy (bearer,
     /// upgrade) has happened by now and the hub only speaks frames.
-    pub async fn serve(self: Arc<Self>, conn: ServerConn<UpgradedStream>, chat: ChatFunc) {
+    pub async fn serve<S>(self: Arc<Self>, conn: ServerConn<S>, chat: ChatFunc)
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
         let (mut reader, writer) = conn.split();
         let peer = Arc::new(Peer {
             writer: tokio::sync::Mutex::new(Box::new(writer)),

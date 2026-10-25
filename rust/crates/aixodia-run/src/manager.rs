@@ -528,6 +528,24 @@ impl Manager {
         }
     }
 
+    /// The gateway's approval gate: it names a run rather than holding one, so
+    /// the chat route can pause a tool without knowing the manager.
+    pub async fn gate(
+        &self,
+        run_id: &str,
+        call: ToolCall,
+    ) -> std::result::Result<(bool, String), String> {
+        if !self.needs_approval(&call.name).await {
+            return Ok((true, String::new()));
+        }
+        let Some(run) = self.lookup(run_id) else {
+            return Ok((false, "run is not active".to_string()));
+        };
+        let cancel = run.cancel.clone();
+        let (allowed, reason, result) = run.approval_gate(&cancel, call).await;
+        result.map(|_| (allowed, reason))
+    }
+
     /// Answers the pending tool call of a run.
     pub async fn approve(
         &self,

@@ -581,16 +581,28 @@ fn note(last_err: &mut String, err: Option<&Error>) {
 // --- tests ------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use axum::routing::get;
     use axum::Router;
     use std::os::unix::fs::PermissionsExt as _;
 
+    /// The self-update tests share the process-wide HOME and SIGUSR1 handler,
+    /// so they must run one at a time: a guard dropped by one test would leave
+    /// the next test's signal on the default action, which kills the process.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+    }
+
     /// The published bytes land in the target, and the asset's `updated_at` is
     /// what stops the next check from downloading them again.
     #[tokio::test]
     async fn install_writes_the_published_build() {
+        let _serial = serial();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", dir.path());
 
@@ -640,6 +652,7 @@ mod tests {
     /// A download that fails leaves the running binary alone.
     #[tokio::test]
     async fn install_keeps_the_binary_when_the_download_fails() {
+        let _serial = serial();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", dir.path());
 
@@ -678,6 +691,7 @@ mod tests {
     /// it must reach `apply` with the published release.
     #[test]
     fn update_signal_applies_the_published_build() {
+        let _serial = serial();
         let rel = Release {
             url: "http://example.invalid/engine".to_string(),
             updated_at: "2026-10-21T00:00:00Z".to_string(),
@@ -729,6 +743,7 @@ mod tests {
     /// and left for the next tick, so nothing is installed while the turn runs.
     #[test]
     fn update_signal_waits_for_an_idle_engine() {
+        let _serial = serial();
         let applied = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let seen = applied.clone();
 
@@ -771,6 +786,7 @@ mod tests {
     /// to `apply`, which would swap a binary for the one already running.
     #[test]
     fn update_signal_does_nothing_when_the_build_matches() {
+        let _serial = serial();
         let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let seen = called.clone();
 
@@ -807,6 +823,7 @@ mod tests {
     // published build is already running, and never exec.
     #[test]
     fn running_image_is_the_linux_proc_self_exe() {
+        let _serial = serial();
         if !cfg!(target_os = "linux") {
             // The replaced-binary case is Linux-specific (/proc/self/exe).
             return;
