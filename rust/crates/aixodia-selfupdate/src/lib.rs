@@ -351,8 +351,16 @@ pub fn exec_in_place(target: &str) -> Result<()> {
         operation: "exec".to_string(),
         message: e.to_string(),
     })?;
-    let arg_ptrs: Vec<*const libc::c_char> = args.iter().map(|arg| arg.as_ptr()).collect();
-    let env_ptrs: Vec<*const libc::c_char> = env.iter().map(|var| var.as_ptr()).collect();
+    let arg_ptrs: Vec<*const libc::c_char> = args
+        .iter()
+        .map(|arg| arg.as_ptr())
+        .chain(std::iter::once(std::ptr::null()))
+        .collect();
+    let env_ptrs: Vec<*const libc::c_char> = env
+        .iter()
+        .map(|var| var.as_ptr())
+        .chain(std::iter::once(std::ptr::null()))
+        .collect();
     unsafe {
         libc::execve(target.as_ptr(), arg_ptrs.as_ptr(), env_ptrs.as_ptr());
     }
