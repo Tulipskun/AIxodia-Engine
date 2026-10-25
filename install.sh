@@ -16,12 +16,21 @@ set -euo pipefail
 REPO_SLUG="${AIXODIA_REPO_SLUG:-Tulipskun/aixodia-engine}"
 REF="${AIXODIA_REF:-main}"
 RAW_BASE="${AIXODIA_RAW_BASE:-https://raw.githubusercontent.com/$REPO_SLUG/$REF}"
-PREFIX="${AIXODIA_PREFIX:-/usr/local/bin}"
+PREFIX="${AIXODIA_PREFIX:-}"
+if [ -z "$PREFIX" ]; then
+  if [ "$(id -u)" -eq 0 ]; then
+    PREFIX="/usr/local/bin"
+  else
+    PREFIX="$HOME/.local/bin"
+  fi
+fi
 
 log() { printf '==> %s\n' "$*"; }
 die() { printf 'install: %s\n' "$*" >&2; exit 1; }
 
 command -v curl >/dev/null 2>&1 || die "curl is required"
+
+mkdir -p "$(dirname "$PREFIX")" 2>/dev/null || true
 
 # Writing to /usr/local/bin needs root; a writable prefix (tests, custom
 # installs) does not.
