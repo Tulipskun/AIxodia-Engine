@@ -99,3 +99,13 @@ same Cloudflare quick tunnel as the API, with a short-lived single-use ticket
 instead of putting the long-lived API token in a WebView URL. Shell ownership
 stays in the engine and, with tmux, survives an engine restart.
 
+
+## Rust port (in progress)
+
+`rust/` is a port of the engine to Rust, built beside the Go code so both can be
+compared. It is not deployed and the release workflow still builds the Go binary.
+See `rust/MILESTONES.md` for what is ported and what is next.
+
+```bash
+cd rust && cargo build --workspace && cargo test --workspace
+```

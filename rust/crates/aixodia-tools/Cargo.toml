@@ -1,0 +1,12 @@
+[package]
+name = "aixodia-tools"
+description = "Builtin tool declarations (port of tools/tools.go; execution pending)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+aixodia-provider = { path = "../aixodia-provider" }
+serde_json.workspace = true
