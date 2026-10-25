@@ -5,9 +5,13 @@ members = [
     "crates/aixodia-config",
     "crates/aixodia-provider",
     "crates/aixodia-session",
+    "crates/aixodia-imageprep",
+    "crates/aixodia-goals",
     "crates/aixodia-tools",
     "crates/aixodia-io",
     "crates/aixodia-run",
+    "crates/aixodia-wsock",
+    "crates/aixodia-mobile",
     "crates/aixodia-selfupdate",
     "crates/aixodia-engine",
 ]
@@ -39,9 +43,16 @@ bytes = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 axum = { version = "0.7", features = ["ws", "macros"] }
 tokio-tungstenite = "0.24"
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
+libc = "0.2"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif"] }
+chrono = "0.4"
+chrono-tz = "0.10"
+unicode-general-category = "1"
 
 [profile.release]
 opt-level = 3

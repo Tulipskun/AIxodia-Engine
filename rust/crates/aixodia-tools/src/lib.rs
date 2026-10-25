@@ -218,6 +218,12 @@ pub fn builtin_fn() -> aixodia_provider::opencode::BuiltinFn {
     std::sync::Arc::new(builtin)
 }
 
+pub mod run;
+
+pub use aixodia_goals as goals;
+pub use aixodia_goals::{Item as Objective, Kind as ObjectiveKind, Store as ObjectiveStore};
+pub use run::{run_tool, tools_with, with_reason, Tool, ToolContext};
+
 #[cfg(test)]
 mod tests {
     use super::*;

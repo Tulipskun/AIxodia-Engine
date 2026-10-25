@@ -271,9 +271,7 @@ where
     S: Stream<Item = std::result::Result<Bytes, E>>,
     E: std::error::Error + Send + Sync + 'static,
 {
-    let stream = Box::pin(
-        stream.map(|item| item.map_err(|e| std::io::Error::other(e))),
-    );
+    let stream = Box::pin(stream.map(|item| item.map_err(|e| std::io::Error::other(e))));
     let reader = StreamReader::new(stream);
     let mut lines = BufReader::new(reader).lines();
 

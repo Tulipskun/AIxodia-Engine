@@ -445,6 +445,27 @@ enum Sent {
     Buffered { status: u16, raw: Vec<u8> },
 }
 
+#[async_trait::async_trait]
+impl crate::types::Adapter for Adapter {
+    fn name(&self) -> &str {
+        "openai"
+    }
+
+    async fn complete(&self, req: &Request, prov: &Provider, key: &str) -> Result<Response> {
+        self.complete(req, prov, key).await
+    }
+
+    async fn stream(
+        &self,
+        req: &Request,
+        prov: &Provider,
+        key: &str,
+        emit: &mut dyn Emitter,
+    ) -> Result<Response> {
+        self.stream(req, prov, key, emit).await
+    }
+}
+
 async fn read_up_to(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
     let bytes = response.bytes().await?;
     Ok(bytes[..bytes.len().min(limit)].to_vec())
