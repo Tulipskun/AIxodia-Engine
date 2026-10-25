@@ -269,7 +269,12 @@ pub async fn install(release: &Release, target: &str) -> Result<bool> {
 
     let current = current_sha256().unwrap_or_default();
     if !current.is_empty() && got == current {
-        return Ok(false); // same binary, nothing to do
+        // The published build is already running; remember its timestamp so
+        // the next check does not download it again. Without this the engine
+        // re-downloads the whole asset every tick and `aixodia update` waits
+        // for an answer that never comes.
+        write_state(&release.updated_at);
+        return Ok(false);
     }
 
     let tmp = format!("{target}.new");
@@ -409,6 +414,12 @@ where
         let target = target_path();
         if let Err(err) = block_on(apply(release, target)) {
             tracing::warn!(%err, "selfupdate:");
+        } else {
+            // `apply` only returns when the published bytes already match the
+            // running image; a real swap execs and never comes back. Say so,
+            // because the launcher reads this line to end `aixodia update`
+            // without waiting for its timeout.
+            tracing::info!("selfupdate: already the published build");
         }
     });
     UpdateSignalGuard::arm(handler)
