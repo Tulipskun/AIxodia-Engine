@@ -537,7 +537,13 @@ struct WireToolCall {
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct WireFunction {
+    // A streamed tool call names its function once, in the fragment that opens
+    // it; the fragments after that carry arguments alone. Requiring the name here
+    // made every continuation chunk fail to decode, and the whole call arrived
+    // with empty arguments — a tool the provider had clearly named and filled.
+    #[serde(default)]
     name: String,
+    #[serde(default)]
     arguments: String,
 }
 
