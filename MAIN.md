@@ -3,7 +3,7 @@ GOAL:
 [COMPLETED] Read AGENTS.md and follow its state-tracking protocol
 [COMPLETED] Ship the docs: commit MAIN.md, push, verify the rolling release
 [COMPLETED] Complete the open AIxodia goal: write /root/.exit, mark g-65c910b3739d done
-[IN_PROCESS] Fix the bug: the app shows no data loaded from D1
+[COMPLETED] Fix the bug: the app shows no data loaded from D1
 
 PLAN:
 [COMPLETED] gh auth login --with-token; verify account Tulipskun and scopes
@@ -13,15 +13,16 @@ PLAN:
 [COMPLETED] Set repo-local git identity, commit MAIN.md to main
 [COMPLETED] Push all docs commits; CI + Release engine green
 [COMPLETED] Create /root/.exit and complete goal g-65c910b3739d in D1
-[IN_PROCESS] Reproduce: engine up? D1 reachable? /v1/sessions + turns return rows?
+[COMPLETED] Reproduce: engine /v1/sessions returned [] while D1 held 18 sessions
 [COMPLETED] Diagnose: aixodia-db parsed D1's `results` key as `rows` — every
 SELECT silently decoded to an empty Vec while writes kept succeeding
-[IN_PROCESS] Fix aixodia-db QueryResult (rename to `results`), add parse test
-[IN_PROCESS] Verify, commit, push, release, confirm the engine re-lists D1 data
+[COMPLETED] Fix aixodia-db QueryResult (rename to `results`), add parse test
+[COMPLETED] Release 8e57e78, `aixodia update` swapped it in place, engine now
+lists all D1 sessions; probe session deleted, 18 remain
 
 NOTE:
 - AGENTS.md rule: every non-reading tool call must be accompanied by a MAIN.md update.
 - Reading rules: explore with find; read files in full; narrow searches by exact name.
 - Token hygiene: the PAT lives only in the gh keyring; never commit or echo it.
 - Release is rolling: push to main rebuilds linux amd64/arm64 and clobbers engine-latest.
-- Engine self-updated to v1.153 (our 08:27 build) at 08:27:40; still pid 2987, health OK.
+- Selfupdate exec-swaps the binary in place (/usr/local/bin), keeping pid.
