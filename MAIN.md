@@ -1,8 +1,11 @@
 GOAL:
 [COMPLETED] Authenticate the GitHub CLI and clone Tulipskun/aixodia-engine
 [COMPLETED] Read AGENTS.md and follow its state-tracking protocol
-[IN_PROCESS] Ship the docs: commit MAIN.md, push, verify the rolling release
-[IN_PROCESS] Complete the newest open AIxodia goal: write /root/.exit (restart
+GOAL:
+[COMPLETED] Authenticate the GitHub CLI and clone Tulipskun/aixodia-engine
+[COMPLETED] Read AGENTS.md and follow its state-tracking protocol
+[COMPLETED] Ship the docs: commit MAIN.md, push, verify the rolling release
+[COMPLETED] Complete the newest open AIxodia goal: write /root/.exit (restart
 handshake) and mark g-65c910b3739d done in the D1 objectives store
 
 PLAN:
@@ -11,8 +14,8 @@ PLAN:
 [COMPLETED] Read AGENTS.md (skills/main1: MAIN.md triggers, reading rules)
 [COMPLETED] Write this MAIN.md following the mandated structure
 [COMPLETED] Set repo-local git identity, commit MAIN.md to main
-[IN_PROCESS] git push main; confirm release.yml rebuilds engine-latest green
-[IN_PROCESS] Create /root/.exit and complete goal g-65c910b3739d in D1
+[COMPLETED] Push fb5ba75; CI green + Release engine green, engine-latest rebuilt
+[COMPLETED] Create /root/.exit and complete goal g-65c910b3739d in D1
 
 NOTE:
 - AGENTS.md rule: every non-reading tool call must be accompanied by a MAIN.md update.
