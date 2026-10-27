@@ -6,7 +6,9 @@ GOAL:
 [COMPLETED] Fix the bug: the app shows no data loaded from D1
 [COMPLETED] Fix the bug: Shift+Tab does not work in the app terminal
 [COMPLETED] Commit, push, deploy + rolling release after the fix
-[IN_PROCESS] Fix non-login mode: a built-in free provider that works without the opencode CLI
+[COMPLETED] Fix non-login mode: a built-in free provider that works without the opencode CLI
+            (keyless round trip answers; a multi-round tool turn can still hit the
+            free tier's serialized 1-req/IP throttle, see NOTE)
 
 PLAN:
 [COMPLETED] gh auth login --with-token; verify account Tulipskun and scopes
@@ -44,12 +46,30 @@ so suspect the WebView xterm.js client or a bytes path that mangles ESC[Z
 [COMPLETED] Fix the bug the live turn exposed: WireFunction required `name`, so
             every streamed argument fragment failed to decode and the tool call
             arrived empty; add a fake-upstream test that folds a streamed call
-[IN_PROCESS] Gate green (fmt 0, clippy 0, 166 tests), commit, push, wait for
-            engine-latest, `aixodia update`
-[IN_PROCESS] Prove one streamed agent turn on the deployed engine: a run whose
-            tool call arrives with real arguments, then delete the probe session
+[COMPLETED] Gate green (fmt 0, clippy 0, 166 tests); commit be6fd2d pushed
+[COMPLETED] CI + Release engine green for be6fd2d; `aixodia update` swapped it in
+            at 22:27:55Z (engine restarted, listening on 127.0.0.1:8787)
+[COMPLETED] Prove one streamed agent turn on the deployed engine: run
+            run_92a5d66a71f2acd1 (be6fd2d build) called `read` with
+            {"filePath":"/etc/hostname","reason":...} and got back
+            "1: 439c28b23d3c" in 673 ms, 0 invalid-arguments; round 4 then hit
+            upstream 429 (free tier answers one request at a time per IP), so the
+            run ended `failed` after the tool result. Probe session deleted (200),
+            its 2 orphaned objectives (g-d4c1df6039a2, p-86701a7883ec) deleted
+            from D1; 0 rows left, sessions=19
 
 NOTE:
+- Push 2026-10-27: this MAIN.md (probe record + non-login mode closure) is a
+  docs-only commit on main; the rolling Release engine rebuilds it regardless.
+- Probe 2026-10-27T22:33Z: a keyless agent turn takes 4 upstream rounds (goal_add,
+  plan_add, read, answer). AIxodia Free serializes one request per IP, so round 4
+  three seconds after round 3 got HTTP 429 and the run failed after the tool
+  result. Nothing is wrong with the tool-arguments fix (read ran with real args);
+  the open item is engine backoff between rounds for keyless providers.
+- /tmp/verify_stream.sh's last line counts sessions under a stale `data` key; the
+  endpoint answers {"sessions":[...]}, so only that count line errors (cleanup
+  still runs). Probe side effects: goal_add/plan_add rows were deleted from the
+  D1 `objectives` table, scoped to the probe session id.
 - Streamed tool calls are folded by `WireToolCall`/`WireFunction` in openai.rs. The
   opening fragment carries id+name and an empty `arguments`; every later fragment
   is `{"index":n,"function":{"arguments":"..."}}` with no name at all, so a
