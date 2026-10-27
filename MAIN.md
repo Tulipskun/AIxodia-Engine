@@ -4,6 +4,8 @@ GOAL:
 [COMPLETED] Ship the docs: commit MAIN.md, push, verify the rolling release
 [COMPLETED] Complete the open AIxodia goal: write /root/.exit, mark g-65c910b3739d done
 [COMPLETED] Fix the bug: the app shows no data loaded from D1
+[COMPLETED] Fix the bug: Shift+Tab does not work in the app terminal
+[COMPLETED] Commit, push, deploy + rolling release after the fix
 
 PLAN:
 [COMPLETED] gh auth login --with-token; verify account Tulipskun and scopes
@@ -19,6 +21,9 @@ SELECT silently decoded to an empty Vec while writes kept succeeding
 [COMPLETED] Fix aixodia-db QueryResult (rename to `results`), add parse test
 [COMPLETED] Release 8e57e78, `aixodia update` swapped it in place, engine now
 lists all D1 sessions; probe session deleted, 18 remain
+[COMPLETED] Locate where keystrokes reach the pty: server is a pass-through,
+so suspect the WebView xterm.js client or a bytes path that mangles ESC[Z
+[COMPLETED] Fix Shift+Tab (ESC [ Z), build + test, commit and push
 
 NOTE:
 - AGENTS.md rule: every non-reading tool call must be accompanied by a MAIN.md update.
@@ -26,3 +31,8 @@ NOTE:
 - Token hygiene: the PAT lives only in the gh keyring; never commit or echo it.
 - Release is rolling: push to main rebuilds linux amd64/arm64 and clobbers engine-latest.
 - Selfupdate exec-swaps the binary in place (/usr/local/bin), keeping pid.
+- The app is Tulipskun/AIxodia (Android Kotlin native TerminalView, no xterm.js):
+  fix = Shift latch chip + Tab chip sends ESC[Z; app commits cdddcbf/40f7879,
+  app release `latest` re-cut 2026-10-27 (versionName 1.0.202610272010).
+  The terminal server here is a byte-for-byte pty pass-through, so engine code
+  is unchanged — nothing to release in this repo.
