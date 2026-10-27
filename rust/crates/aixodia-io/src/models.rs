@@ -115,10 +115,9 @@ impl Gateway {
 }
 
 pub async fn fetch_models(cfg: &ConfigProvider) -> anyhow::Result<Vec<String>> {
-    // Non-login mode: opencode free tier needs no key. Other providers still do.
-    if cfg.keys.is_empty() && cfg.adapter != "opencode" {
-        anyhow::bail!("provider has no API keys");
-    }
+    // Non-login mode: a provider with no keys is asked unauthenticated, which is
+    // how a keyless free tier or a local server is reached. A provider that does
+    // need a key answers 401 and that is reported as its own error.
     let endpoint = aixodia_provider::endpoint(&cfg.api_url, "/v1/models", "/models")?;
 
     let mut request = http_client()

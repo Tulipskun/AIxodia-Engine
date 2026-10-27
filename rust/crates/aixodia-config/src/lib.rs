@@ -40,16 +40,29 @@ pub struct Provider {
 }
 
 /// The providers the engine carries itself, so the phone has something to talk
-/// to before — or without — any provider being added. The opencode free tier
-/// needs no API key, which is what makes it safe to ship turned on and why it is
-/// not stored in KV.
+/// to before — or without — any provider being added. Neither of them needs an
+/// API key, which is what makes them safe to ship turned on and why they are not
+/// stored in KV. They come first, so a fresh install answers on the keyless one.
 fn builtin_providers() -> Vec<Provider> {
-    vec![Provider {
-        name: "Opencode".to_string(),
-        api_url: "https://opencode.ai/inference/v1".to_string(),
-        adapter: "opencode".to_string(),
-        ..Provider::default()
-    }]
+    vec![
+        // Non-login mode proper: a public endpoint that answers an unauthenticated
+        // request. Its anonymous tier is throttled per IP, which the app reports
+        // rather than hides.
+        Provider {
+            name: "AIxodia Free".to_string(),
+            api_url: "https://text.pollinations.ai/openai".to_string(),
+            adapter: "openai".to_string(),
+            ..Provider::default()
+        },
+        // The OpenCode Zen tier, which answers a key the user adds here; its free
+        // models are served only to the OpenCode client itself.
+        Provider {
+            name: "Opencode".to_string(),
+            api_url: "https://opencode.ai/inference/v1".to_string(),
+            adapter: "opencode".to_string(),
+            ..Provider::default()
+        },
+    ]
 }
 
 /// The providers currently served, KV entries first then the built-ins.
@@ -516,8 +529,8 @@ mod tests {
         });
     }
 
-    // The engine carries the opencode free tier itself, so a phone with no KV
-    // providers still has something to talk to — and it is read-only.
+    // The engine carries its own providers, so a phone with no KV providers
+    // still has something to talk to — and they are read-only.
     #[test]
     fn load_config_always_adds_the_builtin() {
         run_test(|| {
@@ -539,9 +552,11 @@ mod tests {
                     .unwrap();
                 load_config().await.unwrap();
                 let got = get_providers();
-                assert_eq!(got.len(), 2);
+                assert_eq!(got.len(), 3);
                 assert_eq!(got[0].name, "Alpha");
-                assert_eq!(got[1].name, "Opencode");
+                assert_eq!(got[1].name, "AIxodia Free");
+                assert_eq!(got[1].keys.len(), 0);
+                assert_eq!(got[2].name, "Opencode");
                 assert!(get_provider_by_name("Opencode").is_some());
             });
         });
@@ -558,6 +573,8 @@ mod tests {
                 test_store();
                 assert!(is_builtin("Opencode"));
                 assert!(is_builtin("opencode"));
+                assert!(is_builtin("AIxodia Free"));
+                assert!(is_builtin("aixodia free"));
                 assert!(add_provider(
                     "Opencode",
                     "https://elsewhere.test",
@@ -567,6 +584,7 @@ mod tests {
                 .await
                 .is_err());
                 assert!(remove_provider("Opencode").await.is_err());
+                assert!(remove_provider("AIxodia Free").await.is_err());
                 assert!(set_provider_keys("Opencode", vec!["k".into()])
                     .await
                     .is_err());
@@ -598,8 +616,8 @@ mod tests {
         });
     }
 
-    // A boot that cannot reach KV still has the free provider: it is carried by
-    // the engine, not by the store.
+    // A boot that cannot reach KV still has the keyless providers: they are
+    // carried by the engine, not by the store.
     #[test]
     fn load_config_keeps_the_builtin_when_kv_fails() {
         run_test(|| {
@@ -612,8 +630,8 @@ mod tests {
                 fake.fail_with("db: KV read failed: HTTP 502");
                 assert!(load_config().await.is_err());
                 let got = get_providers();
-                assert_eq!(got.len(), 1);
-                assert_eq!(got[0].name, "Opencode");
+                assert_eq!(got.len(), 2);
+                assert_eq!(got[0].name, "AIxodia Free");
             });
         });
     }

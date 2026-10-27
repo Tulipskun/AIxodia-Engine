@@ -510,7 +510,11 @@ struct StreamOptions {
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct WireMessage {
+    #[serde(default)]
     role: String,
+    // A turn that only calls a tool carries no content at all, so both fields
+    // have to survive being absent rather than being named in the payload.
+    #[serde(default)]
     content: Value,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     tool_calls: Vec<WireToolCall>,

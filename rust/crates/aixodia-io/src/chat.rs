@@ -1107,9 +1107,6 @@ impl Gateway {
         emitted: &Arc<AtomicUsize>,
         can_retry: &(dyn Fn() -> bool + Send + Sync),
     ) -> anyhow::Result<Response> {
-        if target.prov.keys.is_empty() && target.prov.adapter != "opencode" {
-            anyhow::bail!("provider {} has no API keys", target.prov.name);
-        }
         let now = Instant::now();
         if self.circuit_open(&target.prov.name, now) {
             return Err(aixodia_provider::APIError::new(
@@ -1141,8 +1138,8 @@ impl Gateway {
     ) -> anyhow::Result<Response> {
         let deadline = tokio::time::Instant::now() + UPSTREAM_WAIT;
 
-        // Non-login mode: an opencode provider may carry no keys (free tier).
-        // Treat it as a single empty key so the rotation math still works.
+        // Non-login mode: a keyless provider is sent one empty key, so the
+        // rotation math below still describes what is being tried.
         let keys: Vec<String> = if target.prov.keys.is_empty() {
             vec![String::new()]
         } else {
