@@ -122,7 +122,10 @@ struct QueryResult {
     success: bool,
     #[serde(default)]
     errors: Vec<ApiError>,
-    #[serde(default)]
+    /// D1 calls the row list `results`; an older field name `rows` silently
+    /// decoded to an empty list and every SELECT looked like the database was
+    /// empty, so this must keep the API's spelling.
+    #[serde(default, rename = "results")]
     rows: Vec<Row>,
 }
 
@@ -726,5 +729,25 @@ impl KeyValue for MemoryKv {
     async fn delete(&self, key: &str) -> Result<()> {
         self.inner.write().unwrap().remove(key);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: D1 names the row list `results`. Reading a `rows` key that
+    /// the API never sends decoded every SELECT into an empty list while
+    /// writes kept landing, which made the whole database look empty.
+    #[test]
+    fn the_d1_query_rows_come_from_results() {
+        let envelope: ApiResponse = serde_json::from_str(
+            r#"{"success":true,"errors":[],
+                "result":[{"success":true,"results":[{"id":"a"},{"id":"b"}]}]}"#,
+        )
+        .expect("envelope");
+        let results: Vec<QueryResult> =
+            serde_json::from_value(envelope.result).expect("query results");
+        assert_eq!(results.first().expect("statement").rows.len(), 2);
     }
 }
