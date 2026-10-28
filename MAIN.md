@@ -396,3 +396,60 @@ NOTE:
 - Gate 2026-10-28T02:04Z: fmt clean after reformat; clippy exit 0; full
   workspace tests exit 0; install_rejects_a_stale_payload_size passes.
   Committing and pushing v1.155.
+- Ship 2026-10-28T02:06Z: pushed 607930d (size guard + test, v1.155). Watching
+  the new CI and Release runs; deploy will fetch the asset through the GitHub
+  API endpoint again because the browser URL may still cache ddb8730. After the
+  manual swap and start, run_loop will retry the browser URL every tick until
+  the CDN is fresh, and with the guard it can no longer mark a stale payload as
+  applied.
+- Note 2026-10-28T02:07Z: runs 40617213709 (CI) and 40617213664 (Release) are
+  in progress for 607930d; watching both to completion in the background.
+- Note 2026-10-28T02:09Z: the first watcher exited before the runs finished
+  (subshell was reaped); runs still in progress, asset metadata still ddb8730.
+  Relaunching the watch as a single tracked background command.
+- Verify 2026-10-28T02:10Z: while the v1.155 runs build, checking the phone's
+  path — the new quick-tunnel URL answering /healthz with the token proves the
+  restarted daemon is reachable from outside, not just on loopback.
+- Correction 2026-10-28T01:49Z (real clock; earlier notes after 01:44Z were
+  labeled ahead of the wall clock by ~15 minutes): the restarted daemon came up
+  at 01:42:18Z, tunnel https://robust-asian-buyer-cents.trycloudflare.com was
+  published ("daemon url saved" 01:42:34Z), and the live route-less turn ran at
+  ~01:43Z. Handover also reported a second unanswered question in
+  smvk2sbvc5d9eeddf ("hi", seq 3), which was not in the earlier route list —
+  checking it and repointing if it is Opencode-pinned.
+- Verify 2026-10-28T01:50Z: all three sessions with unanswered turns
+  (smvk2sbvc5d9eeddf, smvrewph1b82d606f, smvr9cxmt46a31c68) now report
+  {"provider":"AIxodia Free","model":"openai-fast","pinned":true}. Waiting on
+  Release 40617213664 for 607930d.
+- Verify 2026-10-28T01:51Z: the phone does not call /v1/chat/completions; it
+  POSTs /v1/runs and follows SSE. Exercising that path on the probe session with
+  openai-fast to confirm the operator's exact flow answers and persists.
+- Note 2026-10-28T01:52Z: POST /v1/runs answered a run record
+  (run_11ffcfddcb39bff8, status running, last_seq 2); the SSE is a separate
+  subscription. Reading the run routes to follow the phone's event stream.
+- Note 2026-10-28T01:53Z: run events are GET /v1/runs/{id}/events (SSE) in
+  aixodia-run/src/api.rs. Reading run_11ffcfddcb39bff8's status first; if it has
+  already answered, the persistence check is the session turns instead.
+- Note 2026-10-28T01:54Z: run last_seq advanced to 9 but status still running;
+  reading the SSE events and the final status to see whether the turn closed
+  with a done frame.
+- Verify 2026-10-28T01:55Z: the phone's exact path works end to end: run
+  run_11ffcfddcb39bff8 streamed user → status → turn → assistant "RUN OK" →
+  usage → final → status done, and stored assistant turn id 1395 (seq 4,
+  duration 6.2s) on session probe1793151622. Remaining: Release 607930d, swap,
+  and a final v1.155 live check.
+- Note 2026-10-28T01:56Z: CI 40617213709 and Release 40617213664 (607930d) are
+  still building; the background watcher b4q9onliu will report. No further work
+  until the asset lands.
+- Ship 2026-10-28T01:57Z: CI 40617213709 and Release 40617213664 (607930d)
+  succeeded; new asset id 683502169, updated 01:55:07Z, size 17,715,200 — note
+  the same size as ddb8730, so a length check alone cannot tell them apart.
+  Checking whether GitHub publishes an asset digest for a definitive check.
+- Fix 2026-10-28T01:58Z: v1.155's asset and ddb8730's share the same byte
+  length, so the size check alone would miss a same-length stale payload. The
+  release publishes a sha256 digest, so Release now carries it, install()
+  verifies digest (when present) before the size fallback, and a new test
+  install_rejects_a_stale_payload_with_the_published_size covers equal-size
+  stale bytes. VERSION v1.156. Re-running the gate.
+- Gate 2026-10-28T02:00Z: v1.156 fmt/clippy/tests green (workspace exit 0, 32
+  suites ok, both stale-payload tests pass). Committing and pushing.

@@ -78,6 +78,8 @@ pub struct Release {
     pub url: String,
     pub updated_at: String,
     pub size: i64,
+    /// GitHub's `sha256:…` for the asset, empty when the release predates it.
+    pub digest: String,
 }
 
 impl fmt::Display for Release {
@@ -96,6 +98,8 @@ struct GhAsset {
     updated_at: String,
     #[serde(default)]
     size: i64,
+    #[serde(default)]
+    digest: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,6 +142,7 @@ pub async fn latest() -> Result<Release> {
             url: asset.url,
             updated_at: asset.updated_at,
             size: asset.size,
+            digest: asset.digest,
         })
         .ok_or_else(|| Error::AssetNotFound(name))
 }
@@ -249,19 +254,29 @@ fn with_halves<R>(f: impl FnOnce(&mut Option<NeedFn>, &mut Option<ApplyFn>) -> R
     f(&mut need, &mut apply)
 }
 
-/// The published size is part of the asset metadata, and the download URL is
-/// served through a CDN that can still hand back the previous build after a
-/// clobber. A payload of the wrong length is stale, not a build to run:
-/// swapping it in would install old code and record the new release as applied,
-/// so nothing would ever retry it.
-fn verify_payload_size(release: &Release, got: usize) -> Result<()> {
-    if release.size <= 0 || got as i64 == release.size {
-        return Ok(());
+/// The published size and digest are part of the asset metadata, and the
+/// download URL is served through a CDN that can still hand back the previous
+/// build after a clobber. A payload that does not match them is stale, not a
+/// build to run: swapping it in would install old code and record the new
+/// release as applied, so nothing would ever retry it.
+fn verify_payload(release: &Release, payload: &[u8]) -> Result<()> {
+    if release.size > 0 && payload.len() as i64 != release.size {
+        return Err(Error::DownloadStatus(format!(
+            "asset is {} bytes but the release lists {} — the download served a stale build",
+            payload.len(),
+            release.size
+        )));
     }
-    Err(Error::DownloadStatus(format!(
-        "asset is {got} bytes but the release lists {} — the download served a stale build",
-        release.size
-    )))
+    let Some(expected) = release.digest.strip_prefix("sha256:") else {
+        return Ok(());
+    };
+    let got = hex::encode(Sha256::digest(payload));
+    if !expected.eq_ignore_ascii_case(&got) {
+        return Err(Error::DownloadStatus(format!(
+            "asset hashes to {got} but the release lists {expected} — the download served a stale build"
+        )));
+    }
+    Ok(())
 }
 
 /// Downloads `release` into `target` and swaps it into place, unless the
@@ -280,7 +295,7 @@ pub async fn install(release: &Release, target: &str) -> Result<bool> {
     }
 
     let payload = response.bytes().await?.to_vec();
-    verify_payload_size(release, payload.len())?;
+    verify_payload(release, &payload)?;
     let got = hex::encode(Sha256::digest(&payload));
 
     let current = current_sha256().unwrap_or_default();
@@ -670,6 +685,7 @@ mod tests {
             url: format!("http://{addr}/engine"),
             updated_at: "2026-10-21T00:00:00Z".to_string(),
             size: 0,
+            digest: String::new(),
         };
         let changed = install(&rel, target.to_str().unwrap())
             .await
@@ -717,6 +733,50 @@ mod tests {
             url: format!("http://{addr}/engine"),
             updated_at: "2026-10-21T00:00:00Z".to_string(),
             size: payload.len() as i64 + 12_288,
+            digest: String::new(),
+        };
+        let result = install(&rel, target.to_str().unwrap()).await;
+
+        assert!(result.is_err(), "a stale build must not install");
+        assert_eq!(fs::read(&target).unwrap(), old, "the binary was replaced");
+        assert!(
+            read_state().is_empty(),
+            "a stale download must not be recorded as applied"
+        );
+    }
+
+    /// Consecutive builds can pad to the same length, so the size check alone
+    /// cannot tell them apart; the published digest is what pins the bytes.
+    #[tokio::test]
+    async fn install_rejects_a_stale_payload_with_the_published_size() {
+        let _serial = serial();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", dir.path());
+
+        let payload = b"#!/bin/sh\necho new\n".to_vec();
+        let served = payload.clone();
+        let app = Router::new().route(
+            "/engine",
+            get(move || {
+                let served = served.clone();
+                async move { served }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let target = dir.path().join("aixodia-engine");
+        let old = b"#!/bin/sh\necho old\n";
+        fs::write(&target, old).unwrap();
+
+        let rel = Release {
+            url: format!("http://{addr}/engine"),
+            updated_at: "2026-10-21T00:00:00Z".to_string(),
+            size: payload.len() as i64,
+            digest: format!("sha256:{}", "0".repeat(64)),
         };
         let result = install(&rel, target.to_str().unwrap()).await;
 
@@ -775,6 +835,7 @@ mod tests {
             url: "http://example.invalid/engine".to_string(),
             updated_at: "2026-10-21T00:00:00Z".to_string(),
             size: 0,
+            digest: String::new(),
         };
         let applied = Arc::new(Mutex::new(None::<String>));
         let seen = applied.clone();
