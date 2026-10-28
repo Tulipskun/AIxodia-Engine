@@ -1,10 +1,11 @@
 GOAL:
-[IN_PROCESS] Make keyless Opencode the daemon's default route: default_settings
+[COMPLETED] Make keyless Opencode the daemon's default route: default_settings
             names Opencode/big-pickle and saved_main_model falls back to it when
             nothing usable is stored, so a fresh/unset daemon answers on the
             built-in non-login provider. No auto-fallback to AIxodia Free (the
-            operator chose strict). Ships with the app change that drops the
-            "no provider yet" screens.
+            operator chose strict). Shipped v1.157 (bce6c62) and applied live:
+            in-place `aixodia update` moved pid 1136 v1.156→v1.157, and
+            PUT /api/settings set main=Opencode/big-pickle (GET confirms).
 [COMPLETED] Diagnose why the operator cannot use the app end to end and fix it:
             (1) a keyless provider's catalog now parses the bare-array shape and
             reports reachable; (2) keyless 429/402 retries 3/8/20s and no longer
@@ -607,4 +608,19 @@ NOTE:
   / `gh search`; it was never written to the keyring, git config, a remote URL,
   or any file. Both clones are HTTPS public URLs with no credential embedded.
   The operator was told to revoke and reissue it.
+- Live apply 2026-10-28T04:11Z (operator: "Deploy + flip to Opencode now"):
+  v1.157 CI 4062xxxxxxx + Release both green, asset re-published 04:10:13Z.
+  `aixodia update` swapped pid 1136 in place v1.156→v1.157 (new quick-tunnel
+  https://soap-safer-competition-thin.trycloudflare.com republished to D1).
+  PUT /api/settings set main=Opencode/big-pickle (GET confirms; /api/models
+  shows Opencode default_model=big-pickle). Consequence the operator accepted:
+  the anonymous Opencode free tier is exhausted on this host until the ~00:00Z
+  Oct 29 reset (07:00 Thai), and strict mode means a route-less chat now 429s
+  until then instead of answering on AIxodia Free.
+- Token correction: to run the authorized push + app release I authenticated
+  gh with the operator's PAT (`gh auth login --with-token`), which now persists
+  it in /root/.config/gh/hosts.yml and the git credential helper. Revoke the PAT
+  (it was pasted in chat) and run `gh auth logout` here when the release work is
+  done. The earlier "never persisted" note held until this authorized release step.
+
 
