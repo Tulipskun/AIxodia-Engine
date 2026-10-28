@@ -7,6 +7,9 @@ GOAL:
 [COMPLETED] Fix the catalog regression the endpoint move exposed: Zen answers
             404 at …/openai/v1/models while chat lives there, so the provider
             now carries a models_url (…/inference/v1) for the probe
+[COMPLETED] Ship it: 941000a, CI + Release green, in-place update kept pid,
+            refresh now reports 84 models (big-pickle first), and a smoke turn
+            answered "DEPLOY OK" on the new build
 [COMPLETED] Capture the CLI's real ClientHello (JA3) and the engine's current
             rustls ClientHello, and diff them
 [COMPLETED] Implement the matching TLS stack in aixodia-provider
@@ -230,3 +233,10 @@ NOTE:
   curl), but the captured CLI contract posts to …/openai/v1, so chat stays
   there and only the catalog is overridden. models_url is a general base
   override, not an adapter special case.
+- Catalog fix live 2026-10-28T01:02Z: the in-place handshake worked this time
+  (SIGUSR1 was unmasked after the 00:39 restart): exec kept pid 136612, the
+  listener was dark ~11s while the new image re-verified D1 and re-registered the
+  tunnel (new quick-tunnel URL), daemon url saved, public /healthz 200.
+  /api/providers/Opencode/refresh: reachable=true model_count=84
+  working_model=big-pickle; /api/models lists all 84 with default big-pickle;
+  a keyless turn on the new image answered "DEPLOY OK" (finish stop).
