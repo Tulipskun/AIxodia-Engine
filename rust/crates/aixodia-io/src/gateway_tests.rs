@@ -2389,3 +2389,59 @@ async fn a_daemon_with_no_stored_settings_defaults_to_the_keyless_opencode() {
         "a fresh daemon must answer on the keyless built-in"
     );
 }
+
+#[tokio::test]
+async fn the_objectives_endpoint_splits_goals_from_plans() {
+    // The app's goals card reads this one route, so the split by kind and the
+    // status of each item are the contract: a plan must never arrive among the
+    // goals, and a completed goal must not read as still open.
+    use aixodia_goals::{Kind, MemoryStore, Store};
+    let store = Arc::new(MemoryStore::default());
+    let goal = store
+        .add("s1", Kind::Goal, "ship the card")
+        .await
+        .expect("add");
+    store.add("s1", Kind::Plan, "render it").await.expect("add");
+    store
+        .complete("s1", Kind::Goal, &goal)
+        .await
+        .expect("complete");
+
+    let gateway = Arc::new(Gateway::new(
+        Arc::new(MemStore::default()),
+        Arc::new(aixodia_provider::Registry::new()),
+        tools_with(None),
+    ));
+    gateway.set_objective_store(store);
+
+    let (status, body) = get_json(&gateway.router(), "/v1/sessions/s1/objectives").await;
+    assert_eq!(status, StatusCode::OK, "body = {body}");
+    let v: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v["goals"].as_array().expect("goals").len(),
+        1,
+        "body = {body}"
+    );
+    assert_eq!(v["goals"][0]["status"], "done", "body = {body}");
+    assert_eq!(
+        v["plans"].as_array().expect("plans").len(),
+        1,
+        "body = {body}"
+    );
+    assert_eq!(v["plans"][0]["content"], "render it", "body = {body}");
+
+    // A chat nothing was ever recorded for answers with empty lists, and a
+    // daemon with no store at all answers the same way — never an error the
+    // app would have to tell apart from "no goals yet".
+    let (status, body) = get_json(&gateway.router(), "/v1/sessions/other/objectives").await;
+    assert_eq!(status, StatusCode::OK, "body = {body}");
+    let v: Value = serde_json::from_str(&body).expect("json");
+    assert!(
+        v["goals"].as_array().expect("goals").is_empty(),
+        "body = {body}"
+    );
+    assert!(
+        v["plans"].as_array().expect("plans").is_empty(),
+        "body = {body}"
+    );
+}
