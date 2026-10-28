@@ -118,7 +118,7 @@ pub async fn fetch_models(cfg: &ConfigProvider) -> anyhow::Result<Vec<String>> {
     // Non-login mode: a provider with no keys is asked unauthenticated, which is
     // how a keyless free tier or a local server is reached. A provider that does
     // need a key answers 401 and that is reported as its own error.
-    let endpoint = aixodia_provider::endpoint(&cfg.api_url, "/v1/models", "/models")?;
+    let endpoint = models_endpoint(cfg)?;
 
     let mut request = http_client()
         .get(&endpoint)
@@ -159,4 +159,47 @@ pub async fn fetch_models(cfg: &ConfigProvider) -> anyhow::Result<Vec<String>> {
         .map(|item| item.id)
         .filter(|id| !id.is_empty())
         .collect())
+}
+
+/// The catalog URL for a provider: `models_url` when it says the catalog is
+/// somewhere other than the chat base.
+fn models_endpoint(cfg: &ConfigProvider) -> anyhow::Result<String> {
+    let base = if cfg.models_url.trim().is_empty() {
+        &cfg.api_url
+    } else {
+        &cfg.models_url
+    };
+    aixodia_provider::endpoint(base, "/v1/models", "/models")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::models_endpoint;
+    use aixodia_config::Provider as ConfigProvider;
+
+    #[test]
+    fn catalog_falls_back_to_the_chat_base() {
+        let cfg = ConfigProvider {
+            api_url: "https://alpha.test/v1".to_string(),
+            ..ConfigProvider::default()
+        };
+        assert_eq!(
+            models_endpoint(&cfg).unwrap(),
+            "https://alpha.test/v1/models"
+        );
+    }
+
+    #[test]
+    fn catalog_uses_models_url_when_given() {
+        // Zen's shape: chat under …/openai/v1, catalog under …/v1.
+        let cfg = ConfigProvider {
+            api_url: "https://opencode.ai/inference/openai/v1".to_string(),
+            models_url: "https://opencode.ai/inference/v1".to_string(),
+            ..ConfigProvider::default()
+        };
+        assert_eq!(
+            models_endpoint(&cfg).unwrap(),
+            "https://opencode.ai/inference/v1/models"
+        );
+    }
 }

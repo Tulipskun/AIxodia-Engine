@@ -203,6 +203,7 @@ async fn install_provider(name: &str, url: &str, keys: &[&str], adapter: &str) {
             api_url: url.to_string(),
             keys: keys.iter().map(|key| key.to_string()).collect(),
             adapter: adapter.to_string(),
+            ..aixodia_config::Provider::default()
         })
         .await
         .expect("add provider");

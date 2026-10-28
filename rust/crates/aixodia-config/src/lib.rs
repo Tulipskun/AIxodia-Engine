@@ -35,6 +35,9 @@ pub struct Provider {
     pub id: String,
     pub name: String,
     pub api_url: String,
+    /// Where the model catalog lives when it is not under `api_url`; empty
+    /// means the catalog is asked at `api_url` itself.
+    pub models_url: String,
     pub keys: Vec<String>,
     pub adapter: String,
 }
@@ -61,6 +64,8 @@ fn builtin_providers() -> Vec<Provider> {
         Provider {
             name: "Opencode".to_string(),
             api_url: "https://opencode.ai/inference/openai/v1".to_string(),
+            // Zen serves chat under …/openai/v1 but its catalog one level up.
+            models_url: "https://opencode.ai/inference/v1".to_string(),
             adapter: "opencode".to_string(),
             ..Provider::default()
         },
@@ -123,6 +128,8 @@ struct ProviderEntry {
     provider: String,
     #[serde(default)]
     endpoint: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    models_url: String,
     #[serde(default)]
     keys: Vec<String>,
     #[serde(default)]
@@ -197,6 +204,7 @@ impl Store {
                 id: entry.id.to_string(),
                 name: entry.provider,
                 api_url: entry.endpoint,
+                models_url: entry.models_url,
                 keys: entry.keys,
                 adapter: entry.adapter,
             })
@@ -211,6 +219,7 @@ impl Store {
             id,
             provider: provider.name,
             endpoint: provider.api_url,
+            models_url: provider.models_url,
             keys: non_nil_keys(provider.keys),
             adapter: provider.adapter,
         });
@@ -308,6 +317,7 @@ pub async fn add_provider(
             id: String::new(),
             name: name.to_string(),
             api_url: endpoint.trim().to_string(),
+            models_url: String::new(),
             keys,
             adapter: adapter.to_string(),
         })
@@ -447,6 +457,7 @@ mod tests {
                         api_url: "https://alpha.test".into(),
                         adapter: "openai".into(),
                         keys: vec!["k1".into(), "k2".into()],
+                        ..Provider::default()
                     })
                     .await
                     .unwrap();
@@ -559,6 +570,7 @@ mod tests {
                 assert_eq!(got[1].name, "AIxodia Free");
                 assert_eq!(got[1].keys.len(), 0);
                 assert_eq!(got[2].name, "Opencode");
+                assert_eq!(got[2].models_url, "https://opencode.ai/inference/v1");
                 assert!(get_provider_by_name("Opencode").is_some());
             });
         });

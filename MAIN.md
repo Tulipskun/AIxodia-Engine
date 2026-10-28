@@ -4,6 +4,9 @@ GOAL:
 [COMPLETED] Deployed and verified on this host: the released build (commit
             796ca63) answers "ENGINE OK" and streaming "STREAM OK" through
             /v1/chat/completions on Opencode/big-pickle with no key
+[COMPLETED] Fix the catalog regression the endpoint move exposed: Zen answers
+            404 at …/openai/v1/models while chat lives there, so the provider
+            now carries a models_url (…/inference/v1) for the probe
 [COMPLETED] Capture the CLI's real ClientHello (JA3) and the engine's current
             rustls ClientHello, and diff them
 [COMPLETED] Implement the matching TLS stack in aixodia-provider
@@ -215,3 +218,15 @@ NOTE:
   arguments; exec preserves a blocked signal mask (and ignored dispositions),
   which is why the old process could never receive the signal after inheriting
   that mask.
+- Catalog regression 2026-10-28: after the chat base moved to
+  https://opencode.ai/inference/openai/v1, the provider refresh went 404 and the
+  provider read as unreachable with no models. Measured: …/openai/v1/models and
+  …/inference/models are 404; …/inference/v1/models and …/zen/v1/models answer
+  200 with the same list (big-pickle first). Fix: `Provider.models_url` (empty
+  means "use api_url"), set on the builtin, used by fetch_models; the probe now
+  reflects the real catalog and /api/models carries the Zen ids again.
+- Why not the whole api_url at …/inference/v1: both …/inference/v1 and
+  …/inference/openai/v1 expose /chat/completions (both answer 429 to a plain
+  curl), but the captured CLI contract posts to …/openai/v1, so chat stays
+  there and only the catalog is overridden. models_url is a general base
+  override, not an adapter special case.
