@@ -240,6 +240,23 @@ NOTE:
   unreachable), while the two newest sessions carry model
   "deepseek-v4.1-flash-free" and the latest was touched 01:05Z (title สวัสดี).
   Pulling that session's turns and /api/models to see the exact failure.
+- Probe 2026-10-28T01:27Z: sending AIxodia Free/openai-fast through the live
+  engine (pre-deploy build) to confirm the default route the phone will use.
+  Expected "USABLE OK" with prompt ~1.6k tokens on the engine's system prompt.
+- Gate 2026-10-28T01:33Z: fmt + clippy + tests for the route fallback; the
+  first 719b047 build was already building without this second fix, so a
+  follow-up commit will be pushed and its Release watched.
+- Second fix 2026-10-28T01:31Z: a brand-new chat is created with no route
+  (createSession sends only id+title, the run body sends only session_id), so
+  resolve_route answered "model is required" even though settings already name
+  a main. resolve_route now falls back to saved_main_model() when both the
+  request and the session carry no route; a gateway test with a memory
+  StateStore covers the first message of a fresh chat.
+- Ship 2026-10-28T01:26Z: 719b047 pushed to main; CI 40614882773 and Release
+  engine 40614882741 are in progress and watched in the background. Next:
+  `aixodia update` onto the published build, then verify the catalog, a live
+  keyless turn on AIxodia Free, and repoint the two Opencode-pinned chats if
+  the operator wants them to answer today.
 - Gate 2026-10-28T01:23Z: every suite passes (cargo_exit=0), including the new
   a_keyless_turn_retries_after_a_quota_answer; VERSION bumped to v1.154 for the
   release. Committing and pushing now.

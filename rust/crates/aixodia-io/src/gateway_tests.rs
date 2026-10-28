@@ -34,7 +34,7 @@ use crate::chat::{
     is_repeat_of_tail, merge_history, select_tools, to_internal_provider, ChatSink,
     CompletionOptions, NullSink, Route, SinkRef, TrailWriter,
 };
-use crate::gateway::{Gateway, SessionStore, REQUEST_MAX_BODY};
+use crate::gateway::{Gateway, SessionStore, StateStore, REQUEST_MAX_BODY};
 
 // ---------------------------------------------------------------------------
 // The store the Go tests drive the gateway against.
@@ -44,6 +44,27 @@ use crate::gateway::{Gateway, SessionStore, REQUEST_MAX_BODY};
 struct MemStore {
     sessions: Mutex<HashMap<String, Session>>,
     turns: Mutex<HashMap<String, Vec<Turn>>>,
+}
+
+/// The saved settings, which live in D1's `system_state` in production.
+#[derive(Default)]
+struct MemState {
+    values: Mutex<HashMap<String, String>>,
+}
+
+#[async_trait::async_trait]
+impl StateStore for MemState {
+    async fn get_state(&self, key: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.values.lock().unwrap().get(key).cloned())
+    }
+
+    async fn put_state(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        self.values
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), value.to_string());
+        Ok(())
+    }
 }
 
 impl MemStore {
@@ -2321,4 +2342,36 @@ async fn a_keyless_turn_retries_after_a_quota_answer() {
         started.elapsed() >= Duration::from_secs(3),
         "the retry must wait before asking again"
     );
+}
+
+/// A brand-new chat is created with no route, and the phone leaves its picker
+/// empty until the user chooses. The daemon must fall back to the saved main
+/// instead of failing the first message for a model nobody had to pick.
+#[tokio::test]
+async fn a_new_session_without_a_route_uses_the_saved_main() {
+    let _guard = config_lock().lock().unwrap();
+    let (gateway, _upstream) = new_test_gateway(Arc::new(MemStore::new())).await;
+    let state = Arc::new(MemState::default());
+    state
+        .put_state(
+            crate::api::SETTINGS_STATE_KEY,
+            r#"{"main":{"provider":"mock","model":"test-model","generation":{}}}"#,
+        )
+        .await
+        .unwrap();
+    *gateway.state.write().unwrap() = Some(state);
+
+    let (status, body) = post_json(&gateway.router(), "/v1/sessions", r#"{"title":"new"}"#).await;
+    assert_eq!(status, StatusCode::CREATED, "body = {body}");
+    let session: Value = serde_json::from_str(&body).expect("session json");
+    let id = session["id"].as_str().expect("session id").to_string();
+
+    let body = json!({
+        "session_id": id,
+        "messages": [{"role": "user", "content": "hi"}],
+    });
+    let (status, body) =
+        post_json(&gateway.router(), "/v1/chat/completions", &body.to_string()).await;
+    assert_eq!(status, StatusCode::OK, "body = {body}");
+    assert!(body.contains("done"), "body = {body}");
 }

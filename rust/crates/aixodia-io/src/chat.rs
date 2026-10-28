@@ -880,6 +880,15 @@ impl Gateway {
                 model_id = stored.model.clone();
             }
         }
+        if provider_name.trim().is_empty() && model_id.trim().is_empty() {
+            // A new chat is created with no route and the phone leaves its
+            // picker empty until the user chooses, so fall back to the saved
+            // main: the first message answers instead of failing for a missing
+            // model that the settings already name.
+            let (provider, model) = self.saved_main_model().await;
+            provider_name = provider;
+            model_id = model;
+        }
         let model_id = model_id.trim().to_string();
         if model_id.is_empty() {
             anyhow::bail!("model is required (use provider/model or the provider field)");
