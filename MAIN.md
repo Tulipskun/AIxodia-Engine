@@ -48,16 +48,32 @@ GOAL:
 [COMPLETED] Fix non-login mode: a built-in free provider that works without the opencode CLI
             (keyless round trip answers; a multi-round tool turn can still hit the
             free tier's serialized 1-req/IP throttle, see NOTE)
-[IN_PROCESS] Fix the terminal's pid across an engine stop/restart: a tmux-backed
+[COMPLETED] Fix the terminal's pid across an engine stop/restart: a tmux-backed
             session reported the pid of the tmux *client* its pty runs, which is
             replaced on every attach, so the phone's tab changed pid after a
             restart even though the shell behind it never did. The engine now
             reports the pane's pid (tmux::pane_pid) as the session's pid.
-[IN_PROCESS] Fix a closed terminal tab coming back: DELETE /v1/terminals/:id only
+            Shipped 3a9891a; `display-message -p '#{pane_pid}'` returned 1007 for
+            the session `list-sessions` names, and the deployed build is live
+            (see the deploy line).
+[COMPLETED] Fix a closed terminal tab coming back: DELETE /v1/terminals/:id only
             looked in the in-memory map, and a restarted engine has an empty map,
             so it answered 204 while the tmux server kept the shell alive — this
             host still holds three such shells (aix-t-5b864fae…, aix-t-c14dbc89…,
-            aix-t-eb544588…). The close now kills the tmux session too.
+            aix-t-eb544588…). The close now kills the tmux session too. They are
+            still attached: killing them is the operator's call (or a hold on the
+            tab in the app once the new APK is installed).
+[COMPLETED] Deploy it: CI 40652801149 and Release engine 40652801145 green,
+            engine-latest amd64 17,731,584 bytes sha256 2c74b0da…98ff, and the
+            daemon installed it itself — aixodia.log "selfupdate: installing the
+            build published=2026-10-28T07:58:10Z", /healthz then answers
+            {"ok":true,"pid":528,"started":1793174297 (=07:58:17Z),"version":
+            "v1.158"}. Note for next time: `aixodia update` compares the FILE on
+            disk with the published one, so "already the published build" says
+            nothing about the running image — prove it with the healthz
+            `started`/selfupdate log, since ps keeps the original start time
+            across the re-exec and /proc/<pid>/exe follows the path, not the
+            inode.
 
 PLAN:
 [COMPLETED] Byte-diffed fresh ClientHellos: the engine's wreq hello now matches
