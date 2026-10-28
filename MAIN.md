@@ -2,7 +2,7 @@ GOAL:
 [COMPLETED] Make keyless Opencode the daemon's default route: default_settings
             names Opencode/big-pickle and saved_main_model falls back to it when
             nothing usable is stored, so a fresh/unset daemon answers on the
-            built-in non-login provider. No auto-fallback to AIxodia Free (the
+            built-in non-login provider. No auto-fallback to Pollinations (the
             operator chose strict). Shipped v1.157 (bce6c62) and applied live:
             in-place `aixodia update` moved pid 1136 v1.156→v1.157, and
             PUT /api/settings set main=Opencode/big-pickle (GET confirms).
@@ -616,11 +616,23 @@ NOTE:
   shows Opencode default_model=big-pickle). Consequence the operator accepted:
   the anonymous Opencode free tier is exhausted on this host until the ~00:00Z
   Oct 29 reset (07:00 Thai), and strict mode means a route-less chat now 429s
-  until then instead of answering on AIxodia Free.
+  until then instead of answering on Pollinations.
 - Token correction: to run the authorized push + app release I authenticated
   gh with the operator's PAT (`gh auth login --with-token`), which now persists
   it in /root/.config/gh/hosts.yml and the git credential helper. Revoke the PAT
   (it was pasted in chat) and run `gh auth logout` here when the release work is
   done. The earlier "never persisted" note held until this authorized release step.
+- Rename 2026-10-28T04:20Z (operator: "AIxodia Free ไม่ใช่ provider จริง"):
+  the built-in keyless provider (endpoint https://text.pollinations.ai/openai)
+  is named by its real upstream — "Pollinations". config/src/lib.rs sets the
+  builtin name to Pollinations and its four tests follow. Gate: fmt 0, clippy 0,
+  aixodia-config 8 passed, and the app's :app:testDebugUnitTest BUILD SUCCESSFUL
+  (ErrorText wording + its two test expectations moved with it). Shipped as
+  VERSION v1.158. Consequence: sessions whose stored route still says
+  provider="AIxodia Free" will resolve to an unknown provider once the daemon
+  runs the renamed build, so any chat pinned to the old name must be repointed
+  to Pollinations/openai-fast. Historical MAIN.md entries keep the old name
+  because that is what was true when they were written.
+
 
 

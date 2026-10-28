@@ -52,7 +52,7 @@ fn builtin_providers() -> Vec<Provider> {
         // request. Its anonymous tier is throttled per IP, which the app reports
         // rather than hides.
         Provider {
-            name: "AIxodia Free".to_string(),
+            name: "Pollinations".to_string(),
             api_url: "https://text.pollinations.ai/openai".to_string(),
             adapter: "openai".to_string(),
             ..Provider::default()
@@ -567,7 +567,7 @@ mod tests {
                 let got = get_providers();
                 assert_eq!(got.len(), 3);
                 assert_eq!(got[0].name, "Alpha");
-                assert_eq!(got[1].name, "AIxodia Free");
+                assert_eq!(got[1].name, "Pollinations");
                 assert_eq!(got[1].keys.len(), 0);
                 assert_eq!(got[2].name, "Opencode");
                 assert_eq!(got[2].models_url, "https://opencode.ai/inference/v1");
@@ -587,8 +587,8 @@ mod tests {
                 test_store();
                 assert!(is_builtin("Opencode"));
                 assert!(is_builtin("opencode"));
-                assert!(is_builtin("AIxodia Free"));
-                assert!(is_builtin("aixodia free"));
+                assert!(is_builtin("Pollinations"));
+                assert!(is_builtin("pollinations"));
                 assert!(add_provider(
                     "Opencode",
                     "https://elsewhere.test",
@@ -598,7 +598,7 @@ mod tests {
                 .await
                 .is_err());
                 assert!(remove_provider("Opencode").await.is_err());
-                assert!(remove_provider("AIxodia Free").await.is_err());
+                assert!(remove_provider("Pollinations").await.is_err());
                 assert!(set_provider_keys("Opencode", vec!["k".into()])
                     .await
                     .is_err());
@@ -645,7 +645,7 @@ mod tests {
                 assert!(load_config().await.is_err());
                 let got = get_providers();
                 assert_eq!(got.len(), 2);
-                assert_eq!(got[0].name, "AIxodia Free");
+                assert_eq!(got[0].name, "Pollinations");
             });
         });
     }
