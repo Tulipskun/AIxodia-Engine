@@ -171,6 +171,7 @@ pub fn retryable(err: &anyhow::Error) -> bool {
     match err.downcast_ref::<APIError>() {
         Some(api) => {
             api.status_code == 401
+                || api.status_code == 402
                 || api.status_code == 408
                 || api.status_code == 429
                 || api.status_code >= 500

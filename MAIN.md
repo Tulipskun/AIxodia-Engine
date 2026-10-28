@@ -1,4 +1,6 @@
 GOAL:
+[IN_PROCESS] Diagnose why the operator cannot use the app end to end, fix the
+            root cause, then commit, push, deploy and cut the release
 [COMPLETED] Make the keyless Opencode provider answer by matching the official
             client's request contract — no opencode CLI invocation, no key
 [COMPLETED] Deployed and verified on this host: the released build (commit
@@ -233,6 +235,44 @@ NOTE:
   curl), but the captured CLI contract posts to …/openai/v1, so chat stays
   there and only the catalog is overridden. models_url is a general base
   override, not an adapter special case.
+- Operator report 2026-10-28T01:13Z: the app is unusable. Live state so far:
+  /api/settings main = "AIxodia Free/openai-fast" (that builtin probes
+  unreachable), while the two newest sessions carry model
+  "deepseek-v4.1-flash-free" and the latest was touched 01:05Z (title สวัสดี).
+  Pulling that session's turns and /api/models to see the exact failure.
+- Gate 2026-10-28T01:23Z: every suite passes (cargo_exit=0), including the new
+  a_keyless_turn_retries_after_a_quota_answer; VERSION bumped to v1.154 for the
+  release. Committing and pushing now.
+- Gate 2026-10-28T01:22Z: re-running the suite with an explicit exit code and
+  the new test name filtered in, so the pass/fail line is not lost in the tail.
+- Gate 2026-10-28T01:20Z: clippy clean across the workspace; fmt had one wrap
+  fixed in the new breaker test; the full test suite is running now.
+- Gate 2026-10-28T01:19Z: fmt/clippy/tests for the catalog/retry/breaker/logging
+  fixes, including new coverage for the bare-array catalog, a keyless 429 retry
+  (fake upstream 429 then 200) and a rate limit not opening the breaker. Results
+  appended once the gate returns.
+- Fix in progress 2026-10-28T01:18Z: (1) fetch_models accepts a bare-array
+  catalog whose entries use `name`, so AIxodia Free (Pollinations) probes
+  reachable; (2) keyless providers get 4 attempts with 3/8/20s backoff on
+  402/429 instead of one try; (3) 429/402 no longer open the breaker; (4) a
+  failed turn logs a warning with provider/model. The 01:16:30Z Opencode retry
+  still answered 429, so its free quota is exhausted beyond the measured 500s
+  window; Pollinations (verified "POLLI OK" 01:14Z) is the working keyless path
+  meanwhile, and the settings default already names it.
+- Diagnosis 2026-10-28T01:14Z: the latest session has only the user turn — the
+  stream died on an upstream error before any assistant turn. Code path:
+  chat_stream writes the user turn, then complete() fails and only an SSE error
+  frame is sent (nothing persisted, nothing logged). Keyless providers get
+  exactly 1 attempt (attempts=1 when keys is empty), so a 429 is not retried,
+  and three such failures open the 45s breaker (429 counts against the
+  provider). The 01:05 attempt overlapped the 500s window our 01:02 smoke probe
+  opened, which is exactly the operator's symptom.
+- Status re-check 2026-10-28T01:09Z (operator ping, no code change): engine pid
+  136612 up 30m, healthz 200, providers 200 (Opencode reachable, 84 models,
+  big-pickle; AIxodia Free unreachable as before). CI for 908ec11 completed
+  success; Release engine still running. The free-tier window opened by the
+  01:07 probe ends ~01:15:30Z, so the smoke retry is deferred to then (scheduled
+  in the background) rather than an immediate 429 that proves nothing.
 - Catalog fix live 2026-10-28T01:02Z: the in-place handshake worked this time
   (SIGUSR1 was unmasked after the 00:39 restart): exec kept pid 136612, the
   listener was dark ~11s while the new image re-verified D1 and re-registered the

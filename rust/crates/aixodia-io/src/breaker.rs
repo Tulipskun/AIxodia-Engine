@@ -64,7 +64,10 @@ pub fn counts_against_provider(err: &anyhow::Error) -> bool {
         return false;
     }
     if let Some(api) = err.downcast_ref::<aixodia_provider::APIError>() {
-        return api.status_code == 429 || api.status_code == 408 || api.status_code >= 500;
+        // 429 and 402 say "slow down", not "down": the provider answers again
+        // once the free-tier window passes, and a pause would replace its own
+        // message with a misleading one.
+        return api.status_code == 408 || api.status_code >= 500;
     }
     true
 }
@@ -177,5 +180,25 @@ mod tests {
         }
         assert!(!g.circuit_open("P", now));
         assert!(!counts_against_provider(&Cancelled.into()));
+    }
+
+    #[test]
+    fn a_rate_limit_does_not_pause_the_provider() {
+        let g = gateway();
+        let now = Instant::now();
+        for _ in 0..BREAKER_THRESHOLD {
+            g.record_outcome(
+                "P",
+                Some(&APIError::new(429, "slow down").into_anyhow()),
+                now,
+            );
+        }
+        assert!(!g.circuit_open("P", now));
+        assert!(!counts_against_provider(
+            &APIError::new(429, "slow down").into_anyhow()
+        ));
+        assert!(!counts_against_provider(
+            &APIError::new(402, "free tier quota").into_anyhow()
+        ));
     }
 }

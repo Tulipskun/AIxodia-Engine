@@ -140,23 +140,50 @@ pub async fn fetch_models(cfg: &ConfigProvider) -> anyhow::Result<Vec<String>> {
         .into_anyhow());
     }
 
+    parse_models(&body)
+}
+
+/// Reads a catalog in either shape: the OpenAI envelope (`{"data": [...]}`) or a
+/// bare array. A bare entry may name the model `id` (OpenAI) or `name`
+/// (Pollinations), so both are accepted.
+fn parse_models(body: &[u8]) -> anyhow::Result<Vec<String>> {
     #[derive(Deserialize)]
     struct Item {
         #[serde(default)]
         id: String,
+        #[serde(default)]
+        name: String,
+    }
+    impl Item {
+        fn into_id(self) -> String {
+            if self.id.is_empty() {
+                self.name
+            } else {
+                self.id
+            }
+        }
     }
     #[derive(Deserialize)]
     struct Parsed {
         #[serde(default)]
         data: Vec<Item>,
     }
-    let parsed: Parsed = serde_json::from_slice(&body)
-        .map_err(|_| anyhow::anyhow!("provider returned an unexpected /models payload"))?;
 
-    Ok(parsed
-        .data
+    let unexpected = || anyhow::anyhow!("provider returned an unexpected /models payload");
+    let value: serde_json::Value = serde_json::from_slice(body).map_err(|_| unexpected())?;
+    let items: Vec<Item> = match value {
+        serde_json::Value::Array(_) => serde_json::from_value(value).map_err(|_| unexpected())?,
+        serde_json::Value::Object(_) => {
+            serde_json::from_value::<Parsed>(value)
+                .map_err(|_| unexpected())?
+                .data
+        }
+        _ => return Err(unexpected()),
+    };
+
+    Ok(items
         .into_iter()
-        .map(|item| item.id)
+        .map(Item::into_id)
         .filter(|id| !id.is_empty())
         .collect())
 }
@@ -174,7 +201,7 @@ fn models_endpoint(cfg: &ConfigProvider) -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::models_endpoint;
+    use super::{models_endpoint, parse_models};
     use aixodia_config::Provider as ConfigProvider;
 
     #[test]
@@ -201,5 +228,22 @@ mod tests {
             models_endpoint(&cfg).unwrap(),
             "https://opencode.ai/inference/v1/models"
         );
+    }
+
+    #[test]
+    fn catalog_accepts_the_openai_envelope() {
+        let ids = parse_models(br#"{"data":[{"id":"m1"},{"id":"m2"}]}"#).unwrap();
+        assert_eq!(ids, vec!["m1".to_string(), "m2".to_string()]);
+    }
+
+    #[test]
+    fn catalog_accepts_a_bare_array_named_like_pollinations() {
+        let ids = parse_models(br#"[{"name":"openai-fast"},{"id":"m2"}]"#).unwrap();
+        assert_eq!(ids, vec!["openai-fast".to_string(), "m2".to_string()]);
+    }
+
+    #[test]
+    fn catalog_rejects_an_unexpected_payload() {
+        assert!(parse_models(b"\"nope\"").is_err());
     }
 }

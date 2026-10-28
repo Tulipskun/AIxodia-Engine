@@ -30,7 +30,8 @@ use crate::attach::ChatAttachment;
 use crate::breaker::Cancelled;
 use crate::gateway::{
     decode_body, first_non_zero, first_non_zero_ptr, new_completion_id, truncate, write_error,
-    write_json, Gateway, SessionStore, KEY_ATTEMPTS, MAX_TOOL_ROUNDS, UPSTREAM_WAIT,
+    write_json, Gateway, SessionStore, KEYLESS_ATTEMPTS, KEYLESS_BACKOFF, KEY_ATTEMPTS,
+    MAX_TOOL_ROUNDS, UPSTREAM_WAIT,
 };
 use crate::remind::ReminderState;
 use crate::toolimage::extract_tool_images;
@@ -529,6 +530,11 @@ async fn chat_once(
     let resp = match result {
         Ok(resp) => resp,
         Err(err) => {
+            tracing::warn!(
+                "gateway: {}/{} turn failed: {err}",
+                primary.prov.name,
+                primary.model
+            );
             if let Some(found) = &stored {
                 g.end_turn(&found.id);
             }
@@ -652,6 +658,11 @@ async fn chat_stream(
         let resp = match result {
             Ok(resp) => resp,
             Err(err) => {
+                tracing::warn!(
+                    "gateway: {}/{} turn failed: {err}",
+                    primary.prov.name,
+                    primary.model
+                );
                 let payload =
                     json!({"error": {"message": err.to_string(), "type": "upstream_error"}});
                 write_sse(&tx, &payload);
@@ -1151,8 +1162,9 @@ impl Gateway {
             self.next_key(&target.prov.name)
         };
 
-        let attempts = if target.prov.keys.is_empty() {
-            1
+        let keyless = target.prov.keys.is_empty();
+        let attempts = if keyless {
+            KEYLESS_ATTEMPTS
         } else {
             KEY_ATTEMPTS
         };
@@ -1167,7 +1179,11 @@ impl Gateway {
                 break;
             }
             if attempt > 0 {
-                let wait = std::time::Duration::from_millis(750 * attempt as u64);
+                let wait = if keyless {
+                    KEYLESS_BACKOFF[(attempt - 1).min(KEYLESS_BACKOFF.len() - 1)]
+                } else {
+                    std::time::Duration::from_millis(750 * attempt as u64)
+                };
                 tokio::select! {
                     _ = options.cancel.cancelled() => return Err(Cancelled.into()),
                     _ = tokio::time::sleep_until(deadline) => {
@@ -1197,7 +1213,14 @@ impl Gateway {
             match result {
                 Ok(resp) => return Ok(resp),
                 Err(err) => {
-                    if !aixodia_provider::retryable(&err) || options.cancel.is_cancelled() {
+                    let asked_for_a_key = keyless
+                        && err
+                            .downcast_ref::<aixodia_provider::APIError>()
+                            .is_some_and(|api| api.status_code == 401);
+                    if asked_for_a_key
+                        || !aixodia_provider::retryable(&err)
+                        || options.cancel.is_cancelled()
+                    {
                         last_err = Some(err);
                         break;
                     }

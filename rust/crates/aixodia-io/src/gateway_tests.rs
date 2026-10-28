@@ -2260,3 +2260,65 @@ async fn restart_writes_the_exit_file_in_home() {
         "no ~/.exit after POST /restart"
     );
 }
+
+/// A keyless provider that answers a quota error is asked again instead of
+/// failing the turn: the free tiers throttle for a fixed per-IP window, so the
+/// phone should see the answer after the window rather than an outage.
+#[tokio::test]
+async fn a_keyless_turn_retries_after_a_quota_answer() {
+    let _guard = config_lock().lock().unwrap();
+    let hits = Arc::new(Mutex::new(0usize));
+    let seen = hits.clone();
+    let app = Router::new().fallback(move |request: Request<Body>| {
+        let seen = seen.clone();
+        async move {
+            if request.uri().path() != "/v1/chat/completions" {
+                return (StatusCode::NOT_FOUND, "").into_response();
+            }
+            let mut hits = seen.lock().unwrap();
+            *hits += 1;
+            if *hits == 1 {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    r#"{"error":{"message":"free tier quota"}}"#,
+                )
+                    .into_response();
+            }
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                write_fake("after wait", &[], "stop"),
+            )
+                .into_response()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    install_provider("free", &format!("http://{addr}"), &[], "openai").await;
+
+    let gateway = Arc::new(Gateway::new(
+        Arc::new(MemStore::new()),
+        Arc::new(aixodia_provider::Registry::new()),
+        tools_with(None),
+    ));
+    let body = json!({
+        "model": "free/m1",
+        "messages": [{"role": "user", "content": "hi"}],
+    });
+    let started = Instant::now();
+    let (status, body) =
+        post_json(&gateway.router(), "/v1/chat/completions", &body.to_string()).await;
+    assert_eq!(status, StatusCode::OK, "body = {body}");
+    assert!(body.contains("after wait"), "body = {body}");
+    assert_eq!(*hits.lock().unwrap(), 2);
+    assert!(
+        started.elapsed() >= Duration::from_secs(3),
+        "the retry must wait before asking again"
+    );
+}

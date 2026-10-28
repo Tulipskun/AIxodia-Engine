@@ -30,12 +30,21 @@ use serde_json::{json, Value};
 /// nothing done.
 pub const MAX_TOOL_ROUNDS: i64 = 100;
 pub const KEY_ATTEMPTS: usize = 3;
+/// Keyless providers are tried again on a quota answer: the free tiers throttle
+/// per IP for a fixed window (Pollinations answers again after ~30 s), so a
+/// paced retry succeeds where one try would look like an outage.
+pub const KEYLESS_ATTEMPTS: usize = 4;
+pub const KEYLESS_BACKOFF: [Duration; 3] = [
+    Duration::from_secs(3),
+    Duration::from_secs(8),
+    Duration::from_secs(20),
+];
 pub const UPSTREAM_WAIT: Duration = Duration::from_secs(180);
 pub const REQUEST_MAX_BODY: usize = 8 << 20;
 
 /// The release tag, baked in at build time. Bump on every release so a live
 /// service can be identified via `GET /healthz`.
-pub const VERSION: &str = "v1.153";
+pub const VERSION: &str = "v1.154";
 
 /// The rule a client-supplied draft id has to follow, as a readable pattern.
 pub const SESSION_ID_PATTERN: &str = "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$";
