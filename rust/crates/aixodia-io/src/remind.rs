@@ -7,7 +7,7 @@
 
 use aixodia_goals::{Item, Kind};
 use aixodia_provider::Message;
-use aixodia_session::{compact, message_tokens, Window, DEFAULT_MAX_TOKENS};
+use aixodia_session::{compact, message_tokens, Compacted, Window, DEFAULT_MAX_TOKENS};
 
 use crate::gateway::Gateway;
 
@@ -54,7 +54,7 @@ pub fn append_reminder(
     conversation: &[Message],
     text: &str,
     window: Window,
-) -> (Vec<Message>, bool) {
+) -> (Vec<Message>, bool, Option<Compacted>) {
     let conversation = strip_reminders(conversation);
     let reminder = Message {
         role: "user".to_string(),
@@ -69,11 +69,11 @@ pub fn append_reminder(
     if window.max < 1 {
         window.max = 1;
     }
-    let compacted = compact(&conversation, window);
+    let (compacted, report) = compact(&conversation, window);
     let whole = compacted.len() == conversation.len();
     let mut out = compacted;
     out.push(reminder);
-    (out, whole)
+    (out, whole, report)
 }
 
 impl Gateway {
@@ -88,7 +88,7 @@ impl Gateway {
         window: Window,
         session_id: &str,
         state: &mut ReminderState,
-    ) -> (Vec<Message>, bool) {
+    ) -> (Vec<Message>, bool, Option<Compacted>) {
         let mut window = window;
         if window.max <= 0 {
             window.max = DEFAULT_MAX_TOKENS;
@@ -126,14 +126,14 @@ impl Gateway {
         }
 
         if !state.text.is_empty() {
-            let (out, whole_conversation) = append_reminder(&base, &state.text, window);
+            let (out, whole_conversation, report) = append_reminder(&base, &state.text, window);
             let whole = whole_conversation && base.len() == conversation.len();
-            return (out, whole);
+            return (out, whole, report);
         }
 
-        let messages = compact(&base, window);
+        let (messages, report) = compact(&base, window);
         let whole = messages.len() == base.len() && base.len() == conversation.len();
-        (messages, whole)
+        (messages, whole, report)
     }
 
     pub(crate) async fn objective_reminder(
@@ -221,8 +221,9 @@ mod tests {
     #[test]
     fn the_reminder_goes_last() {
         let conversation = vec![user("hello"), user("again")];
-        let (out, whole) = append_reminder(&conversation, "REM", Window::new(0));
+        let (out, whole, report) = append_reminder(&conversation, "REM", Window::new(0));
         assert!(whole);
+        assert!(report.is_none());
         assert_eq!(out.len(), 3);
         assert_eq!(out.last().expect("reminder").content, "REM");
     }
@@ -234,11 +235,13 @@ mod tests {
                 id: "g1".to_string(),
                 kind: "goal".to_string(),
                 content: "ship it".to_string(),
+                status: aixodia_goals::STATUS_OPEN.to_string(),
             },
             Item {
                 id: "p1".to_string(),
                 kind: "plan".to_string(),
                 content: "write tests".to_string(),
+                status: aixodia_goals::STATUS_OPEN.to_string(),
             },
         ];
         let text = format_reminder(&items);

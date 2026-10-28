@@ -352,6 +352,7 @@ async fn objective_add(
     let input: ObjectiveInput = parse_args(args)?;
     let (store, session) = objective_store(store, &ctx)?;
     let id = store.add(&session, kind, &input.content).await?;
+    sync_objectives_file(&store, &session).await;
     Ok(format!("{noun}_id: {id}"))
 }
 
@@ -366,6 +367,7 @@ async fn objective_edit(
     let id = objective_id(kind, &input);
     let (store, session) = objective_store(store, &ctx)?;
     store.edit(&session, kind, &id, &input.content).await?;
+    sync_objectives_file(&store, &session).await;
     Ok(format!("{noun} {id} updated"))
 }
 
@@ -380,12 +382,31 @@ async fn objective_modify(
     let input: ObjectiveInput = parse_args(args)?;
     let id = objective_id(kind, &input);
     let (store, session) = objective_store(store, &ctx)?;
-    if action == "complete" {
+    let word = if action == "complete" {
         store.complete(&session, kind, &id).await?;
-        Ok(format!("{noun} {id} completed"))
+        "completed"
     } else {
         store.drop_item(&session, kind, &id).await?;
-        Ok(format!("{noun} {id} dropped"))
+        "dropped"
+    };
+    sync_objectives_file(&store, &session).await;
+    Ok(format!("{noun} {id} {word}"))
+}
+
+/// Rebuilds the Obsidian mirror in the chat's set directory after a successful
+/// mutation. A chat with no directory writes nothing; a failed write does not
+/// fail the tool call, because the store is the source of truth.
+async fn sync_objectives_file(store: &Arc<dyn Store>, session: &str) {
+    let Some(dir) = crate::dir::get(session) else {
+        return;
+    };
+    match store.all(session).await {
+        Ok(items) => {
+            if let Err(err) = crate::obsidian::write_goals_md(&dir, session, &items).await {
+                tracing::warn!("tools: goals file: {err}");
+            }
+        }
+        Err(err) => tracing::warn!("tools: goals list for file: {err}"),
     }
 }
 
@@ -551,6 +572,10 @@ async fn set_directory(ctx: &ToolContext, args: &str) -> Result<String> {
         bail!("{raw} is not a directory");
     }
     crate::dir::set(&ctx.session_id, &resolved);
+    // A directory set late in a chat still gets the mirror of what exists.
+    if let Some(store) = &ctx.store {
+        sync_objectives_file(store, ctx.session_id.trim()).await;
+    }
     Ok(format!(
         "shell working directory set to {}",
         resolved.display()

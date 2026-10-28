@@ -17,7 +17,7 @@ pub use types::{
     UnfinishedTurn,
 };
 pub use window::{
-    anchor, compact, estimate_tokens, message_tokens, tokens, Window, DEFAULT_MAX_TOKENS,
+    anchor, compact, estimate_tokens, message_tokens, tokens, Compacted, Window, DEFAULT_MAX_TOKENS,
 };
 
 /// Every builtin block builder and constant, re-exported for the gateway.

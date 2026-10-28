@@ -1,4 +1,16 @@
 GOAL:
+[COMPLETED] Surface goals, plans, and compaction to the user (v1.160):
+            (1) objectives keep a status (open/done/dropped) in D1 and
+            MemoryStore, `Store::all()` reads every status; (2) every
+            goal_*/plan_* mutation mirrors the whole list to
+            `<set_directory>/aixodia-goals.md` in Obsidian format (frontmatter,
+            task checkboxes, `#done`/`#dropped` sections; set_directory writes
+            it once too); (3) GET /v1/sessions/:id/objectives answers
+            {goals:[{id,content,status}], plans:[...]} for the app's card;
+            (4) `compact()` reports what it dropped — a new ChatSink
+            `on_compact` emits `tool_event stage:"compact"` with kept_turns,
+            dropped_turns and a per-turn digest, which the run sink forwards
+            verbatim. fmt/clippy 0, workspace tests green.
 [COMPLETED] Add a set_directory(path) tool so the shell runs where the chat
             points it instead of a `cd` prefix on every command. The choice is
             kept per session in aixodia-tools::dir (a global map keyed by

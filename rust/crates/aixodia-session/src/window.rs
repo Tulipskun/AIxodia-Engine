@@ -149,13 +149,23 @@ impl Window {
     }
 }
 
+/// What a compaction removed. The request conversation loses whole turns, but
+/// the user can be told what fell out of the window and how much was kept.
+#[derive(Debug, Clone, Default)]
+pub struct Compacted {
+    pub kept_turns: usize,
+    pub dropped_turns: usize,
+    /// A one-line digest of each dropped turn, oldest first.
+    pub summary: Vec<String>,
+}
+
 /// Compacts a conversation that has reached the window: it keeps the newer turns
 /// that fit and hands the kept rounds back as the reason the model gave for them,
 /// not as the result text the call produced.
 ///
 /// A turn starts at a user message and runs until the next one, so an assistant
 /// message and the tool results answering its calls always move together.
-pub fn compact(messages: &[Message], window: Window) -> Vec<Message> {
+pub fn compact(messages: &[Message], window: Window) -> (Vec<Message>, Option<Compacted>) {
     let max = if window.max <= 0 {
         DEFAULT_MAX_TOKENS
     } else {
@@ -163,7 +173,7 @@ pub fn compact(messages: &[Message], window: Window) -> Vec<Message> {
     };
 
     if window.size(messages) <= max {
-        return messages.to_vec();
+        return (messages.to_vec(), None);
     }
 
     let mut system = 0;
@@ -174,7 +184,7 @@ pub fn compact(messages: &[Message], window: Window) -> Vec<Message> {
 
     let budget = max - tokens(&messages[..system]);
     if budget <= 0 {
-        return messages.to_vec();
+        return (messages.to_vec(), None);
     }
 
     let turns = split_turns(body);
@@ -199,6 +209,25 @@ pub fn compact(messages: &[Message], window: Window) -> Vec<Message> {
         start += 1;
     }
 
+    let dropped = &turns[..start];
+    let report = if dropped.is_empty() {
+        None
+    } else {
+        Some(Compacted {
+            kept_turns: turns.len() - start,
+            dropped_turns: dropped.len(),
+            summary: dropped
+                .iter()
+                .take(30)
+                .filter_map(|turn| {
+                    let question = turn.iter().find(|m| m.role == "user")?;
+                    let text = digest(&question.content);
+                    (!text.is_empty()).then_some(text)
+                })
+                .collect(),
+        })
+    };
+
     let mut compacted: Vec<Message> = messages[..system].to_vec();
     for turn in &turns[start..] {
         compacted.extend(turn.iter().cloned());
@@ -217,7 +246,30 @@ pub fn compact(messages: &[Message], window: Window) -> Vec<Message> {
             }
         }
     }
-    compacted
+    (compacted, report)
+}
+
+/// One line for the report: whitespace collapsed, cut to about 120 characters.
+fn digest(text: &str) -> String {
+    const LIMIT: usize = 120;
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mut out = String::new();
+    let mut kept = 0usize;
+    for word in &words {
+        let next = out.chars().count() + if out.is_empty() { 0 } else { 1 } + word.chars().count();
+        if !out.is_empty() && next > LIMIT {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+        kept += 1;
+    }
+    if kept < words.len() {
+        out.push('…');
+    }
+    out
 }
 
 fn tool_calls_index(messages: &[Message]) -> std::collections::HashMap<String, ToolCall> {
@@ -395,7 +447,7 @@ mod tests {
             },
         ];
 
-        let compacted = compact(&messages, Window::new(60));
+        let (compacted, report) = compact(&messages, Window::new(60));
         assert!(
             compacted[0].role == "user",
             "the window opens on a user turn"
@@ -407,12 +459,18 @@ mod tests {
             .find(|message| message.role == "tool")
             .expect("tool result kept with its call");
         assert_eq!(tool.content, "because");
+        let report = report.expect("the old turn is reported");
+        assert_eq!(report.dropped_turns, 1);
+        assert_eq!(report.kept_turns, 1);
+        assert_eq!(report.summary.len(), 1);
+        assert!(report.summary[0].starts_with("old question"));
     }
 
     #[test]
     fn a_conversation_that_fits_is_untouched() {
         let messages = vec![user("hi"), assistant("hello")];
-        let compacted = compact(&messages, Window::new(DEFAULT_MAX_TOKENS));
+        let (compacted, report) = compact(&messages, Window::new(DEFAULT_MAX_TOKENS));
         assert_eq!(compacted.len(), messages.len());
+        assert!(report.is_none());
     }
 }

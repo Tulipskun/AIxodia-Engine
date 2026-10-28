@@ -244,6 +244,7 @@ pub fn builtin_fn() -> aixodia_provider::opencode::BuiltinFn {
 }
 
 pub mod dir;
+pub mod obsidian;
 pub mod run;
 
 pub use aixodia_goals as goals;

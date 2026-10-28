@@ -44,12 +44,14 @@ pub const STATUS_OPEN: &str = "open";
 pub const STATUS_DONE: &str = "done";
 pub const STATUS_DROPPED: &str = "dropped";
 
-/// One open goal or plan.
+/// One goal or plan, in any status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
     pub id: String,
     pub kind: String,
     pub content: String,
+    /// `open`, `done` or `dropped`.
+    pub status: String,
 }
 
 /// What the tools and the reminder builder need.
@@ -61,6 +63,8 @@ pub trait Store: Send + Sync {
     async fn drop_item(&self, session_id: &str, kind: Kind, id: &str) -> Result<()>;
     /// The goals and plans of one chat that are still active, oldest first.
     async fn open(&self, session_id: &str) -> Result<Vec<Item>>;
+    /// Every goal and plan of one chat in any status, oldest first.
+    async fn all(&self, session_id: &str) -> Result<Vec<Item>>;
 }
 
 /// The goal and plan store.
@@ -218,15 +222,30 @@ impl Store for D1 {
     }
 
     async fn open(&self, session_id: &str) -> Result<Vec<Item>> {
+        self.rows(session_id, Some(STATUS_OPEN)).await
+    }
+
+    async fn all(&self, session_id: &str) -> Result<Vec<Item>> {
+        self.rows(session_id, None).await
+    }
+}
+
+impl D1 {
+    async fn rows(&self, session_id: &str, status: Option<&str>) -> Result<Vec<Item>> {
         let session_id = normalize_session(session_id)?;
-        let rows = self
-            .db
-            .query(
-                "SELECT id, kind, content FROM objectives
+        let (statement, params): (&str, Vec<Value>) = match status {
+            Some(STATUS_OPEN) => (
+                "SELECT id, kind, content, status FROM objectives
                  WHERE session_id=? AND status=? ORDER BY created_at ASC, id ASC",
-                &[Value::from(session_id), Value::from(STATUS_OPEN)],
-            )
-            .await?;
+                vec![Value::from(session_id), Value::from(STATUS_OPEN)],
+            ),
+            _ => (
+                "SELECT id, kind, content, status FROM objectives
+                 WHERE session_id=? ORDER BY created_at ASC, id ASC",
+                vec![Value::from(session_id)],
+            ),
+        };
+        let rows = self.db.query(statement, &params).await?;
         Ok(rows
             .iter()
             .map(|row| Item {
@@ -241,6 +260,10 @@ impl Store for D1 {
                 content: match row.get("content") {
                     Some(Value::String(text)) => text.clone(),
                     _ => String::new(),
+                },
+                status: match row.get("status") {
+                    Some(Value::String(text)) => text.clone(),
+                    _ => STATUS_OPEN.to_string(),
                 },
             })
             .collect())
@@ -313,10 +336,13 @@ fn new_id(kind: Kind) -> String {
     format!("{prefix}{}", hex::encode(bytes))
 }
 
+/// One stored row: id, session, kind, content, status.
+type Row = (String, String, String, String, String);
+
 /// An in-memory store, for tests.
 #[derive(Default)]
 pub struct MemoryStore {
-    items: std::sync::Mutex<Vec<(String, String, String, String)>>,
+    items: std::sync::Mutex<Vec<Row>>,
     next: std::sync::atomic::AtomicU64,
 }
 
@@ -338,6 +364,7 @@ impl Store for MemoryStore {
             session_id.to_string(),
             kind.as_str().to_string(),
             content.to_string(),
+            STATUS_OPEN.to_string(),
         ));
         Ok(id)
     }
@@ -360,31 +387,52 @@ impl Store for MemoryStore {
         Err(Error::NotFound(id.to_string()))
     }
 
-    async fn complete(&self, _session_id: &str, _kind: Kind, _id: &str) -> Result<()> {
-        Ok(())
+    async fn complete(&self, session_id: &str, kind: Kind, id: &str) -> Result<()> {
+        let mut items = self.items.lock().unwrap();
+        for item in items.iter_mut() {
+            if item.0 == id && item.1 == session_id && item.2 == kind.as_str() {
+                item.4 = STATUS_DONE.to_string();
+                return Ok(());
+            }
+        }
+        Err(Error::NotFound(id.to_string()))
     }
 
     async fn drop_item(&self, session_id: &str, kind: Kind, id: &str) -> Result<()> {
         let mut items = self.items.lock().unwrap();
-        let before = items.len();
-        items.retain(|item| !(item.0 == id && item.1 == session_id && item.2 == kind.as_str()));
-        if items.len() == before {
-            return Err(Error::NotFound(id.to_string()));
+        for item in items.iter_mut() {
+            if item.0 == id && item.1 == session_id && item.2 == kind.as_str() {
+                item.4 = STATUS_DROPPED.to_string();
+                return Ok(());
+            }
         }
-        Ok(())
+        Err(Error::NotFound(id.to_string()))
     }
 
     async fn open(&self, session_id: &str) -> Result<Vec<Item>> {
+        self.list(session_id, Some(STATUS_OPEN))
+    }
+
+    async fn all(&self, session_id: &str) -> Result<Vec<Item>> {
+        self.list(session_id, None)
+    }
+}
+
+impl MemoryStore {
+    fn list(&self, session_id: &str, status: Option<&str>) -> Result<Vec<Item>> {
         Ok(self
             .items
             .lock()
             .unwrap()
             .iter()
-            .filter(|item| item.1 == session_id)
+            .filter(|item| {
+                item.1 == session_id && status.map(|want| item.4 == want).unwrap_or(true)
+            })
             .map(|item| Item {
                 id: item.0.clone(),
                 kind: item.2.clone(),
                 content: item.3.clone(),
+                status: item.4.clone(),
             })
             .collect())
     }

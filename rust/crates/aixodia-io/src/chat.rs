@@ -139,6 +139,10 @@ pub trait ChatSink: Send {
         let _ = text;
         Ok(())
     }
+    /// The window dropped whole turns to make this request fit.
+    fn on_compact(&mut self, report: &aixodia_session::Compacted) {
+        let _ = report;
+    }
     fn on_stored(&mut self, rows: &[Turn], error: Option<&str>) {
         let _ = (rows, error);
     }
@@ -809,6 +813,18 @@ impl ChatSink for SseSink {
         Ok(())
     }
 
+    fn on_compact(&mut self, report: &aixodia_session::Compacted) {
+        write_sse(
+            &self.tx,
+            &json!({"tool_event": {
+                "stage": "compact", "round": self.open_round,
+                "kept_turns": report.kept_turns as i64,
+                "dropped_turns": report.dropped_turns as i64,
+                "summary": report.summary,
+            }}),
+        );
+    }
+
     fn on_tool_result(&mut self, call: &ToolCall, text: &str, duration_ms: i64, is_error: bool) {
         self.durations
             .lock()
@@ -968,9 +984,12 @@ impl Gateway {
         let mut round: i64 = 0;
         while round < MAX_TOOL_ROUNDS {
             lock_sink(sink).on_request(round + 1, STATE_WAITING);
-            let (messages, whole) = self
+            let (messages, whole, compaction) = self
                 .prepare_messages(&conversation, window, &options.session_id, &mut remind)
                 .await;
+            if let Some(report) = compaction {
+                lock_sink(sink).on_compact(&report);
+            }
             conversation = messages.clone();
             let request = build_request(&current, &messages, options, sink, true);
 
@@ -1091,9 +1110,12 @@ impl Gateway {
             });
             let extra_round = MAX_TOOL_ROUNDS + 1;
             lock_sink(sink).on_request(extra_round, STATE_WAITING);
-            let (messages, _) = self
+            let (messages, _, compaction) = self
                 .prepare_messages(&conversation, window, &options.session_id, &mut remind)
                 .await;
+            if let Some(report) = compaction {
+                lock_sink(sink).on_compact(&report);
+            }
             let request = build_request(&current, &messages, options, sink, false);
 
             let call_started = Instant::now();

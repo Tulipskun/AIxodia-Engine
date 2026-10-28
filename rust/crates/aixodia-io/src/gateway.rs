@@ -44,7 +44,7 @@ pub const REQUEST_MAX_BODY: usize = 8 << 20;
 
 /// The release tag, baked in at build time. Bump on every release so a live
 /// service can be identified via `GET /healthz`.
-pub const VERSION: &str = "v1.159";
+pub const VERSION: &str = "v1.160";
 
 /// The rule a client-supplied draft id has to follow, as a readable pattern.
 pub const SESSION_ID_PATTERN: &str = "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$";
@@ -299,6 +299,7 @@ impl Gateway {
                     .patch(update_session),
             )
             .route("/v1/sessions/:id/turns", get(get_session_turns))
+            .route("/v1/sessions/:id/objectives", get(get_session_objectives))
             .route("/v1/chat/completions", post(crate::chat::chat))
             .merge(self.register_api())
             // The gateway checks the request size itself, with the same
@@ -585,6 +586,36 @@ async fn get_session_turns(
             StatusCode::OK,
             json!({"turns": turns.iter().map(turn_json).collect::<Vec<_>>()}),
         ),
+        Err(err) => write_error(StatusCode::BAD_GATEWAY, "database_error", &err.to_string()),
+    }
+}
+
+/// Every goal and plan of one chat, with its status, for the app's goals card.
+async fn get_session_objectives(State(g): State<Arc<Gateway>>, Path(id): Path<String>) -> Response {
+    let Some(store) = g.objective_store() else {
+        return write_json(StatusCode::OK, json!({"goals": [], "plans": []}));
+    };
+    match store.all(&id).await {
+        Ok(items) => {
+            let row = |item: &aixodia_goals::Item| {
+                json!({
+                    "id": item.id,
+                    "content": item.content,
+                    "status": item.status,
+                })
+            };
+            let goals: Vec<_> = items
+                .iter()
+                .filter(|item| item.kind == aixodia_goals::Kind::Goal.as_str())
+                .map(row)
+                .collect();
+            let plans: Vec<_> = items
+                .iter()
+                .filter(|item| item.kind == aixodia_goals::Kind::Plan.as_str())
+                .map(row)
+                .collect();
+            write_json(StatusCode::OK, json!({"goals": goals, "plans": plans}))
+        }
         Err(err) => write_error(StatusCode::BAD_GATEWAY, "database_error", &err.to_string()),
     }
 }
