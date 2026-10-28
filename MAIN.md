@@ -1,6 +1,13 @@
 GOAL:
-[IN_PROCESS] Diagnose why the operator cannot use the app end to end, fix the
-            root cause, then commit, push, deploy and cut the release
+[COMPLETED] Diagnose why the operator cannot use the app end to end and fix it:
+            (1) a keyless provider's catalog now parses the bare-array shape and
+            reports reachable; (2) keyless 429/402 retries 3/8/20s and no longer
+            opens the breaker; (3) a new route-less chat answers from the saved
+            main; (4) self-update refuses a stale CDN payload by published size
+            and sha256 digest instead of recording it as applied. Shipped
+            719b047, ddb8730, 607930d, 808a504; v1.156 is deployed (pid 176154)
+            and verified live on /v1/runs plus /v1/chat/completions with
+            AIxodia Free/openai-fast.
 [COMPLETED] Make the keyless Opencode provider answer by matching the official
             client's request contract — no opencode CLI invocation, no key
 [COMPLETED] Deployed and verified on this host: the released build (commit
@@ -453,3 +460,38 @@ NOTE:
   stale bytes. VERSION v1.156. Re-running the gate.
 - Gate 2026-10-28T02:00Z: v1.156 fmt/clippy/tests green (workspace exit 0, 32
   suites ok, both stale-payload tests pass). Committing and pushing.
+- Ship 2026-10-28T02:01Z: pushed 808a504 (digest verification, v1.156). Watching
+  its CI and Release; the deploy will install this asset through the GitHub API
+  endpoint, which is not CDN-cached.
+- Note 2026-10-28T02:02Z: CI 40618287842 and Release 40618287817 are running for
+  808a504; watching both in the background.
+- Note 2026-10-28T02:03Z: waiting for Release 40618287817; next action is the
+  API-asset install, restart, and a v1.156 live check (healthz, providers
+  refresh, route-less run) before the final report.
+- Ship 2026-10-28T02:09Z: CI 40618287842 and Release 40618287817 (808a504)
+  succeeded; asset 683528261, 17,727,488 bytes, digest
+  sha256:96b08726…3bb5. Fetching it through the API asset endpoint, verifying
+  size and digest, then installing over the target and starting the daemon.
+- Deploy 2026-10-28T02:10Z: the API download matches the published digest and
+  size. Stopping the daemon (pid 164167), installing v1.156, recording the state
+  timestamp, and starting.
+- Deploy 2026-10-28T02:11Z: engine restarted as pid 176154 on v1.156; new
+  quick-tunnel https://weekends-variety-cumulative-send.trycloudflare.com.
+  Verifying healthz locally and publicly, then refreshing the AIxodia Free probe
+  and running the phone's /v1/runs path once.
+- Verify 2026-10-28T02:12Z: v1.156 answers /healthz locally and through the new
+  tunnel; AIxodia Free refresh is reachable=true/model_count=1/openai-fast.
+  Running a fresh route-less session through POST /v1/runs to mirror the phone.
+- Verify 2026-10-28T02:13Z: run_1d0f36e000236943 on a fresh route-less session
+  finished status=done, answer turn id 1397 "FINAL OK" on openai-fast via the
+  settings-main fallback. Cleaning up the two probe sessions and confirming the
+  daemon url was saved for the new tunnel.
+- Cleanup 2026-10-28T02:14Z: the new tunnel url was published ("daemon url
+  saved" 02:08:12Z), and DELETE /v1/sessions/:id exists. Deleting only the two
+  test sessions this work created (probe1793151622, final1793153297).
+- Close 2026-10-28T02:15Z: v1.156 deployed and verified; test sessions removed.
+  AIxodia Free probe reachable=true, 1 model; Opencode still unreachable because
+  its free tier answers 402/429 (unchanged, and the breaker no longer latches on
+  it). The three chats with unanswered questions were repointed to
+  AIxodia Free/openai-fast, and the new tunnel url is saved in D1. Committing
+  this log with [skip ci] so the docs push does not trigger another release.
