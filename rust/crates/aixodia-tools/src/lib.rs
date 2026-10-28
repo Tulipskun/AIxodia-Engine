@@ -2,8 +2,9 @@
 //!
 //! Port of the declaration half of the Go `tools` package. The declarations are
 //! what the model and the OpenCode free-tier gate see, so they are ported first
-//! and kept verbatim; execution (`shell`, `read`, `edit`, `write`,
-//! `current_time`, `fetch_url`) is the next milestone in `rust/MILESTONES.md`.
+//! and kept verbatim; execution (`shell`, `set_directory`, `read`, `edit`,
+//! `write`, `current_time`, `fetch_url`) is the next milestone in
+//! `rust/MILESTONES.md`.
 //!
 //! `builtin()` is the hook the opencode adapter injects through
 //! `Adapter::with_builtin`, which keeps the layering acyclic: tools depends on
@@ -26,9 +27,10 @@ fn shell_def() -> ToolDef {
         name: "shell".to_string(),
         description: "Executes a given shell command in a persistent shell session with optional timeout, \
             ensuring proper handling and security measures.\n\nBe aware: OS: linux, Shell: sh\n\n\
-            All commands run in the current working directory by default. Use the `workdir` parameter if you \
-            need to run a command in a different directory. AVOID using `cd <directory> && <command>` patterns - \
-            use `workdir` instead.\n\nThe command argument is required. \
+            All commands run in the directory set with the `set_directory` tool for this chat, or in the home \
+            directory when none is set. Use the `workdir` parameter if you need a single command to run in a \
+            different directory. AVOID using `cd <directory> && <command>` patterns - use `set_directory` once \
+            for the project you are working in, or `workdir` for a one-off.\n\nThe command argument is required. \
             Output combines stdout and stderr; a non-zero exit is reported as `exit code N` after the output. \
             If the output is very large it is truncated."
             .to_string(),
@@ -49,6 +51,27 @@ fn shell_def() -> ToolDef {
                 }
             },
             "required": ["command"]
+        })),
+    }
+}
+
+fn set_directory_def() -> ToolDef {
+    ToolDef {
+        name: "set_directory".to_string(),
+        description: "Sets the working directory the `shell` tool uses for this chat, so commands stop \
+            needing a `cd` prefix. The path is resolved once — symlinks and `..` are followed — and must \
+            exist. It applies to every later `shell` call in this conversation, unless that call passes its \
+            own `workdir`. Pass an empty path to clear the setting and fall back to the home directory."
+            .to_string(),
+        parameters: params(json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute path of the directory the shell should run in. A relative path is resolved against the current shell directory. An empty string clears the setting."
+                }
+            },
+            "required": ["path"]
         })),
     }
 }
@@ -183,6 +206,7 @@ fn fetch_url_def() -> ToolDef {
 pub fn builtin() -> HashMap<String, ToolDef> {
     [
         ("shell", shell_def()),
+        ("set_directory", set_directory_def()),
         ("read", read_def()),
         ("edit", edit_def()),
         ("write", write_def()),
@@ -199,6 +223,7 @@ pub fn builtin_list() -> Vec<ToolDef> {
     let defs = builtin();
     [
         "shell",
+        "set_directory",
         "read",
         "edit",
         "write",
@@ -218,6 +243,7 @@ pub fn builtin_fn() -> aixodia_provider::opencode::BuiltinFn {
     std::sync::Arc::new(builtin)
 }
 
+pub mod dir;
 pub mod run;
 
 pub use aixodia_goals as goals;
@@ -255,6 +281,7 @@ mod tests {
             names,
             [
                 "shell",
+                "set_directory",
                 "read",
                 "edit",
                 "write",

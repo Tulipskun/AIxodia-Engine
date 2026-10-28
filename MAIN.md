@@ -1,4 +1,13 @@
 GOAL:
+[COMPLETED] Add a set_directory(path) tool so the shell runs where the chat
+            points it instead of a `cd` prefix on every command. The choice is
+            kept per session in aixodia-tools::dir (a global map keyed by
+            session_id), and run_shell prefers an explicit workdir, then that
+            directory, then HOME. An empty path clears it; a relative path
+            resolves against the directory already set; canonicalize rejects a
+            missing path or a plain file. Listed in builtin/builtin_list and
+            reachable through tools_with. fmt/clippy clean, aixodia-tools 17
+            passed, cargo check --workspace --all-targets green.
 [COMPLETED] Show the program's window title (OSC 0/2) in the terminal drawer
             header instead of nowhere. tmux swallows OSC 0/2, so the engine now
             reports #{pane_title} in /v1/terminals rows (tmux::list +

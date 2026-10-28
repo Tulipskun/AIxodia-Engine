@@ -1,5 +1,5 @@
-//! Tool execution: `shell`, `read`, `edit`, `write`, `current_time`,
-//! `fetch_url`, and the mirrored goal/plan tools.
+//! Tool execution: `shell`, `set_directory`, `read`, `edit`, `write`,
+//! `current_time`, `fetch_url`, and the mirrored goal/plan tools.
 //!
 //! Port of the execution half of the Go `tools` package.
 
@@ -108,8 +108,11 @@ pub fn tools_with(store: Option<Arc<dyn Store>>) -> std::collections::HashMap<St
     for (name, def) in crate::builtin() {
         let def = with_reason(def);
         let running = match name.as_str() {
-            "shell" => tool(def, |_, args| {
-                Box::pin(async move { run_shell(&args).await })
+            "shell" => tool(def, |ctx, args| {
+                Box::pin(async move { run_shell(&ctx, &args).await })
+            }),
+            "set_directory" => tool(def, |ctx, args| {
+                Box::pin(async move { set_directory(&ctx, &args).await })
             }),
             "read" => tool(def, |_, args| {
                 Box::pin(async move { read_file(&args).await })
@@ -400,7 +403,7 @@ struct ShellInput {
     workdir: String,
 }
 
-async fn run_shell(args: &str) -> Result<String> {
+async fn run_shell(ctx: &ToolContext, args: &str) -> Result<String> {
     let input: ShellInput = parse_args(args)?;
     if input.command.trim().is_empty() {
         bail!("command must not be empty");
@@ -416,10 +419,18 @@ async fn run_shell(args: &str) -> Result<String> {
         }
     }
 
+    // An explicit `workdir` is a one-off override; otherwise the directory the
+    // chat set with `set_directory` wins over the home directory.
+    let workdir = if input.workdir.trim().is_empty() {
+        crate::dir::get(&ctx.session_id)
+    } else {
+        Some(PathBuf::from(input.workdir.trim()))
+    };
+
     let mut command = tokio::process::Command::new("sh");
     command.arg("-c").arg(&input.command);
-    if !input.workdir.trim().is_empty() {
-        command.current_dir(input.workdir.trim());
+    if let Some(workdir) = workdir {
+        command.current_dir(workdir);
     } else if let Some(home) = home_dir() {
         if home.is_dir() {
             command.current_dir(home);
@@ -496,6 +507,54 @@ fn floor_char_boundary(text: &str, mut index: usize) -> usize {
         index -= 1;
     }
     index
+}
+
+// ------------------------------------------------------------- set_directory
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct SetDirectoryInput {
+    path: String,
+}
+
+async fn set_directory(ctx: &ToolContext, args: &str) -> Result<String> {
+    let input: SetDirectoryInput = parse_args(args)?;
+    let raw = input.path.trim();
+    if raw.is_empty() {
+        crate::dir::clear(&ctx.session_id);
+        return Ok(
+            "shell working directory cleared; commands run in the home directory again".to_string(),
+        );
+    }
+
+    // A relative path is read as relative to where the shell already is, which
+    // is what the model means when it says "go one level up".
+    let wanted = Path::new(raw);
+    let candidate = if wanted.is_absolute() {
+        wanted.to_path_buf()
+    } else {
+        let base = crate::dir::get(&ctx.session_id)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("/"));
+        base.join(wanted)
+    };
+
+    // Canonicalising resolves `..` and symlinks and fails when nothing is
+    // there, so the shell never starts in a directory that cannot exist.
+    let resolved = tokio::fs::canonicalize(&candidate)
+        .await
+        .with_context(|| format!("cannot use {raw} as a working directory"))?;
+    let meta = tokio::fs::metadata(&resolved)
+        .await
+        .with_context(|| format!("cannot stat {}", resolved.display()))?;
+    if !meta.is_dir() {
+        bail!("{raw} is not a directory");
+    }
+    crate::dir::set(&ctx.session_id, &resolved);
+    Ok(format!(
+        "shell working directory set to {}",
+        resolved.display()
+    ))
 }
 
 // ---------------------------------------------------------------------- read
@@ -1046,25 +1105,93 @@ mod tests {
 
     #[tokio::test]
     async fn shell_combines_output_and_reports_the_exit_code() {
-        let out = run_shell(r#"{"command":"echo hello"}"#)
+        let ctx = ToolContext::default();
+        let out = run_shell(&ctx, r#"{"command":"echo hello"}"#)
             .await
             .expect("shell");
         assert_eq!(out, "hello\n");
-        let out = run_shell(r#"{"command":"echo oops; exit 3"}"#)
+        let out = run_shell(&ctx, r#"{"command":"echo oops; exit 3"}"#)
             .await
             .expect("shell");
         assert_eq!(out, "oops\nexit code 3");
-        assert!(run_shell(r#"{"command":""}"#).await.is_err());
+        assert!(run_shell(&ctx, r#"{"command":""}"#).await.is_err());
     }
 
     #[tokio::test]
     async fn shell_workdir_and_timeout() {
+        let ctx = ToolContext::default();
         let dir = std::env::temp_dir();
         let args = json!({"command": "pwd", "workdir": dir.to_string_lossy()}).to_string();
-        let out = run_shell(&args).await.expect("shell");
+        let out = run_shell(&ctx, &args).await.expect("shell");
         assert_eq!(out.trim(), dir.to_string_lossy());
-        let out = run_shell(r#"{"command":"sleep 2","timeout":1}"#).await;
+        let out = run_shell(&ctx, r#"{"command":"sleep 2","timeout":1}"#).await;
         assert!(out.is_err());
+    }
+
+    #[tokio::test]
+    async fn set_directory_points_the_shell_at_that_directory() {
+        let dir = std::env::temp_dir().join(format!("aixodia-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let want = std::fs::canonicalize(&dir).expect("canonical");
+        let ctx = ToolContext {
+            session_id: "cwd-session".to_string(),
+            store: None,
+        };
+
+        let args = json!({"path": dir.to_string_lossy()}).to_string();
+        let out = set_directory(&ctx, &args).await.expect("set");
+        assert!(out.contains(&want.display().to_string()), "{out}");
+
+        let out = run_shell(&ctx, r#"{"command":"pwd"}"#)
+            .await
+            .expect("shell");
+        assert_eq!(out.trim(), want.display().to_string());
+
+        // An explicit workdir still wins for that one call.
+        let elsewhere = json!({"command": "pwd", "workdir": "/"}).to_string();
+        assert_eq!(
+            run_shell(&ctx, &elsewhere).await.expect("shell").trim(),
+            "/"
+        );
+
+        // A relative path is read against the directory already set.
+        std::fs::create_dir_all(want.join("nested")).expect("mkdir");
+        set_directory(&ctx, r#"{"path":"nested"}"#)
+            .await
+            .expect("relative");
+        let out = run_shell(&ctx, r#"{"command":"pwd"}"#)
+            .await
+            .expect("shell");
+        assert_eq!(out.trim(), want.join("nested").display().to_string());
+
+        // Another session is untouched.
+        let other = ToolContext {
+            session_id: "cwd-other".to_string(),
+            store: None,
+        };
+        assert!(crate::dir::get(&other.session_id).is_none());
+
+        // An empty path clears the setting.
+        set_directory(&ctx, r#"{"path":""}"#).await.expect("clear");
+        assert!(crate::dir::get(&ctx.session_id).is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn set_directory_refuses_files_and_missing_paths() {
+        let dir = std::env::temp_dir().join(format!("aixodia-cwd-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let file = dir.join("f.txt");
+        std::fs::write(&file, "x").expect("write");
+        let ctx = ToolContext::default();
+
+        let args = json!({"path": file.to_string_lossy()}).to_string();
+        assert!(set_directory(&ctx, &args).await.is_err());
+        let args = json!({"path": dir.join("nope").to_string_lossy()}).to_string();
+        assert!(set_directory(&ctx, &args).await.is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
@@ -1224,6 +1351,7 @@ mod tests {
         let tools = tools_with(None);
         for name in [
             "shell",
+            "set_directory",
             "read",
             "edit",
             "write",
