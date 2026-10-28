@@ -576,3 +576,16 @@ NOTE:
   proxy is set, so this is the anonymous daily quota, not a contract mismatch.
   The app keeps working on AIxodia Free; Opencode from this host unlocks with a
   stored key (POST /api/providers/Opencode/keys {"add":[…]}) or after the reset.
+- Question 2026-10-28T02:38Z (operator): "ลองเปลี่ยน ip ได้มั้ย" — whether the
+  free-limit is IP-bound and whether another egress is available here. Checking
+  the host for proxies, VPN tools and IPv6 before answering; any alternate
+  network must be one the operator supplies, and this is diagnosis, not a
+  standing way around the provider's quota.
+- Answer 2026-10-28T02:39Z: the host is a single-interface container whose egress
+  is 34.75.4.47 (GCP); no IPv6, no VPN/proxy tools, and no proxy env beyond the
+  IDE's internal ones. So this daemon cannot change its IP by itself — and that
+  shared cloud IP is the plausible reason the anonymous free quota is spent
+  while the operator's CLI at home still answers. With an operator-supplied
+  HTTPS/SOCKS proxy or WireGuard config the engine could egress elsewhere (one
+  diagnostic probe, not a rotating-IP scheme); the durable alternatives are an
+  OpenCode Go key or running the daemon on the operator's own network.
