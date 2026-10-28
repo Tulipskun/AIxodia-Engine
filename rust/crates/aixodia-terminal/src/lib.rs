@@ -65,6 +65,10 @@ struct Session {
     start: u64,
     shell: String,
     dir: String,
+    /// The shell process this session *is*. Under tmux that is the pane's shell,
+    /// not the tmux client the pty actually runs, so the number a tab was opened
+    /// with survives a detach and an engine restart.
+    shell_pid: AtomicI32,
     cols: AtomicU16,
     rows: AtomicU16,
     created_at: i64,
@@ -80,7 +84,7 @@ struct Session {
 
 impl Session {
     fn pid(&self) -> i32 {
-        self.pty.pid()
+        self.shell_pid.load(Ordering::SeqCst)
     }
 
     fn send(&self, frame: Frame) {
@@ -380,13 +384,22 @@ impl Server {
             Pty::start(&shell, &["-l".to_string()], cols, rows, Some(&dir))?
         };
         let p = Arc::new(p);
-        let start = process_start(p.pid()).unwrap_or(0);
+        // The pid the app is told about is the shell's, not the connection's:
+        // under tmux the pty holds a client that is recreated on every attach,
+        // while the pane's shell keeps the pid the tab was opened with.
+        let pid = if self.tmux {
+            tmux::pane_pid(id).unwrap_or_else(|| p.pid())
+        } else {
+            p.pid()
+        };
+        let start = process_start(pid).unwrap_or(0);
         let session = Arc::new(Session {
             id: id.to_string(),
             pty: p,
             start,
             shell,
             dir,
+            shell_pid: AtomicI32::new(pid),
             cols: AtomicU16::new(cols),
             rows: AtomicU16::new(rows),
             created_at: now_unix(),
@@ -811,6 +824,12 @@ async fn close(
         .cloned();
     if let Some(session) = session {
         server.drop_session(&id, &session);
+    } else if server.tmux {
+        // Nothing in memory is not nothing on the machine. An engine restart
+        // empties the map while the tmux server keeps the shell, so a close that
+        // only looked in the map reported success and left the shell alive —
+        // and the next list handed the phone back a tab it had closed.
+        tmux::kill(&id);
     }
     StatusCode::NO_CONTENT.into_response()
 }

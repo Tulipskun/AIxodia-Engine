@@ -50,6 +50,46 @@ pub struct TmuxSession {
     pub created_at: i64,
 }
 
+/// The pid of the shell inside a tmux session.
+///
+/// The engine's pty runs a tmux *client*, so its pid is a property of one
+/// connection: it changes on every attach and dies when the client detaches. The
+/// pane's pid is the shell itself, and it is the same number before and after an
+/// engine restart, which is what lets a tab keep naming one process.
+///
+/// The session is created by the server while the client is still starting up, so
+/// a query that lands too early says nothing yet. Retries are bounded: the caller
+/// falls back rather than waiting on a session that is not there.
+pub fn pane_pid(id: &str) -> Option<i32> {
+    let name = tmux_name(id);
+    for attempt in 0..10 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let output = Command::new("tmux")
+            .args([
+                "-L",
+                TMUX_SOCKET,
+                "display-message",
+                "-p",
+                "-t",
+                &name,
+                "#{pane_pid}",
+            ])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        match text.trim().parse::<i32>() {
+            Ok(pid) if pid > 0 => return Some(pid),
+            _ => continue,
+        }
+    }
+    None
+}
+
 /// Sessions that survived an engine restart.
 pub fn list() -> Vec<TmuxSession> {
     let output = Command::new("tmux")

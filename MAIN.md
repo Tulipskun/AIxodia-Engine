@@ -48,6 +48,16 @@ GOAL:
 [COMPLETED] Fix non-login mode: a built-in free provider that works without the opencode CLI
             (keyless round trip answers; a multi-round tool turn can still hit the
             free tier's serialized 1-req/IP throttle, see NOTE)
+[IN_PROCESS] Fix the terminal's pid across an engine stop/restart: a tmux-backed
+            session reported the pid of the tmux *client* its pty runs, which is
+            replaced on every attach, so the phone's tab changed pid after a
+            restart even though the shell behind it never did. The engine now
+            reports the pane's pid (tmux::pane_pid) as the session's pid.
+[IN_PROCESS] Fix a closed terminal tab coming back: DELETE /v1/terminals/:id only
+            looked in the in-memory map, and a restarted engine has an empty map,
+            so it answered 204 while the tmux server kept the shell alive — this
+            host still holds three such shells (aix-t-5b864fae…, aix-t-c14dbc89…,
+            aix-t-eb544588…). The close now kills the tmux session too.
 
 PLAN:
 [COMPLETED] Byte-diffed fresh ClientHellos: the engine's wreq hello now matches
