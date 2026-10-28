@@ -2375,3 +2375,17 @@ async fn a_new_session_without_a_route_uses_the_saved_main() {
     assert_eq!(status, StatusCode::OK, "body = {body}");
     assert!(body.contains("done"), "body = {body}");
 }
+
+#[tokio::test]
+async fn a_daemon_with_no_stored_settings_defaults_to_the_keyless_opencode() {
+    let _guard = config_lock().lock().unwrap();
+    let (gateway, _upstream) = new_test_gateway(Arc::new(MemStore::new())).await;
+    // An empty state store has never been told a main, so the built-in
+    // non-login provider is the route.
+    *gateway.state.write().unwrap() = Some(Arc::new(MemState::default()));
+    assert_eq!(
+        gateway.saved_main_model().await,
+        ("Opencode".to_string(), "big-pickle".to_string()),
+        "a fresh daemon must answer on the keyless built-in"
+    );
+}

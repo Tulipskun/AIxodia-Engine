@@ -371,33 +371,51 @@ pub async fn api_models(State(g): State<Arc<Gateway>>) -> Response {
 pub const SETTINGS_STATE_KEY: &str = "engine/settings";
 
 impl Gateway {
-    /// The provider/model saved in settings, or `("", "")` when nothing usable
-    /// is stored.
+    /// The provider/model saved in settings. When nothing is stored, or the
+    /// stored value names no route, this falls back to `default_main_model()` so
+    /// a fresh daemon routes to the built-in keyless provider instead of failing
+    /// for a model that settings never named.
     pub(crate) async fn saved_main_model(&self) -> (String, String) {
-        let Ok(Some(stored)) = self.stored_settings().await else {
-            return (String::new(), String::new());
+        let stored = match self.stored_settings().await {
+            Ok(Some(stored)) => stored,
+            _ => return default_main_model(),
         };
-        #[derive(Deserialize, Default)]
-        struct Main {
-            #[serde(default)]
-            provider: String,
-            #[serde(default)]
-            model: String,
-        }
-        #[derive(Deserialize, Default)]
-        struct Saved {
-            #[serde(default)]
-            main: Main,
-        }
-        match serde_json::from_str::<Saved>(&stored) {
+        let (provider, model) = match serde_json::from_str::<Saved>(&stored) {
             Ok(saved) => (saved.main.provider, saved.main.model),
-            Err(_) => (String::new(), String::new()),
+            Err(_) => default_main_model(),
+        };
+        if provider.trim().is_empty() && model.trim().is_empty() {
+            return default_main_model();
         }
+        (provider, model)
     }
 }
 
+/// The route a daemon with no stored settings answers with: the built-in
+/// non-login (keyless) provider and the model the official client defaults to.
+pub(crate) fn default_main_model() -> (String, String) {
+    let Ok(saved) = serde_json::from_str::<Saved>(&default_settings()) else {
+        return (String::new(), String::new());
+    };
+    (saved.main.provider, saved.main.model)
+}
+
+#[derive(Deserialize, Default)]
+struct Main {
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    model: String,
+}
+
+#[derive(Deserialize, Default)]
+struct Saved {
+    #[serde(default)]
+    main: Main,
+}
+
 pub fn default_settings() -> String {
-    r#"{"main":{"provider":"","model":"","generation":{}}}"#.to_string()
+    r#"{"main":{"provider":"Opencode","model":"big-pickle","generation":{}}}"#.to_string()
 }
 
 pub async fn api_get_settings(State(g): State<Arc<Gateway>>) -> Response {

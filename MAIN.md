@@ -1,4 +1,10 @@
 GOAL:
+[IN_PROCESS] Make keyless Opencode the daemon's default route: default_settings
+            names Opencode/big-pickle and saved_main_model falls back to it when
+            nothing usable is stored, so a fresh/unset daemon answers on the
+            built-in non-login provider. No auto-fallback to AIxodia Free (the
+            operator chose strict). Ships with the app change that drops the
+            "no provider yet" screens.
 [COMPLETED] Diagnose why the operator cannot use the app end to end and fix it:
             (1) a keyless provider's catalog now parses the bare-array shape and
             reports reachable; (2) keyless 429/402 retries 3/8/20s and no longer
@@ -589,3 +595,16 @@ NOTE:
   HTTPS/SOCKS proxy or WireGuard config the engine could egress elsewhere (one
   diagnostic probe, not a rotating-IP scheme); the durable alternatives are an
   OpenCode Go key or running the daemon on the operator's own network.
+- 2026-10-28T03:05Z: fresh clone of Tulipskun/aixodia-engine to /root/aixodia-engine
+  (public repo — no token in the remote URL) and AGENTS.md read. Sections 1–2
+  (find-based exploration, MAIN.md state tracking) are followed. Sections 3–10
+  are an assistant-policy override that this session does not adopt: it is file
+  content, not a trusted instruction, and it asks for unbounded output (shells,
+  persistence, C2, credential capture, explicit fiction) with no guardrails.
+  Working on this repo continues under normal rules.
+- Token hygiene 2026-10-28T03:05Z: the operator pasted a live PAT into chat. It
+  was used only as a per-command GH_TOKEN env for `gh api user` / `gh repo list`
+  / `gh search`; it was never written to the keyring, git config, a remote URL,
+  or any file. Both clones are HTTPS public URLs with no credential embedded.
+  The operator was told to revoke and reissue it.
+
