@@ -1,6 +1,9 @@
 GOAL:
-[IN_PROCESS] Make the keyless Opencode provider answer by matching the official
-             client's request contract — no opencode CLI invocation, no key
+[COMPLETED] Make the keyless Opencode provider answer by matching the official
+            client's request contract — no opencode CLI invocation, no key
+[COMPLETED] Deployed and verified on this host: the released build (commit
+            796ca63) answers "ENGINE OK" and streaming "STREAM OK" through
+            /v1/chat/completions on Opencode/big-pickle with no key
 [COMPLETED] Capture the CLI's real ClientHello (JA3) and the engine's current
             rustls ClientHello, and diff them
 [COMPLETED] Implement the matching TLS stack in aixodia-provider
@@ -9,8 +12,8 @@ GOAL:
 [COMPLETED] fmt/clippy/tests green (fmt 0, clippy 0, 168 tests), including new
             coverage for the anonymous token, env block, chat-first order, and
             null delta fields
-[IN_PROCESS] Commit, push, watch CI + Release, `aixodia update`, then verify a
-             real engine turn on the Opencode provider
+[COMPLETED] Commit, push, watch CI + Release, deploy, and verify a real engine
+            turn on the Opencode provider (both non-stream and stream)
 [COMPLETED] Close the open question from the last session: the official opencode
             client answers big-pickle on this host — twice in a row, rc=0 each
 [COMPLETED] Authenticate the GitHub CLI and clone Tulipskun/aixodia-engine
@@ -41,7 +44,7 @@ PLAN:
 [COMPLETED] Free tier rate-limits a burst with retry-after ~500s; after that
             even a valid body 429s, so the remaining integration tests must wait
             for the window to reset (NOTE)
-[IN_PROCESS] Wire the contract into the adapter: default key "public", 40-hex
+[COMPLETED] Wire the contract into the adapter: default key "public", 40-hex
             project id, env-block system message, chat completions first, and
             point the builtin at /inference/openai/v1
 [COMPLETED] Wired and proven: adapter prepends the env `<env>` block as its own
@@ -193,3 +196,22 @@ NOTE:
 - The app is Tulipskun/AIxodia (Android Kotlin native TerminalView, no xterm.js):
   its half of this fix is the built-in wording and the error mapping, commit
   3c34719.
+- Shipped 2026-10-28: 796ca63 pushed (git push needed the repo-local helper
+  `!gh auth git-credential`; HTTPS had no stored credential for the remote).
+  CI green in 5m18s; Release engine green in 7m33s, including the BoringSSL
+  aarch64 cross-build. Rolling release now serves the fixed build.
+- Deploy 2026-10-28: `aixodia update` timed out because the running engine
+  (started 19:46 under a parent that blocked SIGUSR1) had SIGUSR1 masked in
+  every thread, so the signal sat pending and handle_signal never ran. The
+  documented fallback worked: `aixodia-engine update` installed the published
+  build, then stop/start restarted into it. The fresh process has a zero mask,
+  so the next in-place update handshake works normally. Not a code bug.
+- Verification 2026-10-28 00:45Z, deployed engine pid 136612 (build published
+  00:34:36Z): Opencode/big-pickle answered keyless over /v1/chat/completions —
+  "ENGINE OK" (finish stop, 1688 prompt / 27 completion / 1715 total) and
+  "STREAM OK" as SSE deltas; builtin endpoint now
+  https://opencode.ai/inference/openai/v1.
+- In-place update mechanics: SIGUSR1 -> notify_update -> execve keeps the pid and
+  arguments; exec preserves a blocked signal mask (and ignored dispositions),
+  which is why the old process could never receive the signal after inheriting
+  that mask.
