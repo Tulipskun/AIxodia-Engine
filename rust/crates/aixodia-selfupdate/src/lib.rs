@@ -249,6 +249,21 @@ fn with_halves<R>(f: impl FnOnce(&mut Option<NeedFn>, &mut Option<ApplyFn>) -> R
     f(&mut need, &mut apply)
 }
 
+/// The published size is part of the asset metadata, and the download URL is
+/// served through a CDN that can still hand back the previous build after a
+/// clobber. A payload of the wrong length is stale, not a build to run:
+/// swapping it in would install old code and record the new release as applied,
+/// so nothing would ever retry it.
+fn verify_payload_size(release: &Release, got: usize) -> Result<()> {
+    if release.size <= 0 || got as i64 == release.size {
+        return Ok(());
+    }
+    Err(Error::DownloadStatus(format!(
+        "asset is {got} bytes but the release lists {} — the download served a stale build",
+        release.size
+    )))
+}
+
 /// Downloads `release` into `target` and swaps it into place, unless the
 /// published bytes are the running executable's. Returns whether `target` now
 /// holds a different binary.
@@ -265,6 +280,7 @@ pub async fn install(release: &Release, target: &str) -> Result<bool> {
     }
 
     let payload = response.bytes().await?.to_vec();
+    verify_payload_size(release, payload.len())?;
     let got = hex::encode(Sha256::digest(&payload));
 
     let current = current_sha256().unwrap_or_default();
@@ -666,6 +682,50 @@ mod tests {
         assert_eq!(mode, 0o755);
 
         assert_eq!(read_state(), rel.updated_at);
+    }
+
+    /// The outage this pins: after a clobbered asset upload the download URL
+    /// still served the previous build, whose bytes matched the running image,
+    /// so install() reported "already running" and recorded the new release as
+    /// applied. Wrong-length payloads must fail instead.
+    #[tokio::test]
+    async fn install_rejects_a_stale_payload_size() {
+        let _serial = serial();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", dir.path());
+
+        let payload = b"#!/bin/sh\necho new\n".to_vec();
+        let served = payload.clone();
+        let app = Router::new().route(
+            "/engine",
+            get(move || {
+                let served = served.clone();
+                async move { served }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let target = dir.path().join("aixodia-engine");
+        let old = b"#!/bin/sh\necho old\n";
+        fs::write(&target, old).unwrap();
+
+        let rel = Release {
+            url: format!("http://{addr}/engine"),
+            updated_at: "2026-10-21T00:00:00Z".to_string(),
+            size: payload.len() as i64 + 12_288,
+        };
+        let result = install(&rel, target.to_str().unwrap()).await;
+
+        assert!(result.is_err(), "a stale build must not install");
+        assert_eq!(fs::read(&target).unwrap(), old, "the binary was replaced");
+        assert!(
+            read_state().is_empty(),
+            "a stale download must not be recorded as applied"
+        );
     }
 
     /// A download that fails leaves the running binary alone.

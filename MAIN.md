@@ -297,3 +297,102 @@ NOTE:
   /api/providers/Opencode/refresh: reachable=true model_count=84
   working_model=big-pickle; /api/models lists all 84 with default big-pickle;
   a keyless turn on the new image answered "DEPLOY OK" (finish stop).
+- Note 2026-10-28T01:31Z: CI 40615342024 and Release engine 40615342141
+  (ddb8730) are in progress; the earlier 719b047 pair finished green. Once the
+  release publishes, deploy with `aixodia update` (SIGUSR1 in-place), verify
+  /healthz v1.154, AIxodia Free reachable=true with a non-empty catalog, and a
+  live keyless turn. Then repoint the two Opencode-pinned sessions
+  (smvrewph1b82d606f, smvr9cxmt46a31c68) to AIxodia Free/openai-fast through
+  PATCH /api/sessions/:id so the operator's current chat answers while the
+  Opencode free quota is exhausted; tell the operator about this change.
+- Ship 2026-10-28T01:36Z: CI 40615342024 and Release engine 40615342141 for
+  ddb8730 both succeeded; deploying with `aixodia update`.
+- Deploy 2026-10-28T01:39Z: `aixodia update` sent SIGUSR1; the launcher stopped
+  waiting after 180s, but /healthz answers `version: v1.154, update:
+  signal:USR1` on the same pid 136612 — the in-place handshake did land.
+- Verify 2026-10-28T01:41Z: /api/models lists AIxodia Free/openai-fast (1) and
+  Opencode (84, default big-pickle); /api/providers reports both unreachable,
+  which is the probe cache answering right after the restart — refreshing
+  AIxodia Free and re-reading.
+- Verify 2026-10-28T01:42Z: POST /api/providers/AIxodia%20Free/refresh answers
+  reachable=true model_count=1 working_model=openai-fast. Next: a live turn on a
+  fresh session with no route, to exercise the settings-main fallback and the
+  keyless path together (spacing the request ~30s after the probe).
+- Blocker 2026-10-28T01:44Z: the live turn on a route-less session still answers
+  "model is required", and the binary mtime is 01:34:17 — older than this
+  update, so the SIGUSR1 apply did not swap in ddb8730. `aixodia update` only
+  waited 180s and gave up. Running `aixodia-engine update` directly to see the
+  install result.
+- Note 2026-10-28T01:45Z: `aixodia-engine update` answers "already the published
+  build", so /usr/local/bin matches ddb8730 (exec preserves the old start time,
+  hence pid 136612 still shows 00:39). The missing piece is likely the settings
+  read: resolve_route swallows a state-store error into ("",""). Checking
+  /api/settings against the live engine next.
+- Note 2026-10-28T01:46Z: live /api/settings returns the expected main
+  (AIxodia Free/openai-fast), so the fallback has data. Comparing the running
+  image (/proc/136612/exe) against the on-disk binary to see whether the exec
+  actually swapped in ddb8730.
+- Note 2026-10-28T01:47Z: running image and on-disk binary hash equal
+  (0db5d203…), and ddb8730 is HEAD, yet the route-less turn still fails. Checking
+  for a second engine process/listener and then instrumenting the fallback path
+  instead of guessing.
+- Note 2026-10-28T01:48Z: only pid 136612 listens on 8787; the binary equals the
+  published asset. Reading the release workflow to confirm which ref it builds
+  from, since the observed behavior matches a pre-ddb8730 image.
+- Note 2026-10-28T01:49Z: the release workflow builds the pushed commit, so the
+  published asset is ddb8730. Re-reading the probe session's stored route and
+  retrying the route-less turn once, to separate a stale-session artifact from a
+  real fallback bug.
+- Note 2026-10-28T01:50Z: probe session route is empty ("", "") exactly as
+  expected, yet the fallback is absent at runtime. Verifying the published asset
+  itself: release updated_at, asset hash, and the ddb8730 diff for chat.rs.
+- Discovery 2026-10-28T01:51Z: published amd64 asset is 17,715,200 bytes
+  (updated 01:35:50Z) while the on-disk binary is 17,702,912 bytes — different
+  builds. Yet `aixodia-engine update` reports "already the published build".
+  Reading install()/need_update() to see why the comparison misses.
+- Note 2026-10-28T01:52Z: need_update keys off ~/.aixodia/selfupdate.state, so
+  "already published" only means the state timestamp matches. Reading that file,
+  the rest of install()/apply(), and the engine log to see where the 01:36
+  handshake stopped.
+- Note 2026-10-28T01:53Z: the state file names ddb8730's 01:35:50Z release, yet
+  the target file is the older, smaller image — so either the download served
+  stale bytes or the launcher's update path is involved. Reading the launcher
+  and the engine log around the 01:36 handshake.
+- Note 2026-10-28T01:54Z: reading ~/.aixodia/aixodia.log around 01:36–01:39 to
+  see what the update handler did after the launcher's SIGUSR1.
+- Root cause 2026-10-28T01:55Z: engine log line 01:36:26 "installing the build
+  published=2026-10-28T01:35:50Z" was followed by install() seeing downloaded
+  bytes equal to the running (719b047) image — the GitHub asset CDN served the
+  previous build at the clobbered URL. install() then wrote selfupdate.state and
+  returned Ok(false), so no exec, and every later need_update says "already the
+  published build". Fix: install() must reject a payload whose length differs
+  from release.size before trusting a hash match, and only then record state.
+  Ship plan: (A) install the fresh ddb8730 asset with a cache-busting fetch and
+  restart so the operator works now; (B) add the size guard + test, bump v1.155,
+  release, deploy.
+- Fix 2026-10-28T01:56Z: step A — fetch the ddb8730 asset through the GitHub API
+  asset endpoint (no CDN-cached browser URL), verify size 17,715,200, stop the
+  engine, swap it in, and start so the operator has a working daemon now.
+- Fix 2026-10-28T01:57Z: the API-asset download is the ddb8730 build
+  (17,715,200 bytes, sha c0e24c70…, distinct from the stale 0db5d203… on disk).
+  Stopping, installing it, and starting the daemon.
+- Fix 2026-10-28T01:58Z: daemon restarted as pid 164167 on the new image; new
+  quick-tunnel URL https://robust-asian-buyer-cents.trycloudflare.com. Verifying
+  healthz v1.154 and a route-less turn, which must now answer through the
+  settings-main fallback.
+- Verify 2026-10-28T01:59Z: healthz v1.154 on pid 164167; a route-less turn on
+  the fresh session answered model=openai-fast text="DEPLOY OK" in 13.7s, so
+  both the fallback and the keyless path work live. Next: repoint the two
+  Opencode-pinned chats to AIxodia Free/openai-fast through the session PATCH.
+- Fix 2026-10-28T02:00Z: both Opencode-pinned sessions now answer
+  {"provider":"AIxodia Free","model":"openai-fast","pinned":true}. Moving to
+  step B: harden install() against the stale-CDN payload that caused this
+  outage, with a size check against release.size and a unit test.
+- Gate 2026-10-28T02:01Z: install() now calls verify_payload_size before the
+  hash comparison and refuses a wrong-length payload without writing state;
+  new test install_rejects_a_stale_payload_size (local server serves bytes,
+  release.size is 12,288 larger, target must survive and state stay empty);
+  VERSION v1.155. Running fmt/clippy/test.
+- Gate 2026-10-28T02:04Z: fmt clean after reformat; clippy exit 0; full
+  workspace tests exit 0; install_rejects_a_stale_payload_size passes.
+  Committing and pushing v1.155.
