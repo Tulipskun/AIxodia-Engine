@@ -3,10 +3,13 @@
 //! Port of the engine's Go `provider/openai` package.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, Result};
 use base64::Engine as _;
+use bytes::Bytes;
+use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -46,6 +49,10 @@ pub struct Adapter {
     pub header_func: Option<HeaderFn>,
     /// Overrides the shared HTTP client.
     pub client: Option<reqwest::Client>,
+    /// When set, every request goes through this BoringSSL client instead.
+    /// The Opencode adapter uses it to present the official client's
+    /// ClientHello; the rest of the engine keeps reqwest.
+    tls_client: Option<wreq::Client>,
 }
 
 impl Adapter {
@@ -55,6 +62,11 @@ impl Adapter {
 
     pub fn with_header_func(mut self, header_func: HeaderFn) -> Self {
         self.header_func = Some(header_func);
+        self
+    }
+
+    pub(crate) fn with_tls_client(mut self, client: wreq::Client) -> Self {
+        self.tls_client = Some(client);
         self
     }
 
@@ -72,8 +84,9 @@ impl Adapter {
         let sent = self.send(req, prov, key, false).await?;
         let (status, raw) = match sent {
             Sent::Live(response) => {
-                let status = response.status().as_u16();
-                (status, read_up_to(response, 8 << 20).await?)
+                let response = *response;
+                let status = response.status();
+                (status, response.read(8 << 20).await?)
             }
             Sent::Buffered { status, raw } => (status, raw),
         };
@@ -93,15 +106,15 @@ impl Adapter {
     ) -> Result<Response> {
         let sent = self.send(req, prov, key, true).await?;
         let response = match sent {
-            Sent::Live(response) => response,
+            Sent::Live(response) => *response,
             Sent::Buffered { status, raw } => {
                 return Err(APIError::new(status, error_message(&raw)).into_anyhow());
             }
         };
 
-        let status = response.status().as_u16();
+        let status = response.status();
         if !(200..300).contains(&status) {
-            let raw = read_up_to(response, 1 << 20).await?;
+            let raw = response.read(1 << 20).await?;
             return Err(APIError::new(status, error_message(&raw)).into_anyhow());
         }
 
@@ -111,7 +124,7 @@ impl Adapter {
         let mut reasoning = String::new();
         let mut finish = String::new();
 
-        read_sse(response.bytes_stream(), |data| {
+        read_sse(response.into_stream(), |data| {
             if data == "[DONE]" {
                 return Ok(());
             }
@@ -139,28 +152,36 @@ impl Adapter {
                 if let Some(reason) = &choice.finish_reason {
                     finish = reason.clone();
                 }
-                if !choice.delta.content.is_empty() {
-                    text.push_str(&choice.delta.content);
-                }
-                if !choice.delta.reasoning_content.is_empty() {
-                    reasoning.push_str(&choice.delta.reasoning_content);
-                    if let Some(on_reasoning) = &req.on_reasoning {
-                        on_reasoning(&choice.delta.reasoning_content)?;
+                if let Some(content) = &choice.delta.content {
+                    if !content.is_empty() {
+                        text.push_str(content);
                     }
                 }
-                if !choice.delta.content.is_empty() {
-                    emit.emit(&choice.delta.content)?;
+                if let Some(reasoning_part) = &choice.delta.reasoning_content {
+                    if !reasoning_part.is_empty() {
+                        reasoning.push_str(reasoning_part);
+                        if let Some(on_reasoning) = &req.on_reasoning {
+                            on_reasoning(reasoning_part)?;
+                        }
+                    }
                 }
-                for call in &choice.delta.tool_calls {
-                    let target = calls.entry(call.index).or_default();
-                    if !call.id.is_empty() {
-                        target.id = call.id.clone();
+                if let Some(content) = &choice.delta.content {
+                    if !content.is_empty() {
+                        emit.emit(content)?;
                     }
-                    if !call.function.name.is_empty() {
-                        target.name = call.function.name.clone();
-                    }
-                    if !call.function.arguments.is_empty() {
-                        target.arguments.push_str(&call.function.arguments);
+                }
+                if let Some(tool_calls) = &choice.delta.tool_calls {
+                    for call in tool_calls {
+                        let target = calls.entry(call.index).or_default();
+                        if !call.id.is_empty() {
+                            target.id = call.id.clone();
+                        }
+                        if !call.function.name.is_empty() {
+                            target.name = call.function.name.clone();
+                        }
+                        if !call.function.arguments.is_empty() {
+                            target.arguments.push_str(&call.function.arguments);
+                        }
                     }
                 }
             }
@@ -186,19 +207,19 @@ impl Adapter {
     async fn send(&self, req: &Request, prov: &Provider, key: &str, stream: bool) -> Result<Sent> {
         let body = serde_json::to_vec(&build_request(req, stream))?;
         let response = self.do_request(prov, key, &body).await?;
-        if response.status().as_u16() != 400 {
-            return Ok(Sent::Live(response));
+        if response.status() != 400 {
+            return Ok(Sent::Live(Box::new(response)));
         }
 
         let status = 400;
-        let raw = read_up_to(response, 1 << 20).await?;
+        let raw = response.read(1 << 20).await?;
         if !error_message(&raw).contains("reasoning_content") {
             return Ok(Sent::Buffered { status, raw });
         }
 
         let body = serde_json::to_vec(&build_request_with_reasoning(req, stream))?;
         let response = self.do_request(prov, key, &body).await?;
-        Ok(Sent::Live(response))
+        Ok(Sent::Live(Box::new(response)))
     }
 
     pub(crate) async fn do_request(
@@ -206,10 +227,10 @@ impl Adapter {
         prov: &Provider,
         key: &str,
         body: &[u8],
-    ) -> Result<reqwest::Response> {
+    ) -> Result<WireResponse> {
         let endpoint = endpoint(&prov.endpoint, "/v1/chat/completions", "/chat/completions")?;
         let response = self.post(&endpoint, key, body, "application/json").await?;
-        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        if response.status() == 429 {
             if let Some(hook) = ON_RATE_LIMITED.get() {
                 drop(response);
                 hook();
@@ -225,13 +246,31 @@ impl Adapter {
         key: &str,
         body: &[u8],
         accept: &str,
-    ) -> Result<reqwest::Response> {
-        let request = self
+    ) -> Result<WireResponse> {
+        let headers = self.headers(accept, key);
+        if let Some(client) = &self.tls_client {
+            let response = client
+                .post(endpoint)
+                .headers(headers)
+                .body(body.to_vec())
+                .send()
+                .await?;
+            return Ok(WireResponse::new(
+                response.status().as_u16(),
+                WireBody::Wreq(response),
+            ));
+        }
+        let response = self
             .client()
             .post(endpoint)
-            .headers(self.headers(accept, key))
-            .body(body.to_vec());
-        Ok(request.send().await?)
+            .headers(headers)
+            .body(body.to_vec())
+            .send()
+            .await?;
+        Ok(WireResponse::new(
+            response.status().as_u16(),
+            WireBody::Reqwest(response),
+        ))
     }
 
     /// Builds the outbound headers once. `header_func` entries **replace** the
@@ -283,14 +322,9 @@ impl Adapter {
     ) -> Result<Response> {
         let endpoint = endpoint(&prov.endpoint, "/v1/responses", "/responses")?;
         let body = serde_json::to_vec(&build_responses_request(req, false))?;
-        let request = self
-            .client()
-            .post(&endpoint)
-            .headers(self.headers("application/json", key))
-            .body(body);
-        let response = request.send().await?;
-        let status = response.status().as_u16();
-        let raw = read_up_to(response, 8 << 20).await?;
+        let response = self.post(&endpoint, key, &body, "application/json").await?;
+        let status = response.status();
+        let raw = response.read(8 << 20).await?;
         if !(200..300).contains(&status) {
             return Err(APIError::new(status, error_message(&raw)).into_anyhow());
         }
@@ -324,15 +358,12 @@ impl Adapter {
     ) -> Result<Response> {
         let endpoint = endpoint(&prov.endpoint, "/v1/responses", "/responses")?;
         let body = serde_json::to_vec(&build_responses_request(req, true))?;
-        let request = self
-            .client()
-            .post(&endpoint)
-            .headers(self.headers("text/event-stream", key))
-            .body(body);
-        let response = request.send().await?;
-        let status = response.status().as_u16();
+        let response = self
+            .post(&endpoint, key, &body, "text/event-stream")
+            .await?;
+        let status = response.status();
         if !(200..300).contains(&status) {
-            let raw = read_up_to(response, 1 << 20).await?;
+            let raw = response.read(1 << 20).await?;
             return Err(APIError::new(status, error_message(&raw)).into_anyhow());
         }
 
@@ -345,7 +376,7 @@ impl Adapter {
         let mut finished = false;
         let mut cut_short = false;
 
-        read_sse(response.bytes_stream(), |data| {
+        read_sse(response.into_stream(), |data| {
             if data == "[DONE]" {
                 finished = true;
                 return Ok(());
@@ -441,9 +472,55 @@ impl Adapter {
 }
 
 enum Sent {
-    Live(reqwest::Response),
+    Live(Box<WireResponse>),
     Buffered { status: u16, raw: Vec<u8> },
 }
+
+/// One response from either HTTP stack.
+pub(crate) struct WireResponse {
+    status: u16,
+    body: WireBody,
+}
+
+enum WireBody {
+    Reqwest(reqwest::Response),
+    Wreq(wreq::Response),
+}
+
+impl WireResponse {
+    fn new(status: u16, body: WireBody) -> Self {
+        Self { status, body }
+    }
+
+    fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// Reads the body, keeping at most `limit` bytes.
+    async fn read(self, limit: usize) -> Result<Vec<u8>> {
+        let bytes = match self.body {
+            WireBody::Reqwest(response) => response.bytes().await?,
+            WireBody::Wreq(response) => response.bytes().await?,
+        };
+        Ok(bytes[..bytes.len().min(limit)].to_vec())
+    }
+
+    /// The body as a byte stream, for SSE.
+    fn into_stream(self) -> BodyStream {
+        match self.body {
+            WireBody::Reqwest(response) => response
+                .bytes_stream()
+                .map(|item| item.map_err(std::io::Error::other))
+                .boxed(),
+            WireBody::Wreq(response) => response
+                .bytes_stream()
+                .map(|item| item.map_err(std::io::Error::other))
+                .boxed(),
+        }
+    }
+}
+
+type BodyStream = Pin<Box<dyn Stream<Item = std::result::Result<Bytes, std::io::Error>> + Send>>;
 
 #[async_trait::async_trait]
 impl crate::types::Adapter for Adapter {
@@ -464,11 +541,6 @@ impl crate::types::Adapter for Adapter {
     ) -> Result<Response> {
         self.stream(req, prov, key, emit).await
     }
-}
-
-async fn read_up_to(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
-    let bytes = response.bytes().await?;
-    Ok(bytes[..bytes.len().min(limit)].to_vec())
 }
 
 // --- wire shapes ---------------------------------------------------------
@@ -631,12 +703,15 @@ struct ChunkChoice {
 
 #[derive(Deserialize, Default)]
 struct Delta {
+    // The provider spells an absent field as `null` in finish and reasoning
+    // chunks; a bare `String`/`Vec` rejects that and would drop the whole
+    // chunk, including its `finish_reason`.
     #[serde(default)]
-    content: String,
+    content: Option<String>,
     #[serde(default)]
-    reasoning_content: String,
+    reasoning_content: Option<String>,
     #[serde(default)]
-    tool_calls: Vec<DeltaToolCall>,
+    tool_calls: Option<Vec<DeltaToolCall>>,
 }
 
 #[derive(Deserialize, Default)]

@@ -1,4 +1,18 @@
 GOAL:
+[IN_PROCESS] Make the keyless Opencode provider answer by matching the official
+             client's request contract — no opencode CLI invocation, no key
+[COMPLETED] Capture the CLI's real ClientHello (JA3) and the engine's current
+            rustls ClientHello, and diff them
+[COMPLETED] Implement the matching TLS stack in aixodia-provider
+[COMPLETED] Prove a keyless Opencode round trip (adapter answers "PROBE OK" from
+            big-pickle with the app's own system prompt in place)
+[COMPLETED] fmt/clippy/tests green (fmt 0, clippy 0, 168 tests), including new
+            coverage for the anonymous token, env block, chat-first order, and
+            null delta fields
+[IN_PROCESS] Commit, push, watch CI + Release, `aixodia update`, then verify a
+             real engine turn on the Opencode provider
+[COMPLETED] Close the open question from the last session: the official opencode
+            client answers big-pickle on this host — twice in a row, rc=0 each
 [COMPLETED] Authenticate the GitHub CLI and clone Tulipskun/aixodia-engine
 [COMPLETED] Read AGENTS.md and follow its state-tracking protocol
 [COMPLETED] Ship the docs: commit MAIN.md, push, verify the rolling release
@@ -11,6 +25,55 @@ GOAL:
             free tier's serialized 1-req/IP throttle, see NOTE)
 
 PLAN:
+[COMPLETED] Byte-diffed fresh ClientHellos: the engine's wreq hello now matches
+            the CLI's exactly (JA3 md5 1523504b38f0fae0d881d4b6554aac1b, same
+            cipher/extension/groups/sigalgs/ALPN order; only random differs)
+[COMPLETED] The gate is not TLS alone: a local MITM that forwarded the CLI's own
+            request over Python TLS got the same 429, while the same body over
+            our BoringSSL client answered 200
+[COMPLETED] Captured the CLI's exact request via a trusted local CA: it posts
+            /inference/openai/v1/chat/completions with `Authorization: Bearer
+            public`, x-opencode-* headers, `stream_options.include_usage` and a
+            system prompt ending in an `<env>` block
+[COMPLETED] Replayed captured bodies through our client: chat/completions +
+            Bearer public + CLI system prompt (or a bare `<env>` block) answers
+            200; tiny/other-prompt bodies get 429 FreeUsageLimit
+[COMPLETED] Free tier rate-limits a burst with retry-after ~500s; after that
+            even a valid body 429s, so the remaining integration tests must wait
+            for the window to reset (NOTE)
+[IN_PROCESS] Wire the contract into the adapter: default key "public", 40-hex
+            project id, env-block system message, chat completions first, and
+            point the builtin at /inference/openai/v1
+[COMPLETED] Wired and proven: adapter prepends the env `<env>` block as its own
+            system turn, sends `Authorization: Bearer public` when keyless, a
+            40-hex project id, chat completions first, and the builtin now points
+            at https://opencode.ai/inference/openai/v1
+[COMPLETED] Fixed the parser bug the live stream exposed: the gateway sends
+            `content`/`tool_calls` as null on opening and finish chunks, and the
+            bare String/Vec made every such chunk fail to decode (empty answer)
+[COMPLETED] Tests updated for the measured contract (chat-first, Bearer public,
+            env block, null delta fields); temporary probe examples removed
+[COMPLETED] Tested whether the env block is accepted as a separate leading
+            system message (keeps AIxodia's own prompt): yes
+[COMPLETED] Env block as the leading separate system message is accepted with
+            the app's own system prompt following it: adapter answered PROBE OK
+[COMPLETED] Recon: no tcpdump/tshark on the host; AF_PACKET raw socket works
+            as root on eth0 (no HTTP proxy in the environment)
+[COMPLETED] Capture the CLI's ClientHello: BoringSSL, no GREASE, 17 ciphers
+            (1301-1302-1303-c02b-c02f-c02c-c030-cca9-cca8-c009-c013-c00a-c014-009c-009d-002f-0035),
+            ext order 0,23,65281,10,11,35,16,5,13,18,51,45,43(+41 on resume),
+            groups 11ec-1d-17-18, ALPN http/1.1 only, JA3 md5 ae5f2d34331c18f27df379f7d4b72e35
+[COMPLETED] wreq 0.16.1 chosen: reqwest-compatible surface over BoringSSL
+            (btls 0.5.6); TlsOptions confirmed to expose cipher_list,
+            curves_list, sigalgs_list, alpn_protocols, grease_enabled,
+            extension_permutation, session_ticket, renegotiation, OCSP/SCT and
+            min/max TLS version
+[COMPLETED] Wired the fingerprint into the engine: openai::Adapter now accepts an
+            optional wreq transport (WireResponse abstracts reqwest/wreq), and
+            opencode::fingerprint_client builds a BoringSSL client with the
+            captured ciphers/curves/sigalgs, ALPN http/1.1 only, no GREASE
+[COMPLETED] release.yml installs clang/libclang/cmake for bindgen and passes
+            CC_aarch64_unknown_linux_gnu/CXX_* so BoringSSL cross-builds
 [COMPLETED] gh auth login --with-token; verify account Tulipskun and scopes
 [COMPLETED] git clone https://github.com/Tulipskun/aixodia-engine (branch main)
 [COMPLETED] Read AGENTS.md (skills/main1: MAIN.md triggers, reading rules)
@@ -49,6 +112,15 @@ so suspect the WebView xterm.js client or a bytes path that mangles ESC[Z
 [COMPLETED] Gate green (fmt 0, clippy 0, 166 tests); commit be6fd2d pushed
 [COMPLETED] CI + Release engine green for be6fd2d; `aixodia update` swapped it in
             at 22:27:55Z (engine restarted, listening on 127.0.0.1:8787)
+[COMPLETED] Test `opencode run -m opencode/big-pickle` on this host: the official
+            client answers (legit relay path is real)
+[COMPLETED] Check host state: opencode v2.2.0 at /root/.opencode/bin/opencode;
+            engine healthy pid 3416 v1.153 idle=true
+[COMPLETED] Run one minimal prompt via the official CLI: `opencode run -m
+            opencode/big-pickle` answered "CLI OK", rc=0 — the client itself is
+            entitled, so the engine-side gate is client identity (as suspected)
+[COMPLETED] Second back-to-back call to measure the free tier's serialization
+            from the client's side: also answered "CLI OK 2", rc=0 — no 429
 [COMPLETED] Prove one streamed agent turn on the deployed engine: run
             run_92a5d66a71f2acd1 (be6fd2d build) called `read` with
             {"filePath":"/etc/hostname","reason":...} and got back
@@ -59,6 +131,26 @@ so suspect the WebView xterm.js client or a bytes path that mangles ESC[Z
             from D1; 0 rows left, sessions=19
 
 NOTE:
+- Operator directive 2026-10-27 (mid-task): after the fix is done and the gate
+  is green, commit, push, deploy and cut the rolling release.
+- Capture method: /tmp/sniff_ja3.py binds an AF_PACKET raw socket on eth0, parses
+  TLS ClientHellos, filters by SNI, and prints JA3 + extension order + raw hex.
+- Goal 2026-10-27: make the keyless Opencode path work by matching the client's
+  TLS fingerprint in-engine. The operator explicitly ruled out driving the
+  opencode CLI, so the adapter must speak the wire protocol itself.
+- 2026-10-27: `opencode run -m opencode/big-pickle` works on this host (v2.2.0
+  at /root/.opencode/bin/opencode). Superseded note: the operator later asked
+  the engine to present the client's contract itself, so the engine may mirror
+  it; it still must not invoke the CLI.
+- Opencode keyless 2026-10-28T00:15Z: the gate is not the TLS hello alone. A
+  local MITM that replayed the CLI's own request over Python TLS got 429, while
+  the same body over the engine's BoringSSL client got 200. Verified contract:
+  /inference/openai/v1/chat/completions, `Authorization: Bearer public`, the
+  x-opencode-* headers with a 40-hex project id, and a system prompt carrying
+  the client's `<env>` block (the gate reads it; a generic prompt is refused).
+- Free tier quotas: after a burst of probes the endpoint answers 429 to every
+  body with `retry-after` around 500s; valid bodies answer again once that
+  window passes, so a failing test within the window proves nothing.
 - Push 2026-10-27: this MAIN.md (probe record + non-login mode closure) is a
   docs-only commit on main; the rolling Release engine rebuilds it regardless.
 - Probe 2026-10-27T22:33Z: a keyless agent turn takes 4 upstream rounds (goal_add,

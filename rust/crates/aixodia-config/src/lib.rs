@@ -54,11 +54,13 @@ fn builtin_providers() -> Vec<Provider> {
             adapter: "openai".to_string(),
             ..Provider::default()
         },
-        // The OpenCode Zen tier, which answers a key the user adds here; its free
-        // models are served only to the OpenCode client itself.
+        // The OpenCode Zen tier. Its free models are served only to requests
+        // that match the official client's contract; the opencode adapter
+        // presents that contract (TLS fingerprint, anonymous token, request
+        // shape), so the free models answer without the CLI installed.
         Provider {
             name: "Opencode".to_string(),
-            api_url: "https://opencode.ai/inference/v1".to_string(),
+            api_url: "https://opencode.ai/inference/openai/v1".to_string(),
             adapter: "opencode".to_string(),
             ..Provider::default()
         },

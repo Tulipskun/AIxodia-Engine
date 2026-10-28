@@ -18,8 +18,11 @@ jobs:
         with:
           targets: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
 
-      - name: Install cross linker (arm64)
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Install cross linker (arm64) and BoringSSL build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            cmake ninja-build clang libclang-dev
 
       - name: Build amd64
         working-directory: rust
@@ -33,6 +36,8 @@ jobs:
         working-directory: rust
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
         run: |
           cargo build --release --target aarch64-unknown-linux-gnu -p aixodia-engine
           cp target/aarch64-unknown-linux-gnu/release/aixodia-engine ../aixodia-engine-linux-arm64

@@ -4,19 +4,20 @@
 //!
 //! The contract, measured against the live endpoint:
 //!
-//! 1. `User-Agent: opencode/latest/2.0.27/cli` (or whatever `agent` is set to).
-//! 2. `x-opencode-session: ses_<12 hex><14 base62>`, replaced hourly. The gate
-//!    reads the low twelve bits of the inverted six-byte head (the counter) and
-//!    requires it below 64, and the tail must be fourteen letters/digits.
-//! 3. No `x-opencode-request` header of our own: the gate refuses a request
-//!    that names its own request id.
-//! 4. The body must declare `shell` and `read` tools, and `stream` must be true.
-//! 5. The Responses API is tried first: the gate reads tools at the top level,
-//!    which is how that API spells them.
+//! 1. The TLS ClientHello of the official client (a BoringSSL client, HTTP/1.1
+//!    only, no GREASE): the free tier's gate reads the handshake.
+//! 2. `Authorization: Bearer public`: the tier is anonymous, but a request with
+//!    no `Authorization` is refused.
+//! 3. `User-Agent: opencode/latest/<version>/cli`, the `x-opencode-*` headers,
+//!    and a `ses_` id shared by the session/affinity headers.
+//! 4. A system prompt ending in the client's `<env>` block, which is what the
+//!    gate reads to tell the client apart from a generic API caller.
+//! 5. Chat completions (`/chat/completions`) with the `shell` and `read` tool
+//!    declarations, which is the shape the client sends.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -30,7 +31,7 @@ use crate::types::{
 
 /// The name the client itself sends; read from its source and confirmed against
 /// a recorded request.
-pub const CLIENT_AGENT_MEASURED: &str = "opencode/latest/2.0.27/cli";
+pub const CLIENT_AGENT_MEASURED: &str = "opencode/latest/2.2.0/cli";
 
 const SHELL_TOOL: &str = "shell";
 const READ_TOOL: &str = "read";
@@ -67,10 +68,12 @@ impl Adapter {
             agent: None,
         }));
         let headers_state = state.clone();
-        let inner = openai::Adapter::new().with_header_func(Arc::new(move || {
-            let (session, agent) = session_and_agent(&headers_state);
-            headers(&session, agent.as_deref())
-        }));
+        let inner = openai::Adapter::new()
+            .with_header_func(Arc::new(move || {
+                let (session, agent) = session_and_agent(&headers_state);
+                headers(&session, agent.as_deref())
+            }))
+            .with_tls_client(fingerprint_client());
         Self {
             inner,
             state,
@@ -153,6 +156,7 @@ impl Adapter {
         key: &str,
         guarded: &mut dyn Emitter,
     ) -> Result<Response> {
+        let req = &with_contract_env(req);
         let emitted = Arc::new(AtomicBool::new(false));
         let note = |trace: &mut Vec<String>, name: &str, err: &anyhow::Error| {
             trace.push(format!("{name}: {}", describe_err(err)));
@@ -181,10 +185,21 @@ impl Adapter {
 
             let mut trace: Vec<String> = Vec::new();
 
-            // Attempt 1: the Responses API with the contract tools. This order
-            // is the whole fix for the free tier.
+            // Attempt 1: chat completions with the contract tools, which is the
+            // request shape the official client sends.
             let mut prepared = req.clone();
             prepared.tools = self.contract_tools(&req.tools);
+            match self.inner.stream(&prepared, prov, key, &mut guard).await {
+                Ok(resp) => return Ok(resp),
+                Err(err) => {
+                    note(&mut trace, "chat-stream-tools", &err);
+                    if emitted.load(Ordering::SeqCst) || !is_tool_protocol_error(&err) {
+                        return Err(fail(&trace, err));
+                    }
+                }
+            }
+
+            // Attempt 2: the Responses API with the contract tools.
             match self
                 .inner
                 .stream_via_responses(&prepared, prov, key, &mut guard)
@@ -193,17 +208,6 @@ impl Adapter {
                 Ok(resp) => return Ok(resp),
                 Err(err) => {
                     note(&mut trace, "responses-stream-tools", &err);
-                    if emitted.load(Ordering::SeqCst) || !is_tool_protocol_error(&err) {
-                        return Err(fail(&trace, err));
-                    }
-                }
-            }
-
-            // Attempt 2: chat completions with the contract tools.
-            match self.inner.stream(&prepared, prov, key, &mut guard).await {
-                Ok(resp) => return Ok(resp),
-                Err(err) => {
-                    note(&mut trace, "chat-stream-tools", &err);
                     if emitted.load(Ordering::SeqCst) || !is_tool_protocol_error(&err) {
                         return Err(fail(&trace, err));
                     }
@@ -343,6 +347,9 @@ impl AdapterTrait for Adapter {
         key: &str,
         emit: &mut dyn Emitter,
     ) -> Result<Response> {
+        // The free tier is anonymous, but the client still authenticates with the
+        // literal token `public`; a request with no Authorization is refused.
+        let key = if key.is_empty() { "public" } else { key };
         self.stream_ladder(req, prov, key, emit).await
     }
 }
@@ -369,12 +376,56 @@ fn headers(session: &str, agent: Option<&str>) -> HashMap<String, String> {
     HashMap::from([
         ("User-Agent".to_string(), agent.to_string()),
         ("x-opencode-client".to_string(), "cli".to_string()),
-        ("x-opencode-project".to_string(), "global".to_string()),
+        ("x-opencode-project".to_string(), PROJECT_ID.to_string()),
         ("x-opencode-session".to_string(), session.to_string()),
         ("x-opencode-session-id".to_string(), session.to_string()),
         ("x-session-affinity".to_string(), session.to_string()),
         ("x-session-id".to_string(), session.to_string()),
     ])
+}
+
+/// A stable forty-hex project id, the width the client sends.
+const PROJECT_ID: &str = "57d1d2efb78caaa2a5917f13969a24b57c24bbb9";
+
+/// The environment block the official client ends its system prompt with. The
+/// free tier reads it to tell the client apart from a generic API caller, so it
+/// is part of the request contract rather than context for the model.
+fn env_block() -> String {
+    let dir = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "/root".to_string());
+    let git = if std::path::Path::new(&dir).join(".git").exists() {
+        "yes"
+    } else {
+        "no"
+    };
+    format!(
+        "<env>\n  Working directory: {dir}\n  Workspace root folder: {dir}\n  Is directory a git repo: {git}\n  Platform: {}\n  Prefer /tmp/opencode over generic system temporary directories such as /tmp; it is pre-created and approved for external access.\n</env>",
+        std::env::consts::OS
+    )
+}
+
+/// The conversation with the contract's environment block in front. The client
+/// puts it inside its own system prompt; a separate leading system turn keeps
+/// the caller's instructions intact and is the same message shape on the wire.
+fn with_contract_env(req: &Request) -> Request {
+    if req
+        .messages
+        .iter()
+        .any(|m| m.role == "system" && m.content.contains("<env>"))
+    {
+        return req.clone();
+    }
+    let mut out = req.clone();
+    out.messages.insert(
+        0,
+        Message {
+            role: "system".to_string(),
+            content: env_block(),
+            ..Message::default()
+        },
+    );
+    out
 }
 
 /// Whether any message would put a picture on the wire.
@@ -500,6 +551,51 @@ fn placeholder(name: &str) -> ToolDef {
         description: description.to_string(),
         parameters,
     }
+}
+
+// --- transport -----------------------------------------------------------
+
+/// The cipher suites the official client offers, in its captured order. The
+/// free tier's gate reads the ClientHello, so this list is part of the
+/// contract rather than a preference.
+const CIPHERS: &str = "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-SHA:AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA:AES256-SHA";
+
+/// The captured group order, post-quantum hybrid first.
+const CURVES: &str = "X25519MLKEM768:X25519:P-256:P-384";
+
+/// The captured signature-algorithm order.
+const SIGALGS: &str = "ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:rsa_pss_rsae_sha512:rsa_pkcs1_sha512:ed25519:ecdsa_secp521r1_sha512:rsa_pkcs1_sha1";
+
+/// A BoringSSL client configured to present the official client's hello.
+///
+/// The endpoint serves its free tier only to requests whose TLS handshake
+/// matches the CLI's. The CLI is a BoringSSL client: plain BoringSSL extension
+/// order, no GREASE, HTTP/1.1 only, post-quantum X25519MLKEM768 first. These
+/// settings reproduce that hello.
+fn fingerprint_client() -> wreq::Client {
+    static CLIENT: OnceLock<wreq::Client> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            let tls = wreq::tls::TlsOptions::builder()
+                .alpn_protocols([wreq::tls::AlpnProtocol::HTTP1])
+                .min_tls_version(wreq::tls::TlsVersion::TLS_1_2)
+                .max_tls_version(wreq::tls::TlsVersion::TLS_1_3)
+                .grease_enabled(false)
+                .session_ticket(true)
+                .renegotiation(true)
+                .enable_ocsp_stapling(true)
+                .enable_signed_cert_timestamps(true)
+                .cipher_list(CIPHERS)
+                .preserve_tls13_cipher_list(true)
+                .curves_list(CURVES)
+                .sigalgs_list(SIGALGS)
+                .build();
+            wreq::Client::builder()
+                .tls_options(tls)
+                .build()
+                .expect("opencode TLS client")
+        })
+        .clone()
 }
 
 // --- id generation -------------------------------------------------------

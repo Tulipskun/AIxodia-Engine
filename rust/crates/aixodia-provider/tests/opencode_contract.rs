@@ -1,8 +1,8 @@
 //! The OpenCode free-tier contract, driven end to end against a fake upstream.
 //!
 //! Port of the meaningful half of the Go `provider/opencode/opencode_test.go`:
-//! headers, forced streaming, injected tools, and the preference for streamed
-//! deltas over the repeated completed object.
+//! headers, forced streaming, injected tools, the environment block, and the
+//! fallback ladder.
 
 use std::sync::{Arc, Mutex};
 
@@ -17,7 +17,7 @@ use serde_json::Value;
 
 #[derive(Clone, Default)]
 struct Captured {
-    requests: Arc<Mutex<Vec<(HeaderMap, Value)>>>,
+    requests: Arc<Mutex<Vec<(String, HeaderMap, Value)>>>,
 }
 
 fn responses_body() -> &'static str {
@@ -28,8 +28,12 @@ fn responses_body() -> &'static str {
     )
 }
 
+/// Spelled the way the real gateway streams: an opening chunk whose `content`,
+/// `reasoning` and `tool_calls` are null, then text, then a finish chunk that is
+/// null again.
 fn chat_body() -> &'static str {
     concat!(
+        "data: {\"id\":\"gen-1\",\"model\":\"zen-model\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"content\":null,\"reasoning\":null,\"tool_calls\":null}}]}\n\n",
         "data: {\"id\":\"gen-1\",\"model\":\"zen-model\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello \"}}]}\n\n",
         "data: {\"id\":\"gen-1\",\"model\":\"zen-model\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"there\"}}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":22,\"total_tokens\":33}}\n\n",
         "data: [DONE]\n\n"
@@ -38,13 +42,22 @@ fn chat_body() -> &'static str {
 
 async fn upstream(
     State(captured): State<Captured>,
+    uri: axum::http::Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl axum::response::IntoResponse {
     let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    captured.requests.lock().unwrap().push((headers, parsed));
+    captured
+        .requests
+        .lock()
+        .unwrap()
+        .push((uri.path().to_string(), headers, parsed));
 
-    let payload = responses_body();
+    let payload = if uri.path().ends_with("/responses") {
+        responses_body()
+    } else {
+        chat_body()
+    };
     (
         [
             ("content-type", "text/event-stream"),
@@ -54,7 +67,7 @@ async fn upstream(
     )
 }
 
-/// A fake Zen that answers the Responses API with deltas plus a completed object.
+/// A fake Zen that answers both API shapes the way the ladder asks for them.
 async fn fake_zen() -> (String, Captured) {
     let captured = Captured::default();
     let app = Router::new()
@@ -69,11 +82,11 @@ async fn fake_zen() -> (String, Captured) {
     (format!("http://{address}"), captured)
 }
 
-fn provider_for(base: &str) -> Provider {
+fn provider_for(base: &str, keys: Vec<String>) -> Provider {
     Provider {
         name: "opencode".to_string(),
         endpoint: base.to_string(),
-        keys: vec!["k".to_string()],
+        keys,
         ..Provider::default()
     }
 }
@@ -100,6 +113,14 @@ fn has_stream(body: &Value) -> bool {
     body.get("stream").and_then(Value::as_bool).unwrap_or(false)
 }
 
+fn message(content: &str) -> Message {
+    Message {
+        role: "user".to_string(),
+        content: content.to_string(),
+        ..Message::default()
+    }
+}
+
 #[tokio::test]
 async fn free_tier_contract_on_complete() {
     let (base, captured) = fake_zen().await;
@@ -107,11 +128,7 @@ async fn free_tier_contract_on_complete() {
 
     let req = Request {
         model: "zen-model".to_string(),
-        messages: vec![Message {
-            role: "user".to_string(),
-            content: "hi".to_string(),
-            ..Message::default()
-        }],
+        messages: vec![message("hi")],
         tools: vec![ToolDef {
             name: "current_time".to_string(),
             description: "now".to_string(),
@@ -121,18 +138,26 @@ async fn free_tier_contract_on_complete() {
     };
 
     let resp = adapter
-        .complete(&req, &provider_for(&base), "key")
+        .complete(&req, &provider_for(&base, vec!["key".to_string()]), "key")
         .await
         .expect("complete");
 
     let requests = captured.requests.lock().unwrap();
     assert_eq!(requests.len(), 1, "one request for a successful complete");
-    let (headers, body) = &requests[0];
+    let (path, headers, body) = &requests[0];
 
-    // The name the client itself sends.
+    // The client's own request shape: chat completions first.
+    assert!(
+        path.ends_with("/chat/completions"),
+        "first rung is chat, path = {path}"
+    );
     assert_eq!(
         headers.get("user-agent").and_then(|v| v.to_str().ok()),
         Some(CLIENT_AGENT_MEASURED)
+    );
+    assert_eq!(
+        headers.get("authorization").and_then(|v| v.to_str().ok()),
+        Some("Bearer key")
     );
 
     // ses_<12 hex><14 base62>, and the low twelve bits of the inverted head
@@ -161,11 +186,14 @@ async fn free_tier_contract_on_complete() {
             .and_then(|v| v.to_str().ok()),
         Some("cli")
     );
-    assert_eq!(
-        headers
-            .get("x-opencode-project")
-            .and_then(|v| v.to_str().ok()),
-        Some("global")
+    let project = headers
+        .get("x-opencode-project")
+        .and_then(|v| v.to_str().ok())
+        .expect("project header");
+    assert_eq!(project.len(), 40, "project = {project}");
+    assert!(
+        project.chars().all(|c| c.is_ascii_hexdigit()),
+        "project = {project}"
     );
 
     // Contract: forced streaming, and shell + read declared alongside ours.
@@ -175,24 +203,70 @@ async fn free_tier_contract_on_complete() {
         assert!(names.iter().any(|name| name == want), "tools = {names:?}");
     }
 
-    // The deltas win; the repeated completed object must not double the text.
+    // The environment block leads the conversation; the caller's turn follows.
+    let messages = body.get("messages").and_then(Value::as_array).unwrap();
+    assert_eq!(
+        messages[0].get("role").and_then(Value::as_str),
+        Some("system")
+    );
+    let env = messages[0]
+        .get("content")
+        .and_then(Value::as_str)
+        .expect("env content");
+    assert!(env.contains("<env>"), "env = {env}");
+    assert!(env.contains("Working directory:"), "env = {env}");
+    assert_eq!(
+        messages[1].get("content").and_then(Value::as_str),
+        Some("hi")
+    );
+
+    // The deltas win, including the turns where the gateway spells the fields
+    // as null; the repeated completed object must not double the text.
     assert_eq!(resp.content, "Hello there");
     assert_eq!(resp.finish_reason, "stop");
     assert_eq!(resp.usage.total_tokens, 33);
 }
 
 #[tokio::test]
-async fn chat_fallback_is_used_when_responses_fails() {
-    // A Zen that refuses /v1/responses outright, so the ladder must fall back to
-    // chat completions with the same contract.
+async fn anonymous_request_uses_the_public_token() {
+    let (base, captured) = fake_zen().await;
+    Adapter::new()
+        .complete(
+            &Request {
+                model: "zen-model".to_string(),
+                messages: vec![message("hi")],
+                ..Request::default()
+            },
+            &provider_for(&base, Vec::new()),
+            "",
+        )
+        .await
+        .expect("keyless complete");
+
+    let requests = captured.requests.lock().unwrap();
+    let (_, headers, _) = &requests[0];
+    assert_eq!(
+        headers.get("authorization").and_then(|v| v.to_str().ok()),
+        Some("Bearer public")
+    );
+}
+
+#[tokio::test]
+async fn responses_fallback_is_used_when_chat_is_refused() {
+    // A Zen that refuses chat completions for the tool payload, so the ladder
+    // must fall through to the Responses API.
     let captured = Captured::default();
     let app = Router::new()
         .route(
-            "/v1/responses",
+            "/v1/chat/completions",
             post(
                 |State(captured): State<Captured>, headers: HeaderMap, body: Bytes| async move {
                     let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                    captured.requests.lock().unwrap().push((headers, parsed));
+                    captured.requests.lock().unwrap().push((
+                        "/v1/chat/completions".to_string(),
+                        headers,
+                        parsed,
+                    ));
                     (
                         axum::http::StatusCode::BAD_REQUEST,
                         r#"{"error":{"message":"tools: invalid function declarations"}}"#,
@@ -201,12 +275,16 @@ async fn chat_fallback_is_used_when_responses_fails() {
             ),
         )
         .route(
-            "/v1/chat/completions",
+            "/v1/responses",
             post(
                 |State(captured): State<Captured>, headers: HeaderMap, body: Bytes| async move {
                     let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                    captured.requests.lock().unwrap().push((headers, parsed));
-                    ([("content-type", "text/event-stream")], chat_body())
+                    captured.requests.lock().unwrap().push((
+                        "/v1/responses".to_string(),
+                        headers,
+                        parsed,
+                    ));
+                    ([("content-type", "text/event-stream")], responses_body())
                 },
             ),
         )
@@ -219,25 +297,24 @@ async fn chat_fallback_is_used_when_responses_fails() {
     });
 
     let adapter = Adapter::new();
-    let req = Request {
-        model: "zen-model".to_string(),
-        messages: vec![Message {
-            role: "user".to_string(),
-            content: "hi".to_string(),
-            ..Message::default()
-        }],
-        ..Request::default()
-    };
-
     let resp = adapter
-        .complete(&req, &provider_for(&base), "key")
+        .complete(
+            &Request {
+                model: "zen-model".to_string(),
+                messages: vec![message("hi")],
+                ..Request::default()
+            },
+            &provider_for(&base, vec!["k".to_string()]),
+            "k",
+        )
         .await
         .expect("fallback complete");
     assert_eq!(resp.content, "Hello there");
     assert_eq!(resp.finish_reason, "stop");
 
     let requests = captured.requests.lock().unwrap();
-    assert!(requests.len() >= 2, "responses then chat");
-    let (_, chat_body) = requests.last().expect("chat request");
-    assert!(has_stream(chat_body));
+    assert!(requests.len() >= 2, "chat then responses");
+    assert!(requests[0].0.ends_with("/chat/completions"));
+    assert!(requests[1].0.ends_with("/responses"));
+    assert!(has_stream(&requests[1].2));
 }
