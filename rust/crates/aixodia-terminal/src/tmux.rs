@@ -48,6 +48,8 @@ pub struct TmuxSession {
     pub pid: i32,
     pub cwd: String,
     pub created_at: i64,
+    /// The program's own window title, if it set one.
+    pub title: String,
 }
 
 /// The pid of the shell inside a tmux session.
@@ -90,6 +92,33 @@ pub fn pane_pid(id: &str) -> Option<i32> {
     None
 }
 
+/// What the program in the pane last called itself (OSC 0/2). tmux keeps the
+/// title, so it survives a detached client, and `#{pane_title}` may carry the
+/// padding tmux adds up to `set-titles-string`'s width.
+pub fn pane_title(id: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .args([
+            "-L",
+            TMUX_SOCKET,
+            "display-message",
+            "-p",
+            "-t",
+            &tmux_name(id),
+            "#{pane_title}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let title = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title)
+    }
+}
+
 /// Sessions that survived an engine restart.
 pub fn list() -> Vec<TmuxSession> {
     let output = Command::new("tmux")
@@ -98,7 +127,7 @@ pub fn list() -> Vec<TmuxSession> {
             TMUX_SOCKET,
             "list-sessions",
             "-F",
-            "#{session_name}\u{1f}#{pane_pid}\u{1f}#{pane_current_path}\u{1f}#{session_created}",
+            "#{session_name}\u{1f}#{pane_pid}\u{1f}#{pane_current_path}\u{1f}#{session_created}\u{1f}#{pane_title}",
         ])
         .output();
     let Ok(output) = output else {
@@ -110,7 +139,7 @@ pub fn list() -> Vec<TmuxSession> {
     let text = String::from_utf8_lossy(&output.stdout);
     let mut out = Vec::new();
     for line in text.trim().split('\n') {
-        let fields: Vec<&str> = line.splitn(4, '\u{1f}').collect();
+        let fields: Vec<&str> = line.splitn(5, '\u{1f}').collect();
         if fields.len() < 4 {
             continue;
         }
@@ -122,6 +151,10 @@ pub fn list() -> Vec<TmuxSession> {
             pid: fields[1].parse().unwrap_or(0),
             cwd: fields[2].to_string(),
             created_at: fields[3].parse().unwrap_or(0),
+            title: fields
+                .get(4)
+                .map(|t| t.trim().to_string())
+                .unwrap_or_default(),
         });
     }
     out

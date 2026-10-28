@@ -126,6 +126,8 @@ pub struct Info {
     pub rows: u16,
     pub alive: bool,
     pub created_at: i64,
+    /// What the program in the shell calls itself (OSC 0/2), when it said so.
+    pub title: String,
 }
 
 impl Info {
@@ -139,6 +141,7 @@ impl Info {
             "rows": self.rows,
             "alive": self.alive,
             "created_at": self.created_at,
+            "title": self.title,
         })
     }
 }
@@ -244,6 +247,7 @@ impl Server {
                 rows: session.rows.load(Ordering::SeqCst),
                 alive: session.alive(),
                 created_at: session.created_at,
+                title: String::new(),
             })
             .collect();
         if self.tmux {
@@ -262,6 +266,7 @@ impl Server {
                     rows: 0,
                     alive: true,
                     created_at: session.created_at,
+                    title: session.title,
                 });
             }
         }

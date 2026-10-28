@@ -1,4 +1,12 @@
 GOAL:
+[COMPLETED] Show the program's window title (OSC 0/2) in the terminal drawer
+            header instead of nowhere. tmux swallows OSC 0/2, so the engine now
+            reports #{pane_title} in /v1/terminals rows (tmux::list +
+            Info.title) and the app carries it to TerminalSidebar. Operator's
+            original symptom "<host>:bash …" was tmux.conf's status-left,
+            superseded because tmux.rs disables the status bar per session.
+            VERSION v1.159; fmt/clippy clean, aixodia-io 70 passed,
+            aixodia-terminal 4 passed.
 [COMPLETED] Make keyless Opencode the daemon's default route: default_settings
             names Opencode/big-pickle and saved_main_model falls back to it when
             nothing usable is stored, so a fresh/unset daemon answers on the
