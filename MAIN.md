@@ -495,3 +495,84 @@ NOTE:
   it). The three chats with unanswered questions were repointed to
   AIxodia Free/openai-fast, and the new tunnel url is saved in D1. Committing
   this log with [skip ci] so the docs push does not trigger another release.
+- Reopen 2026-10-28T02:20Z (operator): the opencode CLI still answers, so the
+  engine's 402/429 is not a spent free tier — the request contract or auth
+  state must differ. Investigating: CLI version/auth store, the engine's
+  recorded last_error, and a fresh keyless probe.
+- Note 2026-10-28T02:21Z: opencode v2.2.0 at /root/.opencode/bin/opencode; the
+  engine reports Opencode unreachable with an empty last_error. Checking the
+  CLI's auth store and its non-interactive run syntax before comparing bytes.
+- Note 2026-10-28T02:22Z: `opencode auth list` shows no stored provider
+  credentials (only a local service.json password), so the CLI is on the same
+  keyless tier. Running the CLI once to confirm it answers now, then comparing
+  the engine's failing turn and logs.
+- Finding 2026-10-28T02:23Z: on this host the CLI itself answers
+  provider.free-limit 429 on opencode/big-pickle, with retryAfterMs ≈ 21.7h —
+  so the window is long and the CLI can be blocked here too. The operator may be
+  running a different model or their own machine/account. Checking which models
+  still answer from here (starting with the one their chat pinned,
+  deepseek-v4.1-flash-free) and the CLI's request log.
+- Note 2026-10-28T02:24Z: both big-pickle and deepseek-v4.1-flash-free answer
+  free-limit 429 from the CLI on this host, so the block is at the host/IP or
+  anonymous identity, not the engine's contract. Reading the CLI log for its
+  most recent successful model/endpoint, and whether it reports an account.
+- Note 2026-10-28T02:25Z: the CLI log shows no successful run since 23:43Z; the
+  two models tested today both 429 with a reset that lands at ~00:00Z Oct 29,
+  i.e. a daily free quota. Trying the CLI's own default model (not a pinned
+  free one) to see whether the operator's working setup picks a different
+  upstream.
+- Finding 2026-10-28T02:26Z: the CLI's default model 429s identically on this
+  host, so no keyless opencode model answers here until the daily reset
+  (~00:00Z Oct 29). The operator's working CLI must be a different identity or
+  network. Reading the adapter to see whether an account key can be supplied,
+  which is the only way the app can share a subscription instead of the
+  exhausted anonymous tier.
+- Note 2026-10-28T02:27Z: the adapter already prefers a configured key over the
+  anonymous "public" token, so a subscription can be shared with the app once a
+  key is stored. Checking how aixodia-config loads provider keys (env or file)
+  so the fix, if any, is a config path, not new protocol code.
+- Note 2026-10-28T02:28Z: provider keys are stored per provider in KV and can be
+  replaced with set_provider_keys. Checking whether the gateway exposes a route
+  to set them, so the operator can hand the app a working account key without a
+  redeploy.
+- Finding 2026-10-28T02:29Z: provider keys are writable through
+  POST /api/providers/:id/keys and the opencode adapter already prefers a real
+  key over "public", so an OpenCode Go credential is the supported path to use
+  Opencode from the app while the anonymous daily quota is spent. Checking what
+  the app actually receives for a blocked Opencode turn, and what the probe
+  reports, before deciding on any polish.
+- Note 2026-10-28T02:30Z: Opencode's probe reports reachable=true (models list
+  works) while a chat turn is 502/upstream 429 free-limit. The likely split: the
+  CLI authenticates with a per-device anonymous token from its store, while the
+  engine sends the literal "public". Inspecting the CLI store's schema (no
+  values) to see whether an identity token exists that the CLI actually uses.
+- Note 2026-10-28T02:31Z: the CLI store has zero account/credential rows, so it
+  is anonymous too; no token exists for the engine to reuse. Listing the CLI's
+  own run history from its log to see whether the operator's working run
+  happened on this host and with which model.
+- Note 2026-10-28T02:32Z: the CLI log shows only our own probes (MITM OK / CLI
+  OK) — no operator run on this host. The free-limit gate may still have models
+  with separate quotas, so enumerating every catalog model whose id marks it
+  free and testing each once through the engine (each 429 answers instantly).
+- Test 2026-10-28T02:33Z: probing all eight free-marked Opencode models in
+  parallel through the engine (non-stream, one short message). If any has its
+  own quota, that model becomes the app's Opencode default; if all answer
+  429 FreeUsageLimitError, the gate is account-wide and only a key or the daily
+  reset can unlock it.
+- Finding 2026-10-28T02:34Z: all eight free-marked models answer 429
+  FreeUsageLimitError, so the anonymous free quota is exhausted account-wide for
+  this host — not per model. The operator's working CLI must egress differently
+  (network/account). Checking proxy env and CLI config for an egress override
+  before concluding.
+- Conclusion 2026-10-28T02:35Z: no proxy, no account token, no endpoint
+  override; this host's anonymous free quota is spent account-wide with a reset
+  at ~00:00Z Oct 29. The app cannot reach Opencode's free tier from here until
+  then; a configured key is the supported unlock. Confirming the /keys request
+  shape before reporting to the operator.
+- Report 2026-10-28T02:36Z: daemon host evidence — official CLI v2.2.0 answers
+  429 FreeUsageLimitError on big-pickle, the CLI default, deepseek-v4.1-flash-free,
+  and all eight free-marked models; retryAfterMs 78,140,000 (~21h43m) lands at
+  ~00:00Z Oct 29 (07:00 Thai). CLI store has no account/credential rows and no
+  proxy is set, so this is the anonymous daily quota, not a contract mismatch.
+  The app keeps working on AIxodia Free; Opencode from this host unlocks with a
+  stored key (POST /api/providers/Opencode/keys {"add":[…]}) or after the reset.
