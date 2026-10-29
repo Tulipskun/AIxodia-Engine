@@ -28,7 +28,7 @@ mod gateway_tests;
 
 pub use chat::{ChatRequest, ChatSink, CompletionOptions, NullSink, TrailWriter};
 pub use gateway::{
-    new_completion_id, require_token, turn_page, ApprovalGate, Gateway, LogReader, SessionStore,
-    StateStore, SESSION_ID_PATTERN, VERSION,
+    new_completion_id, require_token, turn_page, Gateway, LogReader, SessionStore, StateStore,
+    SESSION_ID_PATTERN, VERSION,
 };
 pub use upload::max_upload;

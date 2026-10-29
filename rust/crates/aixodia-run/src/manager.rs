@@ -5,18 +5,16 @@
 //! routing, history and persistence with `POST /v1/chat/completions`, because
 //! the gateway's executor is the same code.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 
-use aixodia_provider::ToolCall;
 use async_trait::async_trait;
 use serde_json::json;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::event::{
-    unix_now, Attachment, ChatJob, Event, Run, StartRequest, Status, KIND_APPROVAL, KIND_STATUS,
-    KIND_USER,
+    unix_now, Attachment, ChatJob, Event, Run, StartRequest, Status, KIND_STATUS, KIND_USER,
 };
 use crate::sink::SseSink;
 use crate::store::{Error, Result, Store};
@@ -33,23 +31,12 @@ pub trait ChatExecutor: Send + Sync {
     ) -> std::result::Result<(), String>;
 }
 
-struct PendingApproval {
-    sender: oneshot::Sender<ApprovalDecision>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ApprovalDecision {
-    pub allowed: bool,
-    pub reason: String,
-}
-
 struct ActiveState {
     meta: Run,
     events: Vec<Event>,
     subs: HashMap<u64, mpsc::Sender<Event>>,
     next_sub: u64,
     persisted: usize,
-    pending: HashMap<String, PendingApproval>,
 }
 
 pub struct ActiveRun {
@@ -173,79 +160,6 @@ impl ActiveRun {
             state.persisted = start + batch.len();
         }
     }
-
-    async fn persist_meta(&self) {
-        let meta = self.snapshot();
-        if let Err(err) = self.store.update(&meta).await {
-            tracing::warn!(run = %meta.id, error = %err, "run: save status");
-        }
-    }
-
-    /// Blocks a mutating tool until a human approves it.
-    pub async fn approval_gate(
-        self: &Arc<Self>,
-        cancel: &CancellationToken,
-        call: ToolCall,
-    ) -> (bool, String, std::result::Result<(), String>) {
-        let key = if call.id.is_empty() {
-            call.name.clone()
-        } else {
-            call.id.clone()
-        };
-        let (sender, receiver) = oneshot::channel();
-        {
-            let mut state = self.state.lock().unwrap();
-            state
-                .pending
-                .insert(key.clone(), PendingApproval { sender });
-            state.meta.status = Status::WaitingApproval;
-            state.meta.updated_at = unix_now();
-        }
-        self.append(
-            KIND_STATUS,
-            json!({"status": Status::WaitingApproval.as_str()}),
-        );
-        self.append(
-            KIND_APPROVAL,
-            json!({
-                "call_id": call.id,
-                "name": call.name,
-                "arguments": truncate_approval(&call.arguments),
-                "status": "waiting",
-            }),
-        );
-        self.persist_meta().await;
-
-        let decision = tokio::select! {
-            decision = receiver => decision.ok(),
-            _ = cancel.cancelled() => {
-                self.state.lock().unwrap().pending.remove(&key);
-                return (false, String::new(), Err("cancelled".to_string()));
-            }
-        };
-        let decision = decision.unwrap_or(ApprovalDecision {
-            allowed: false,
-            reason: String::new(),
-        });
-        {
-            let mut state = self.state.lock().unwrap();
-            state.pending.remove(&key);
-            state.meta.status = Status::Running;
-            state.meta.updated_at = unix_now();
-        }
-        self.append(KIND_STATUS, json!({"status": Status::Running.as_str()}));
-        self.append(
-            KIND_APPROVAL,
-            json!({
-                "call_id": call.id,
-                "name": call.name,
-                "status": if decision.allowed { "approved" } else { "denied" },
-                "reason": decision.reason,
-            }),
-        );
-        self.persist_meta().await;
-        (decision.allowed, decision.reason, Ok(()))
-    }
 }
 
 /// Removes a live subscription when the viewer goes away.
@@ -287,7 +201,6 @@ pub struct Manager {
     store: Arc<dyn Store>,
     executor: Arc<dyn ChatExecutor>,
     runs: Mutex<HashMap<String, Arc<ActiveRun>>>,
-    approval_tools: RwLock<HashSet<String>>,
     shutdown: CancellationToken,
 }
 
@@ -298,27 +211,8 @@ impl Manager {
             store,
             executor,
             runs: Mutex::new(HashMap::new()),
-            // No tool waits for a human by default. This engine runs unattended:
-            // a paused call would hang the run until someone opened the app.
-            approval_tools: RwLock::new(HashSet::new()),
             shutdown: CancellationToken::new(),
         }
-    }
-
-    /// Replaces the set of tool names that pause for a human decision.
-    pub async fn set_approval_tools(&self, names: &[String]) {
-        let mut next = HashSet::new();
-        for name in names {
-            let name = name.trim();
-            if !name.is_empty() {
-                next.insert(name.to_string());
-            }
-        }
-        *self.approval_tools.write().await = next;
-    }
-
-    pub async fn needs_approval(&self, name: &str) -> bool {
-        self.approval_tools.read().await.contains(name)
     }
 
     /// Prepares the schema, marks runs left behind by an earlier process as
@@ -430,7 +324,6 @@ impl Manager {
                 subs: HashMap::new(),
                 next_sub: 0,
                 persisted: 0,
-                pending: HashMap::new(),
             }),
             flush_mu: tokio::sync::Mutex::new(()),
             store: self.store.clone(),
@@ -528,77 +421,6 @@ impl Manager {
         }
     }
 
-    /// The gateway's approval gate: it names a run rather than holding one, so
-    /// the chat route can pause a tool without knowing the manager.
-    pub async fn gate(
-        &self,
-        run_id: &str,
-        call: ToolCall,
-    ) -> std::result::Result<(bool, String), String> {
-        if !self.needs_approval(&call.name).await {
-            return Ok((true, String::new()));
-        }
-        let Some(run) = self.lookup(run_id) else {
-            return Ok((false, "run is not active".to_string()));
-        };
-        let cancel = run.cancel.clone();
-        let (allowed, reason, result) = run.approval_gate(&cancel, call).await;
-        result.map(|_| (allowed, reason))
-    }
-
-    /// Answers the pending tool call of a run.
-    pub async fn approve(
-        &self,
-        run_id: &str,
-        call_id: &str,
-        decision: &str,
-        reason: &str,
-    ) -> Result<Run> {
-        let Some(run) = self.lookup(run_id) else {
-            return Err(Error::Message("run is not active".to_string()));
-        };
-        let allowed = match decision.trim().to_lowercase().as_str() {
-            "approve" | "approved" | "allow" => true,
-            "deny" | "denied" | "reject" => false,
-            _ => {
-                return Err(Error::Message(
-                    "decision must be approve or deny".to_string(),
-                ))
-            }
-        };
-
-        let (key, pending, meta) = {
-            let mut state = run.state.lock().unwrap();
-            if state.pending.is_empty() {
-                return Err(Error::Message(
-                    "this run is not waiting for approval".to_string(),
-                ));
-            }
-            let key = if !call_id.is_empty() && state.pending.contains_key(call_id) {
-                Some(call_id.to_string())
-            } else if call_id.is_empty() {
-                state.pending.keys().next().cloned()
-            } else {
-                None
-            };
-            let Some(key) = key else {
-                return Err(Error::Message(format!(
-                    "no pending approval for call {call_id:?}"
-                )));
-            };
-            // Remove it before waking the gate so a second tap cannot answer
-            // twice.
-            let pending = state.pending.remove(&key).expect("pending call");
-            (key, pending, state.meta.clone())
-        };
-        let _ = key;
-        let _ = pending.sender.send(ApprovalDecision {
-            allowed,
-            reason: reason.to_string(),
-        });
-        Ok(meta)
-    }
-
     /// Returns run metadata from memory, or from D1 after a restart.
     pub async fn get(&self, id: &str) -> Result<Option<Run>> {
         if let Some(run) = self.lookup(id) {
@@ -647,14 +469,6 @@ fn new_run_id() -> String {
         return format!("run_{}", unix_now());
     }
     format!("run_{}", hex::encode(buffer))
-}
-
-fn truncate_approval(text: &str) -> String {
-    const LIMIT: usize = 8 * 1024;
-    if text.len() <= LIMIT {
-        return text.to_string();
-    }
-    format!("{}…", &text[..floor_boundary(text, LIMIT)])
 }
 
 fn truncate_chars(text: &str, limit: usize) -> String {
@@ -827,67 +641,5 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.kind == KIND_ASSISTANT && event.data["text"] == "a"));
-    }
-
-    struct ApprovalExecutor {
-        manager: StdMutex<Option<Arc<Manager>>>,
-        run_id: StdMutex<String>,
-    }
-
-    #[async_trait]
-    impl ChatExecutor for ApprovalExecutor {
-        async fn execute(
-            &self,
-            job: ChatJob,
-            _sink: Arc<SseSink>,
-            cancel: CancellationToken,
-        ) -> std::result::Result<(), String> {
-            let manager = self.manager.lock().unwrap().clone().expect("manager");
-            *self.run_id.lock().unwrap() = job.run_id.clone();
-            let run = manager.lookup(&job.run_id).expect("active run");
-            let (allowed, reason, result) = run
-                .approval_gate(
-                    &cancel,
-                    ToolCall {
-                        id: "call_1".to_string(),
-                        name: "shell".to_string(),
-                        arguments: "{}".to_string(),
-                    },
-                )
-                .await;
-            result?;
-            assert!(allowed);
-            assert_eq!(reason, "because");
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn an_approval_gate_waits_for_the_decision() {
-        let executor = Arc::new(ApprovalExecutor {
-            manager: StdMutex::new(None),
-            run_id: StdMutex::new(String::new()),
-        });
-        let manager = Arc::new(Manager::new(Arc::new(MemoryStore::new()), executor.clone()));
-        *executor.manager.lock().unwrap() = Some(manager.clone());
-        manager.set_approval_tools(&["shell".to_string()]).await;
-
-        let (created, _) = manager.create(request()).await.expect("create");
-        let mut waiting = false;
-        for _ in 0..100 {
-            let run = manager.get(&created.id).await.expect("get").expect("run");
-            if run.status == Status::WaitingApproval {
-                waiting = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(waiting, "run should be waiting for approval");
-        manager
-            .approve(&created.id, "call_1", "approve", "because")
-            .await
-            .expect("approve");
-        let finished = wait_terminal(&manager, &created.id).await;
-        assert_eq!(finished.status, Status::Done);
     }
 }

@@ -1415,7 +1415,6 @@ fn options(max_tokens: i64, tools: Vec<aixodia_provider::ToolDef>) -> Completion
         user: String::new(),
         session_id: String::new(),
         window: aixodia_session::Window::new(0),
-        run_id: String::new(),
         cancel: tokio_util::sync::CancellationToken::new(),
         reused_user: None,
     }

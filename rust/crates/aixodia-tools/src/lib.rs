@@ -235,9 +235,6 @@ pub fn builtin_list() -> Vec<ToolDef> {
     .collect()
 }
 
-/// Names the approval gate pauses on, as in the Go engine.
-pub const GATED_TOOLS: [&str; 3] = ["shell", "write", "edit"];
-
 /// A handle the opencode adapter can inject.
 pub fn builtin_fn() -> aixodia_provider::opencode::BuiltinFn {
     std::sync::Arc::new(builtin)

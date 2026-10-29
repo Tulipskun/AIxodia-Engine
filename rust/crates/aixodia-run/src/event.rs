@@ -5,16 +5,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// The lifecycle of a run. `waiting_approval` is written before a tool that
-/// needs a human decision is executed, so a restart leaves a run that can be
-/// answered instead of one that silently continued.
+/// The lifecycle of a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum Status {
     #[default]
     Running,
-    WaitingApproval,
     Done,
     Failed,
     Cancelled,
@@ -25,7 +22,6 @@ impl Status {
     pub fn as_str(self) -> &'static str {
         match self {
             Status::Running => "running",
-            Status::WaitingApproval => "waiting_approval",
             Status::Done => "done",
             Status::Failed => "failed",
             Status::Cancelled => "cancelled",
@@ -58,7 +54,6 @@ pub const KIND_TOOL: &str = "tool";
 pub const KIND_TURN: &str = "turn";
 pub const KIND_FINAL: &str = "final";
 pub const KIND_ERROR: &str = "error";
-pub const KIND_APPROVAL: &str = "approval";
 
 /// One numbered entry in a run's log. `seq` is per run and starts at 1.
 #[derive(Debug, Clone, Serialize, Deserialize)]

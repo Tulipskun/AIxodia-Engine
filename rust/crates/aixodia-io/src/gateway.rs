@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aixodia_provider::{Message, Registry, ToolCall};
+use aixodia_provider::{Message, Registry};
 use aixodia_session::{
     AgentPatch, Error as SessionError, NewSession, Session, Turn, TurnInput, UnfinishedTurn,
 };
@@ -139,19 +139,6 @@ impl StateStore for aixodia_db::State {
     }
 }
 
-/// Decides whether one tool call may run. A run id is carried with the request
-/// so the gate can find the run it belongs to. Returning `false` with a reason
-/// turns the result into a normal tool error the model can read and react to.
-pub type ApprovalGate = Arc<
-    dyn Fn(
-            String,
-            ToolCall,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = anyhow::Result<(bool, String)>> + Send>,
-        > + Send
-        + Sync,
->;
-
 pub struct Gateway {
     pub(crate) sessions: Arc<dyn SessionStore>,
     pub(crate) registry: Arc<Registry>,
@@ -172,8 +159,6 @@ pub struct Gateway {
     /// resend a message whose ack was lost while the first turn still runs; the
     /// duplicate must not start a second answer.
     turns: Mutex<HashSet<String>>,
-    /// Consulted before a mutating tool runs.
-    approval: RwLock<Option<ApprovalGate>>,
 }
 
 /// One upstream's model list and when it was fetched.
@@ -203,20 +188,7 @@ impl Gateway {
             state: RwLock::new(None),
             objectives: RwLock::new(None),
             turns: Mutex::new(HashSet::new()),
-            approval: RwLock::new(None),
         }
-    }
-
-    /// Installs the human-in-the-loop gate. Without one every tool runs.
-    pub fn set_approval_gate(&self, gate: ApprovalGate) {
-        *self.approval.write().unwrap_or_else(|e| e.into_inner()) = Some(gate);
-    }
-
-    pub(crate) fn approval_gate(&self) -> Option<ApprovalGate> {
-        self.approval
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
     }
 
     /// Claims a chat for one handling turn. Direct HTTP callers and the mobile

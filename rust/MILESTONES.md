@@ -26,7 +26,7 @@ cargo clippy --workspace --all-targets   # rustup component add clippy
 | `io/terminal/` (pty, tmux, ring, tickets) | `aixodia-terminal` | ported |
 | `io/mobile/`, `io/wsock/` | `aixodia-mobile`, `aixodia-wsock` | ported |
 | `io/relay/` (direct `/room` transport) | `aixodia-relay` | ported |
-| `run/` (runs, events, approval gate) | `aixodia-run` | ported |
+| `run/` (runs, events) | `aixodia-run` | ported |
 | `selfupdate/` (handover, exec) | `aixodia-selfupdate` | ported |
 | `imageprep/`, `goals/` | `aixodia-imageprep`, `aixodia-goals` | ported |
 | `main.go` + `tunnel.go` + `handover.go` | `aixodia-engine` (bin) | ported |

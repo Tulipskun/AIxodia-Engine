@@ -17,7 +17,6 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::HeaderMap;
 use axum::middleware;
 use axum::routing::get;
 use futures_util::StreamExt;
@@ -146,15 +145,6 @@ async fn run(cancel: CancellationToken) -> anyhow::Result<()> {
     });
     let runs = Arc::new(Manager::new(Arc::new(D1Store::new(db.clone())), executor));
     runs.start().await?;
-    let gate_runs = runs.clone();
-    gateway.set_approval_gate(Arc::new(move |run_id: String, call| {
-        let runs = gate_runs.clone();
-        Box::pin(async move {
-            runs.gate(&run_id, call)
-                .await
-                .map_err(|err| anyhow::anyhow!(err))
-        })
-    }));
 
     let hub = Arc::new(Hub::new());
     let chat = chat_func(gateway.clone());
@@ -316,8 +306,7 @@ async fn chat_once(gateway: Arc<Gateway>, call: ChatCall) -> Result<ChatResult, 
     }))
     .map_err(|err| err.to_string())?;
 
-    let response =
-        aixodia_io::chat::chat(State(gateway.clone()), HeaderMap::new(), Bytes::from(body)).await;
+    let response = aixodia_io::chat::chat(State(gateway.clone()), Bytes::from(body)).await;
 
     let mut result = ChatResult::default();
     if response.status() != axum::http::StatusCode::OK {
@@ -501,16 +490,9 @@ impl ChatExecutor for GatewayExecutor {
             "attachments": attachments,
         }))
         .map_err(|err| err.to_string())?;
-        let mut request = HeaderMap::new();
-        if let Ok(value) = axum::http::HeaderValue::from_str(&job.run_id) {
-            // The gateway reads the run id from this private header exactly as
-            // Go carries it in the request context.
-            request.insert("X-Aixodia-Run", value);
-        }
         let response = tokio::select! {
             response = aixodia_io::chat::chat(
                 State(self.gateway.clone()),
-                request,
                 Bytes::from(body),
             ) => response,
             _ = cancel.cancelled() => return Err("cancelled".to_string()),

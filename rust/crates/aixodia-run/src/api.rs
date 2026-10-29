@@ -1,5 +1,5 @@
-//! The run API: `POST /v1/runs`, `GET /v1/runs/{id}`, its event stream and the
-//! approval endpoints.
+//! The run API: `POST /v1/runs`, `GET /v1/runs/{id}`, its event stream and
+//! cancellation.
 //!
 //! Port of the Go `run/api.go`.
 
@@ -14,7 +14,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
-use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -27,7 +26,6 @@ pub fn router(manager: Arc<Manager>) -> Router {
         .route("/v1/runs/:id", get(handle_get))
         .route("/v1/runs/:id/events", get(handle_events))
         .route("/v1/runs/:id/cancel", post(handle_cancel))
-        .route("/v1/runs/:id/approve", post(handle_approve))
         .with_state(manager)
 }
 
@@ -80,30 +78,6 @@ async fn handle_cancel(State(manager): State<Arc<Manager>>, Path(id): Path<Strin
             };
             error(code, message)
         }
-    }
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct ApproveBody {
-    #[serde(default)]
-    call_id: String,
-    #[serde(default)]
-    decision: String,
-    #[serde(default)]
-    reason: String,
-}
-
-async fn handle_approve(
-    State(manager): State<Arc<Manager>>,
-    Path(id): Path<String>,
-    Json(body): Json<ApproveBody>,
-) -> Response {
-    match manager
-        .approve(&id, &body.call_id, &body.decision, &body.reason)
-        .await
-    {
-        Ok(meta) => (StatusCode::ACCEPTED, Json(json!({"run": meta}))).into_response(),
-        Err(err) => error(StatusCode::CONFLICT, err.to_string()),
     }
 }
 

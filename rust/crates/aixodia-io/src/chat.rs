@@ -19,7 +19,7 @@ use aixodia_session::{
 use aixodia_tools::ToolContext;
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::Response as AxumResponse;
 use futures_util::StreamExt as _;
 use serde::Deserialize;
@@ -186,7 +186,6 @@ pub struct CompletionOptions {
     /// Names the conversation to the provider's prompt cache, so every turn of
     /// one chat carries the same cache key.
     pub window: Window,
-    pub run_id: String,
     pub cancel: CancellationToken,
     pub reused_user: Option<Turn>,
 }
@@ -327,7 +326,7 @@ pub(crate) fn attach_tool_durations(
     }
 }
 
-pub async fn chat(State(g): State<Arc<Gateway>>, headers: HeaderMap, body: Bytes) -> AxumResponse {
+pub async fn chat(State(g): State<Arc<Gateway>>, body: Bytes) -> AxumResponse {
     let body: ChatRequest = match decode_body(body) {
         Ok(body) => body,
         Err(err) => {
@@ -345,12 +344,6 @@ pub async fn chat(State(g): State<Arc<Gateway>>, headers: HeaderMap, body: Bytes
             "messages must not be empty",
         );
     }
-    let run_id = headers
-        .get("X-Aixodia-Run")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-
     let stored: Option<Session> = if body.session_id.is_empty() {
         None
     } else {
@@ -502,7 +495,6 @@ pub async fn chat(State(g): State<Arc<Gateway>>, headers: HeaderMap, body: Bytes
         user: body.user,
         session_id: stored.as_ref().map(|s| s.id.clone()).unwrap_or_default(),
         window: history_window(&saved_turns, &saved, &history),
-        run_id,
         cancel: CancellationToken::new(),
         reused_user,
     };
@@ -1288,24 +1280,6 @@ impl Gateway {
                 Vec::new(),
             );
         };
-        if let Some(gate) = self.approval_gate() {
-            if !options.run_id.is_empty() {
-                match gate(options.run_id.clone(), call.clone()).await {
-                    Err(err) => {
-                        return (tool_error(&format!("approval failed: {err}")), Vec::new())
-                    }
-                    Ok((false, reason)) => {
-                        let reason = if reason.trim().is_empty() {
-                            "the user denied this call".to_string()
-                        } else {
-                            reason
-                        };
-                        return (tool_error(&format!("tool denied: {reason}")), Vec::new());
-                    }
-                    Ok((true, _)) => {}
-                }
-            }
-        }
         let context = ToolContext {
             session_id: options.session_id.clone(),
             store: self.objective_store(),

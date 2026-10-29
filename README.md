@@ -68,8 +68,7 @@ Chat is a run, not a request that dies with the phone. The phone creates one
 with `POST /v1/runs`, receives `id` immediately, and reads numbered events from
 `GET /v1/runs/{id}/events?after=<seq>` (SSE, replay first, live afterwards).
 Closing the app does not stop the worker. `POST /v1/runs/{id}/cancel` stops a
-turn, and tools listed in the approval gate (`shell`, `write`, `edit`) pause
-with `waiting_approval` until `POST /v1/runs/{id}/approve`. Every event is in
+turn. Tools run without asking for confirmation. Every event is in
 D1 before it can be missed; a restart marks unfinished runs `interrupted` rather
 than pretending a goroutine survived.
 

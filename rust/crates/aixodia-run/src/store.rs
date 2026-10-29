@@ -143,7 +143,9 @@ impl Store for D1Store {
 
     /// Marks work this process cannot still be running. A task does not survive
     /// a restart; saying "running" would make the phone wait for events that
-    /// will never arrive.
+    /// will never arrive. `waiting_approval` is a status older builds wrote;
+    /// no build writes it any more, but rows already in D1 still carry it and
+    /// would otherwise read back as running forever.
     async fn interrupt_stale(&self) -> Result<()> {
         self.db
             .query(
@@ -206,7 +208,6 @@ impl Store for D1Store {
 
 fn run_from_row(row: &aixodia_db::Row) -> Run {
     let status = match string_field(row, "status").as_str() {
-        "waiting_approval" => Status::WaitingApproval,
         "done" => Status::Done,
         "failed" => Status::Failed,
         "cancelled" => Status::Cancelled,
