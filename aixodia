@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# aixodia — start the AIxodia engine in the background (127.0.0.1:8787 behind a
-# Cloudflare quick tunnel), print the public address, then stay on the log.
+# aixodia — the AIxodia engine: a background process on 127.0.0.1:8787 behind a
+# Cloudflare quick tunnel. `aixodia` alone answers what is installed and how to
+# drive it; it never starts anything on its own.
 #
 # Only one secret is needed: CF_TOKEN, which the engine uses to publish its
 # tunnel URL and chat history to D1 so the phone can find it.
 #
 #   export CF_TOKEN=xxxxx
-#   aixodia            # start (background) and print the log; Ctrl-C leaves it running
-#   aixodia status      # is it up, and at which url
-#   aixodia logs        # tail the engine log
-#   aixodia stop        # shut it down
-#   aixodia update      # install the published build and restart into it
+#   aixodia             # version and usage
+#   aixodia start        # start in the background and print the log; Ctrl-C leaves it running
+#   aixodia status       # is it up, and at which url
+#   aixodia logs         # tail the engine log
+#   aixodia stop         # shut it down
+#   aixodia update       # install the published build and restart into it
 set -uo pipefail
 
 AIXODIA_HOME="${AIXODIA_HOME:-$HOME/.aixodia}"
@@ -244,14 +246,55 @@ cmd_logs() {
   if [ -f "$LOG_FILE" ]; then tail -n "${1:-40}" "$LOG_FILE"; else echo "aixodia: no log yet"; fi
 }
 
+usage() {
+  cat <<'USAGE'
+usage: aixodia <command>
+
+  start      start the engine in the background, then print its log
+             (Ctrl-C stops the reading; the engine keeps running)
+  stop       shut the engine down
+  status     whether it is up, and at which url
+  logs [n]   the last n lines of the engine log (default 40)
+  update     install the published build and restart into it
+
+CF_TOKEN must be set before start.
+USAGE
+}
+
+# engine_version prints what the running engine calls itself. That is the only
+# version the launcher can know: the binary it starts takes no --version, and a
+# guess printed in its place would be a lie about what is installed.
+engine_version() {
+  local body
+  body="$(healthz)" || return 1
+  printf '%s' "$body" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+# The bare command answers the two questions a person at a prompt have: what is
+# here, and what can I ask it to do.
+cmd_show() {
+  local version
+  version="$(engine_version 2>/dev/null || true)"
+  if [ -n "$version" ]; then
+    echo "aixodia $version"
+  else
+    echo "aixodia: engine not running, so no version to report"
+  fi
+  echo
+  usage
+}
+
 case "${1:-}" in
+  ""|help|-h|--help) cmd_show ;;
+  start|up) cmd_start ;;
   stop) cmd_stop ;;
   status) cmd_status ;;
   logs) cmd_logs "${2:-40}" ;;
   update) cmd_update ;;
-  ""|start|up) cmd_start ;;
   *)
-    echo "usage: aixodia [start|stop|status|logs|update]" >&2
+    echo "aixodia: unknown command '$1'" >&2
+    echo >&2
+    usage >&2
     exit 2
     ;;
 esac

@@ -13,6 +13,20 @@ fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
 
 tmp_home() { mktemp -d; }
 
+# wait_for_port prints the port a handshake stub bound, once its log reports it.
+# The stub prints its tunnel url before it binds, so `start` can answer first and
+# a single read of the log races itself.
+wait_for_port() {
+  local log="$1" port="" i
+  for i in $(seq 1 20); do
+    port=$(sed -n 's/.*listening on \([0-9][0-9]*\).*/\1/p' "$log" | tail -1)
+    [ -n "$port" ] && break
+    sleep 0.25
+  done
+  printf '%s' "$port"
+}
+
+
 # Stub engine: logs the tunnel url it published, then stays alive until killed.
 make_stub_engine() {
   cat > "$1" <<'STUB'
@@ -38,7 +52,7 @@ make_cloudflared() {
 
 # --- missing CF_TOKEN: refuse before starting anything ------------------------
 home=$(tmp_home); bin=$(tmp_home)/aixodia-engine; make_stub_engine "$bin"
-out=$(env -u CF_TOKEN AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" bash "$LAUNCHER" 2>&1); rc=$?
+out=$(env -u CF_TOKEN AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" bash "$LAUNCHER" start 2>&1); rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi "CF_TOKEN"; then
   pass "start without CF_TOKEN fails with a message"
 else
@@ -48,6 +62,26 @@ if [ ! -f "$home/aixodia.pid" ]; then
   pass "no pidfile written when CF_TOKEN is missing"
 else
   fail "pidfile written without CF_TOKEN"
+fi
+
+# --- the bare command: it says what is here, and starts nothing --------------
+home=$(tmp_home); bin=$(tmp_home)/aixodia-engine; make_stub_engine "$bin"
+out=$(env -u CF_TOKEN AIXODIA_HOME="$home" AIXODIA_LOCAL_URL="http://127.0.0.1:1" \
+      AIXODIA_ENGINE_BIN="$bin" bash "$LAUNCHER" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "^usage: aixodia" && printf '%s' "$out" | grep -q "start"; then
+  pass "aixodia with no command prints the usage"
+else
+  fail "bare aixodia (rc=$rc, out=$out)"
+fi
+if printf '%s' "$out" | grep -qi "not running"; then
+  pass "aixodia with no command says there is no engine to report a version of"
+else
+  fail "bare aixodia version line (out=$out)"
+fi
+if [ ! -f "$home/aixodia.pid" ]; then
+  pass "aixodia with no command does not start an engine"
+else
+  fail "bare aixodia started an engine"
 fi
 
 # --- status when not running -------------------------------------------------
@@ -62,7 +96,7 @@ fi
 # --- already running: do not start a second engine ---------------------------
 home=$(tmp_home); bin=$(tmp_home)/aixodia-engine; make_stub_engine "$bin"
 echo "$$" > "$home/aixodia.pid"
-out=$(CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" bash "$LAUNCHER" 2>&1); rc=$?
+out=$(CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" bash "$LAUNCHER" start 2>&1); rc=$?
 if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qi "already running"; then
   pass "second start reports already running"
 else
@@ -77,7 +111,7 @@ fi
 # --- start, then status, stop, status ---------------------------------------
 home=$(tmp_home); fakebin=$(tmp_home); bin=$fakebin/aixodia-engine
 make_cloudflared "$fakebin"; make_stub_engine "$bin"
-out=$(CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_TUNNEL_WAIT=15 PATH="$fakebin:$PATH" bash "$LAUNCHER" 2>&1); rc=$?
+out=$(CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_TUNNEL_WAIT=15 PATH="$fakebin:$PATH" bash "$LAUNCHER" start 2>&1); rc=$?
 if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "https://stub-tunnel.trycloudflare.com"; then
   pass "start prints the tunnel address and returns"
 else
@@ -118,7 +152,7 @@ home=$(tmp_home); fakebin=$(tmp_home); bin=$fakebin/aixodia-engine
 make_cloudflared "$fakebin"; make_stub_engine "$bin"
 out=$(timeout -k 2 10 env CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" \
       AIXODIA_TUNNEL_WAIT=15 PATH="$fakebin:$PATH" \
-      script -qec "bash $LAUNCHER" /dev/null 2>&1)
+      script -qec "bash $LAUNCHER start" /dev/null 2>&1)
 if printf '%s' "$out" | grep -q "engine started" && printf '%s' "$out" | grep -q "stub-tunnel"; then
   pass "start on a terminal prints the log"
 else
@@ -243,7 +277,7 @@ CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_TUNNEL_WAIT=15
   PATH="$fakebin:$PATH" bash "$LAUNCHER" start >"$home/start.out" 2>"$error_log"
 pid=$(cat "$home/aixodia.pid" 2>/dev/null || echo "")
 # The stub serves /healthz on a port it picks itself and prints into the log.
-port=$(sed -n 's/.*listening on \([0-9][0-9]*\).*/\1/p' "$home/aixodia.log" | tail -1)
+port=$(wait_for_port "$home/aixodia.log")
 if [ -n "$port" ]; then
   out=$(CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_LOCAL_URL="http://127.0.0.1:$port" \
         AIXODIA_UPDATE_WAIT=10 PATH="$fakebin:$PATH" bash "$LAUNCHER" update 2>&1); rc=$?
@@ -273,7 +307,7 @@ make_cloudflared "$fakebin"; make_handshake_engine "$bin"
 CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_TUNNEL_WAIT=15 \
   PATH="$fakebin:$PATH" bash "$LAUNCHER" start >/dev/null 2>&1
 engine_pid=$(cat "$home/aixodia.pid" 2>/dev/null || echo "")
-port=$(sed -n 's/.*listening on \([0-9][0-9]*\).*/\1/p' "$home/aixodia.log" | tail -1)
+port=$(wait_for_port "$home/aixodia.log")
 echo "$$" > "$home/aixodia.pid"   # claims to be this test, not the engine
 if [ -n "$port" ]; then
   out=$(env -u CF_TOKEN AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" \
@@ -295,6 +329,25 @@ else
 fi
 kill "$engine_pid" 2>/dev/null
 rm -f "$home/aixodia.pid"
+
+# --- the bare command names the build that is running ------------------------
+home=$(tmp_home); fakebin=$(tmp_home); bin=$fakebin/aixodia-engine
+make_cloudflared "$fakebin"; make_handshake_engine "$bin"
+CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" AIXODIA_TUNNEL_WAIT=15 \
+  PATH="$fakebin:$PATH" bash "$LAUNCHER" start >/dev/null 2>&1
+port=$(wait_for_port "$home/aixodia.log")
+if [ -n "$port" ]; then
+  out=$(AIXODIA_HOME="$home" AIXODIA_LOCAL_URL="http://127.0.0.1:$port" bash "$LAUNCHER" 2>&1); rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "aixodia-engine/1.1" \
+     && printf '%s' "$out" | grep -q "^usage: aixodia"; then
+    pass "aixodia with no command reports the running version and the usage"
+  else
+    fail "bare aixodia with an engine up (rc=$rc, out=$out)"
+  fi
+else
+  fail "handshake stub did not report a port for the version case (log: $(tail -3 "$home/aixodia.log" 2>/dev/null))"
+fi
+AIXODIA_HOME="$home" bash "$LAUNCHER" stop >/dev/null 2>&1
 
 echo
 if [ "$fails" -eq 0 ]; then
