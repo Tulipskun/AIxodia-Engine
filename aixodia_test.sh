@@ -110,6 +110,28 @@ else
   fail "stop left the pidfile"
 fi
 
+# --- start on a terminal: it prints the log instead of giving the prompt back --
+# `script` hands the launcher a real terminal, which is the only case that
+# follows; `timeout` stands in for the Ctrl-C that ends the follow, and the
+# engine has to outlive it.
+home=$(tmp_home); fakebin=$(tmp_home); bin=$fakebin/aixodia-engine
+make_cloudflared "$fakebin"; make_stub_engine "$bin"
+out=$(timeout -k 2 10 env CF_TOKEN=x AIXODIA_HOME="$home" AIXODIA_ENGINE_BIN="$bin" \
+      AIXODIA_TUNNEL_WAIT=15 PATH="$fakebin:$PATH" \
+      script -qec "bash $LAUNCHER" /dev/null 2>&1)
+if printf '%s' "$out" | grep -q "engine started" && printf '%s' "$out" | grep -q "stub-tunnel"; then
+  pass "start on a terminal prints the log"
+else
+  fail "start follow on a terminal (out=$out)"
+fi
+pid=$(cat "$home/aixodia.pid" 2>/dev/null || echo "")
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+  pass "the engine outlives the log follow"
+else
+  fail "engine died with the follow (pid=$pid)"
+fi
+AIXODIA_HOME="$home" bash "$LAUNCHER" stop >/dev/null 2>&1
+
 # --- update with no engine running: installs and stops there ----------------
 home=$(tmp_home); fakebin=$(tmp_home); bin=$fakebin/aixodia-engine
 make_cloudflared "$fakebin"; make_stub_engine "$bin"
