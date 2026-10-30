@@ -1,4 +1,17 @@
 GOAL:
+[COMPLETED] A start from a terminal should not hand the prompt back (operator:
+            "ต่อไป ปรับให้ คำสั่ง aixodia เป็น aixodia start และไม่ต้องคืน shell
+            แต่ให้เป็นการ print log ออกมาแทน"). Bare `aixodia` already meant
+            `start`; what it did after starting was report the url and exit. It now
+            follows the log — `tail -n +1 -f` on the fresh file — so the terminal
+            shows the engine instead of a prompt, and Ctrl-C stops the reading, not
+            the engine (it is nohup'd and detached). The follow is gated on a real
+            terminal, so scripts and CI that run `aixodia start` still get their
+            prompt back and can reach `stop`; `update`'s restart passes
+            `nofollow` for the same reason. Two launcher tests added (a `script`
+            pty plus a `timeout` for the Ctrl-C); all 23 launcher cases pass here,
+            and the installed launcher on this host is the new one — verified
+            against the running engine, which stayed up after the follow was cut.
 [COMPLETED] The phone's last grid row was still a tmux status bar (operator's
             screenshot: `[aix-t-e61<der>"◆ …" 07:46 30-Oct-26`). `tmux::start` did
             ask for `status off`, but as a *second* client run after the spawn —
