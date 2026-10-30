@@ -168,7 +168,14 @@ PLAN:
             `cargo test -p aixodia-terminal` 9 passed — four on the decision and
             one that drives the engine's own `tmux::start` pty, drains its first
             paint, calls `Pty::kick()` and asserts bytes come back (skipped when
-            tmux is absent).
+            tmux is absent). Shipped as ce14ece: CI 41120799551 and Release
+            41120799779 green, and the daemon installed 20:15:47Z at 20:23:41Z.
+            Proved live against that build: a new shell echoed REKTEST-MARKER,
+            the WebSocket was dropped, and a same-size reattach received 328
+            binary bytes containing the marker — no resize, no keyboard. The
+            DELETE that ended the test shell answered 204 and the tmux session
+            was gone from `list-sessions`; only the operator's two real sessions
+            remain.
 [COMPLETED] Byte-diffed fresh ClientHellos: the engine's wreq hello now matches
             the CLI's exactly (JA3 md5 1523504b38f0fae0d881d4b6554aac1b, same
             cipher/extension/groups/sigalgs/ALPN order; only random differs)
