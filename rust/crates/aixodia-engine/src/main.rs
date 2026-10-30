@@ -151,6 +151,9 @@ async fn run(cancel: CancellationToken) -> anyhow::Result<()> {
     let mut terminal_server = TerminalServer::new(token.clone());
     terminal_server.tmux =
         aixodia_terminal::tmux_available() && std::env::var("AIXODIA_TMUX").as_deref() != Ok("0");
+    if terminal_server.tmux {
+        aixodia_terminal::tmux::hide_status_bars();
+    }
     let terminal = Arc::new(terminal_server);
     terminal.set_logf(Arc::new(|message| {
         d1log::info(message.clone());

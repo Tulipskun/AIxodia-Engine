@@ -189,21 +189,41 @@ pub fn start(
     }
     args.push(shell.to_string());
     args.push("-l".to_string());
-    let pty = Pty::start("tmux", &args, cols, rows, dir)?;
-    // The status bar spends a phone row on a session name and a clock.
-    let _ = Command::new("tmux")
-        .args([
-            "-L",
-            TMUX_SOCKET,
-            "set-option",
-            "-t",
-            &name,
-            "status",
-            "off",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    std::thread::sleep(Duration::from_millis(0));
-    Ok(pty)
+    // The status bar spends a phone row on a session name and a clock, so it is
+    // turned off in the same client round-trip that creates the session. A
+    // separate `set-option` after the spawn loses a race: the server may not
+    // exist yet, or may not have registered the name, and the failure is silent.
+    args.push(";".to_string());
+    args.push("set-option".to_string());
+    args.push("-t".to_string());
+    args.push(name.clone());
+    args.push("status".to_string());
+    args.push("off".to_string());
+    Pty::start("tmux", &args, cols, rows, dir)
+}
+
+/// Turns the status bar off on every session already on the server. Shells
+/// outlive an engine restart, so the sessions this boot merely adopts are the
+/// ones a previous build may have left with the bar showing.
+pub fn hide_status_bars() {
+    let Ok(output) = Command::new("tmux")
+        .args(["-L", TMUX_SOCKET, "list-sessions", "-F", "#{session_name}"])
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    for name in String::from_utf8_lossy(&output.stdout).lines() {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let _ = Command::new("tmux")
+            .args(["-L", TMUX_SOCKET, "set-option", "-t", name, "status", "off"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
 }
