@@ -1,7 +1,22 @@
 GOAL:
+[COMPLETED] A bare `aixodia` starts nothing (operator: "ไม่ ถ้าใช่แค่ aixodia จะไม่ทำงาน
+            แต่จะแสดง version และวิธีการใช้งานแทน" then "aixodia status only"). It
+            printed the version the running engine reports through /healthz — the
+            only version the launcher can honestly know, since the binary takes no
+            `--version` — or that there is no engine to report, then the usage.
+            Starting is `aixodia start`, which keeps the log follow from the entry
+            below; `help`/`-h`/`--help` answer the same as the bare command and an
+            unknown word names itself, prints the usage and exits 2. Launcher tests
+            grew to cover all of it, and the handshake stub's port is now read
+            through `wait_for_port` because the stub prints its url before it binds
+            — the three single reads raced and the suite failed one run in three.
+            Three clean runs here, and the installed launcher on this host is this
+            build.
 [COMPLETED] A start from a terminal should not hand the prompt back (operator:
             "ต่อไป ปรับให้ คำสั่ง aixodia เป็น aixodia start และไม่ต้องคืน shell
-            แต่ให้เป็นการ print log ออกมาแทน"). Bare `aixodia` already meant
+            แต่ให้เป็นการ print log ออกมาแทน") — read with the entry above: the
+            log follow belongs to `aixodia start`, and the bare command that this
+            entry left starting the engine is now the version-and-usage answer. Bare `aixodia` already meant
             `start`; what it did after starting was report the url and exit. It now
             follows the log — `tail -n +1 -f` on the fresh file — so the terminal
             shows the engine instead of a prompt, and Ctrl-C stops the reading, not
