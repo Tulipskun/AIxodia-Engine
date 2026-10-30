@@ -148,6 +148,27 @@ GOAL:
             inode.
 
 PLAN:
+[COMPLETED] Fix the blank terminal after a reconnect (operator: "หลังจากการ
+            reconnect เห็นหน้าจอว่าง ต้องเปิด/ปิดแป้นพิมพ์ก่อน 1 ครั้งถึงจะเห็น
+            หน้าจอ"). Under tmux the attach sends only the RIS reset — the ring
+            is dropped by replay_frame — and the pane's screen lives in the tmux
+            server, which repaints the client only when it gets a SIGWINCH. The
+            old kick fired only for an alternate-screen session on a same-size
+            attach, so a plain shell reattached to the pty that still ran the
+            first client came back to a cleared grid with nothing behind it;
+            opening the keyboard changed the size, TIOCSWINSZ signalled the
+            client, and the screen came back — which is exactly the workaround
+            the operator described. A pty probe (tmux 3.4) proved a SIGWINCH with
+            an unchanged size repaints the whole pane including its content
+            (293 bytes: prompt, `echo HELLO-WORLD`, output). `acquire` now kicks
+            whenever the size did not change and tmux is on (`reattach_kick`),
+            and the kick moved after the ready/replay writes and after the
+            subscriber is registered, so the repaint cannot be broadcast into
+            nothing. Gate: `cargo fmt --check` 0, clippy `-D warnings` 0, and
+            `cargo test -p aixodia-terminal` 9 passed — four on the decision and
+            one that drives the engine's own `tmux::start` pty, drains its first
+            paint, calls `Pty::kick()` and asserts bytes come back (skipped when
+            tmux is absent).
 [COMPLETED] Byte-diffed fresh ClientHellos: the engine's wreq hello now matches
             the CLI's exactly (JA3 md5 1523504b38f0fae0d881d4b6554aac1b, same
             cipher/extension/groups/sigalgs/ALPN order; only random differs)

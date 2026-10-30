@@ -345,18 +345,21 @@ impl Server {
                     session.last_act.store(now_unix(), Ordering::SeqCst);
                     let old_cols = session.cols.load(Ordering::SeqCst);
                     let old_rows = session.rows.load(Ordering::SeqCst);
-                    let kick = if cols > 0 && rows > 0 && (cols != old_cols || rows != old_rows) {
+                    let resized = cols > 0 && rows > 0 && (cols != old_cols || rows != old_rows);
+                    if resized {
                         session.cols.store(cols, Ordering::SeqCst);
                         session.rows.store(rows, Ordering::SeqCst);
                         let _ = session.pty.resize(cols, rows);
-                        false
-                    } else {
+                    }
+                    let kick = reattach_kick(
+                        self.tmux,
+                        resized,
                         session
                             .modes
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
-                            .alt_screen()
-                    };
+                            .alt_screen(),
+                    );
                     return Ok((session.clone(), kick));
                 }
             }
@@ -559,9 +562,6 @@ impl Server {
             (ring, modes)
         };
         let replay = replay_frame(self.tmux, &modes, &ring);
-        if kick {
-            let _ = session.pty.kick();
-        }
 
         let (mut reader, writer) = aixodia_wsock::ServerConn::new(stream).split();
         let ready = json!({
@@ -585,6 +585,12 @@ impl Server {
         if !replay.is_empty() && writer.write_message(OP_BINARY, &replay).await.is_err() {
             session.detach(sub_id);
             return Ok(());
+        }
+        // After the reset is on the wire, so the repaint it triggers lands on a
+        // screen that has already been cleared, and after the subscriber is
+        // registered, so the bytes are not broadcast into nothing.
+        if kick {
+            let _ = session.pty.kick();
         }
 
         let writer_session = session.clone();
@@ -718,6 +724,19 @@ fn replay_frame(tmux: bool, modes: &[u8], ring: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Whether a reattach must ask the client to paint the screen back.
+///
+/// A size change is itself the signal — TIOCSWINSZ reaches the client as
+/// SIGWINCH and it redraws — and without tmux the ring replays the shell's tail
+/// instead. What is left is a same-size attach: under tmux the ring is dropped
+/// and the screen lives in the tmux server, which paints only when a SIGWINCH
+/// reaches its client. Without the kick a reconnected phone sat on a cleared
+/// grid until the keyboard changed the size. A plain shell needs it only on the
+/// alternate screen, where the program owns the whole grid.
+fn reattach_kick(tmux: bool, resized: bool, alt_screen: bool) -> bool {
+    !resized && (tmux || alt_screen)
+}
+
 fn default_shell() -> String {
     if std::path::Path::new("/bin/bash").exists() {
         "/bin/bash".to_string()
@@ -837,4 +856,76 @@ async fn close(
         tmux::kill(&id);
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{reattach_kick, tmux};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_same_size_reattach_under_tmux_asks_for_a_repaint() {
+        // The pane lives in the tmux server and nothing but a SIGWINCH makes
+        // the client paint it; this is the reconnect the phone sees as blank.
+        assert!(reattach_kick(true, false, false));
+        assert!(reattach_kick(true, false, true));
+    }
+
+    #[test]
+    fn a_resize_is_its_own_repaint() {
+        // TIOCSWINSZ already signalled the client, tmux or not.
+        assert!(!reattach_kick(true, true, false));
+        assert!(!reattach_kick(false, true, false));
+    }
+
+    #[test]
+    fn a_plain_shell_reattaches_from_the_ring() {
+        assert!(!reattach_kick(false, false, false));
+    }
+
+    #[test]
+    fn a_full_screen_program_without_tmux_is_asked_to_paint() {
+        assert!(reattach_kick(false, false, true));
+    }
+
+    /// The pty the engine holds keeps its tmux client across a detach, and the
+    /// client paints nothing until a SIGWINCH reaches it — the repaint a
+    /// reconnected phone was missing. This drives the engine's own pty and kick.
+    /// Skipped where tmux is not installed.
+    #[test]
+    fn a_kick_repaints_the_tmux_pane() {
+        if !tmux::available() {
+            return;
+        }
+        let id = format!("kicktest-{}", std::process::id());
+        let Ok(pty) = tmux::start(&id, "/bin/bash", 40, 120, Some("/tmp")) else {
+            return;
+        };
+        let drain = |ms: u64| {
+            let mut out = Vec::new();
+            let mut buf = [0u8; 8192];
+            let deadline = Instant::now() + Duration::from_millis(ms);
+            while Instant::now() < deadline {
+                match pty.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => out.extend_from_slice(&buf[..n]),
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+            out
+        };
+        let first = drain(1_200);
+        // Let the startup paint finish, so nothing still in flight can be
+        // mistaken for the repaint the kick asks for.
+        let _ = drain(300);
+        let kicked = pty.kick().is_ok();
+        let repaint = drain(1_200);
+        tmux::kill(&id);
+        assert!(!first.is_empty(), "the tmux client never painted");
+        assert!(kicked, "the pty has no foreground group to signal");
+        assert!(!repaint.is_empty(), "a SIGWINCH repainted nothing");
+    }
 }
