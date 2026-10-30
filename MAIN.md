@@ -1,4 +1,19 @@
 GOAL:
+[COMPLETED] The phone's last grid row was still a tmux status bar (operator's
+            screenshot: `[aix-t-e61<der>"◆ …" 07:46 30-Oct-26`). `tmux::start` did
+            ask for `status off`, but as a *second* client run after the spawn —
+            the server may not exist yet and the new name may not be registered
+            yet, and the failure was swallowed: stderr to null, result ignored, and
+            a `sleep(Duration::from_millis(0))` where a wait used to be. Both live
+            sessions carried no session-level value at all, which is what the bar
+            on screen proved. The option is now chained into the creation command
+            (`new-session … ; set-option -t <name> status off`) so the server
+            applies it in the same round-trip it registers the session, and boot
+            calls `tmux::hide_status_bars()` to quiet the sessions a restart only
+            adopts. Applied to the running server by hand and verified: both
+            `aix-t-…` sessions report `status off`. Shipped as ffc2094: CI green
+            on build, test, `cargo fmt --check` and clippy `-D warnings`, and the
+            Release engine run published alongside it.
 [COMPLETED] Surface goals, plans, and compaction to the user (v1.160):
             (1) objectives keep a status (open/done/dropped) in D1 and
             MemoryStore, `Store::all()` reads every status; (2) every
