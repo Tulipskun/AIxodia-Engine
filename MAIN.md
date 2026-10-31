@@ -795,3 +795,10 @@ NOTE:
   live, so a client can ask again with the last sequence it applied over
   ordinary HTTP, which the tunnel passes through. Default (no poll) keeps the
   held SSE stream. New test: a_poll_answers_a_running_run_and_closes.
+  Deployed and proved live 2026-10-31T07:3xZ: CI 41175592393 and Release
+  41175592482 green, `aixodia update` swapped pid 1649 in place on the same
+  tunnel. Through that tunnel a `?poll=1` request answered in 40-170ms and a
+  live run's backlog grew poll over poll (6 events at 9.0s, 26 at 11.1s, 43 at
+  13.7s, done at 17.8s) instead of arriving as one burst at the end; `after=`
+  was confirmed to filter (after=2 -> empty while thinking, after=40 -> only
+  the tail). The nine probe-* sessions used for the measurements are deleted.
