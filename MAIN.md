@@ -1,5 +1,35 @@
 GOAL:
-[IN PROGRESS] A spent free-tier quota must fail fast, not stall the phone for
+[IN PROGRESS] D1 must be a backup, not a step of the turn (operator: "ไม่ใช่เพราะ
+            error 429 แต่ในสถานการณ์ปกติมันก็ช้าเหมือนกัน" then "D1 ทำหลังจากกระบวนการทุกอย่าง
+            ไว้เป็น backup ไม่ต้องรอ D1 เขียนเสร็จ"). Measured on localhost with a
+            warm provider: the first `request` block only appeared at +4.65s,
+            +4.86s, +7.15s across three turns, and the provider answer itself
+            took ~1s. The waiting is `aixodia-db` — every call is an HTTPS
+            request to the Cloudflare REST API (~0.6–1.2s each) — and a turn
+            made them in series before it could ask the model anything:
+            `sessions.get`, `sessions.turns`, the user-row write
+            (`persist_user_before`), the run row write before the 202
+            (`store.insert`), then a `trail.flush` write between every tool
+            round, and the answer write before the `final` frame. So: the two
+            session reads run beside each other, the run row is written behind
+            the 202, and every turn write goes onto a per-chat backup queue
+            that the turn never waits on, serialized so the question lands
+            before the reply and each round's tool steps before the next
+            round's. The next turn drains that chat's queue before reading
+            history, so the model still sees its own last answer; a chat whose
+            writes already landed pays nothing. The `final` frame keeps a turn
+            object built from the response in memory (seq 0) and says
+            `turns_synced: false`, which is the app's existing "re-read D1"
+            recovery path. Caught while proving it: a queued write that holds a
+            strong sink holds the SSE sender with it, so the turn finished and
+            `[DONE]` was written while the response body stayed open — the read
+            never returned. A row write now reports through a `Reporter`, either
+            `Live` (the turn waits, so the strong sink costs nothing) or
+            `Behind` (weak, upgraded only at the moment it reports), and the new
+            test a_store_that_takes_its_time_does_not_hold_the_answer parks the
+            store mid-write and asserts both the closed stream and the rows
+            arriving in order once it is released.
+[COMPLETED] A spent free-tier quota must fail fast, not stall the phone for
             half a minute (operator: "แก้ไขความเร็วหน่อย มันไม่ควรช้าขนาดนี้",
             screenshot of a first turn stuck on "Sending request to provider…
             17s"). The engine log shows the turn ended in
@@ -15,7 +45,11 @@ GOAL:
             terminal and returns false, so the turn surfaces after one call; a
             plain "rate limit"/"too many requests" 429 still paces. New tests
             a_momentary_throttle_is_worth_retrying and
-            a_spent_free_quota_fails_fast_instead_of_stalling.
+            a_spent_free_quota_fails_fast_instead_of_stalling. Shipped: 040cf55
+            — CI 41187238106 and Release engine 41187238156 both green, and
+            `aixodia update` swapped pid 1649 in place at 09:15:18 installing
+            the build published 09:13:36. It was the fix for the log-visible
+            failure, not for the ordinary slowness; see the entry above.
 [COMPLETED] A tool block must carry its own done-ness, not infer it from an
             empty result (operator: "การแสดงผลบัคอีกแล้ว" — a `rm` shell card spun
             forever). `tool_block` derived STATE_DONE only when the result text

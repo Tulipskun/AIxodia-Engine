@@ -334,11 +334,17 @@ impl Manager {
             .unwrap()
             .insert(meta.id.clone(), run.clone());
 
-        if let Err(err) = self.store.insert(&meta).await {
-            self.forget(&meta.id);
-            cancel.cancel();
-            return Err(err);
-        }
+        // The run row is a backup of a turn this process already owns: the store
+        // is one HTTPS call per write, and making the phone wait for it before
+        // its message is even accepted is the slowest possible place to learn
+        // that. The turn runs from the memory copy either way.
+        let store = self.store.clone();
+        let stored_meta = meta.clone();
+        tokio::spawn(async move {
+            if let Err(err) = store.insert(&stored_meta).await {
+                tracing::warn!(run = %stored_meta.id, error = %err, "run: save start");
+            }
+        });
 
         if request.retry {
             run.append(KIND_USER, json!({"retry": true}));

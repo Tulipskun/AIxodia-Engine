@@ -456,8 +456,11 @@ async fn chat_completion_streams() {
     );
 }
 
+/// The stream no longer waits for the store: it names the answer it has in
+/// memory, says the rows are not synced yet, and pushes only rows that really
+/// landed while it stayed open.
 #[tokio::test]
-async fn the_stream_pushes_every_committed_turn_with_authoritative_seqs() {
+async fn the_stream_pushes_only_rows_the_store_has() {
     let _guard = config_lock().lock().unwrap();
     let store = Arc::new(MemStore::new());
     let (gateway, _upstream) = new_test_gateway(store.clone()).await;
@@ -476,42 +479,171 @@ async fn the_stream_pushes_every_committed_turn_with_authoritative_seqs() {
 
     let mut pushed: Vec<Turn> = Vec::new();
     let mut answer = Turn::default();
-    let mut synced = false;
+    let mut synced = true;
     for event in sse_events(&body) {
         if let Some(turns) = event.get("turns").and_then(Value::as_array) {
             for turn in turns {
                 pushed.push(serde_json::from_value(turn.clone()).expect("turn"));
             }
         }
-        if let Some(turn) = event.get("turn") {
-            let parsed: Turn = serde_json::from_value(turn.clone()).expect("turn");
-            if parsed.seq > 0 {
-                answer = parsed;
-                synced = event
-                    .get("turns_synced")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-            }
+        if event.get("turn").is_some() {
+            let parsed: Turn = serde_json::from_value(event["turn"].clone()).expect("turn");
+            answer = parsed;
+            synced = event
+                .get("turns_synced")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
         }
     }
 
+    // The rows went to the chat's backup queue, so the turn closed without
+    // waiting for them. Reading the queue is what the next turn of that chat
+    // does before it asks the model anything.
+    gateway.await_backups("s1").await;
     let stored = store.stored_turns("s1");
+    assert!(stored.len() >= 4, "stored={stored:?}");
+    // Every row the stream did name is a stored row, in the stored order: the
+    // reader never sees a row the store does not have.
     assert!(
-        synced && pushed.len() == stored.len() && stored.len() >= 4,
-        "synced={synced} pushed={pushed:?} stored={stored:?}"
+        pushed.len() <= stored.len(),
+        "pushed={pushed:?} stored={stored:?}"
     );
-    for (index, stored_turn) in stored.iter().enumerate() {
+    for (index, pushed_turn) in pushed.iter().enumerate() {
         assert_eq!(
-            pushed[index].seq, stored_turn.seq,
-            "row {index} mismatch: {:?} != {:?}",
-            pushed[index], stored_turn
+            pushed_turn.seq, stored[index].seq,
+            "row {index} mismatch: {pushed_turn:?} != {:?}",
+            stored[index]
         );
-        assert_eq!(pushed[index].role, stored_turn.role, "row {index} role");
-        assert_eq!(pushed[index].text, stored_turn.text, "row {index} text");
+        assert_eq!(pushed_turn.text, stored[index].text, "row {index} text");
     }
     let last = stored.last().expect("stored row");
-    assert_eq!(answer.seq, last.seq, "final answer differs from stored row");
-    assert_eq!(answer.text, last.text);
+    assert_eq!(answer.text, last.text, "final answer text");
+    assert_eq!(answer.model, last.model, "final answer model");
+    assert_eq!(answer.seq, 0, "the closing row names no seq yet");
+    assert!(!synced, "an unwritten row must not claim it is synced");
+}
+
+/// A store whose writes answer only when the test lets them through — the shape
+/// of a D1 call that is taking its time. The turn must answer anyway: what it
+/// owes the store is a backup, and the reader is not waiting for it.
+struct SlowStore {
+    inner: MemStore,
+    gate: tokio::sync::Mutex<()>,
+}
+
+impl SlowStore {
+    fn new() -> Self {
+        Self {
+            inner: MemStore::new(),
+            gate: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    fn stored(&self, id: &str) -> Vec<Turn> {
+        self.inner.stored_turns(id)
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionStore for SlowStore {
+    async fn create(&self, params: NewSession) -> Result<Session, SessionError> {
+        self.inner.create(params).await
+    }
+    async fn get(&self, id: &str) -> Result<Session, SessionError> {
+        self.inner.get(id).await
+    }
+    async fn list(&self) -> Result<Vec<Session>, SessionError> {
+        self.inner.list().await
+    }
+    async fn delete(&self, id: &str) -> Result<(), SessionError> {
+        self.inner.delete(id).await
+    }
+    async fn save_config(&self, id: &str, saved: &Session) -> Result<(), SessionError> {
+        self.inner.save_config(id, saved).await
+    }
+    async fn save_agent(&self, id: &str, patch: &AgentPatch) -> Result<(), SessionError> {
+        self.inner.save_agent(id, patch).await
+    }
+    async fn turns(&self, id: &str) -> Result<Vec<Turn>, SessionError> {
+        self.inner.turns(id).await
+    }
+    async fn history(&self, id: &str) -> Result<Vec<Message>, SessionError> {
+        self.inner.history(id).await
+    }
+    async fn unfinished(&self, limit: i64) -> Result<Vec<UnfinishedTurn>, SessionError> {
+        self.inner.unfinished(limit).await
+    }
+
+    async fn append_turns(&self, id: &str, turns: &[TurnInput]) -> Result<Vec<Turn>, SessionError> {
+        let _parked = self.gate.lock().await;
+        self.inner.append_turns(id, turns).await
+    }
+
+    async fn append_turns_partial(
+        &self,
+        id: &str,
+        turns: &[TurnInput],
+    ) -> aixodia_session::Appended {
+        let _parked = self.gate.lock().await;
+        self.inner.append_turns_partial(id, turns).await
+    }
+}
+
+/// The turn answers with its rows still owed, and the rows then land in the
+/// order the turn made them: the question, this round's tool steps, the answer.
+#[tokio::test]
+async fn a_store_that_takes_its_time_does_not_hold_the_answer() {
+    let _guard = config_lock().lock().unwrap();
+    let upstream = fake_upstream().await;
+    install_provider("mock", &upstream, &["test-key"], "openai").await;
+    let store = Arc::new(SlowStore::new());
+    let gateway = Arc::new(Gateway::new(
+        store.clone(),
+        Arc::new(aixodia_provider::Registry::new()),
+        tools_with(None),
+    ));
+    post_json(
+        &gateway.router(),
+        "/v1/sessions",
+        r#"{"title":"t","model":"mock/test-model"}"#,
+    )
+    .await;
+    let parked = store.gate.lock().await;
+
+    let (status, body) = post_json(
+        &gateway.router(),
+        "/v1/chat/completions",
+        r#"{"session_id":"s1","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body = {body}");
+    assert!(
+        body.contains("data: [DONE]"),
+        "the stream closed while the store was parked:\n{body}"
+    );
+    assert!(
+        body.contains(r#""turns_synced":false"#),
+        "the closing frame claimed a write that had not landed: {body}"
+    );
+    assert!(
+        store.stored("s1").is_empty(),
+        "rows landed through a parked store: {:?}",
+        store.stored("s1")
+    );
+
+    drop(parked);
+    gateway.await_backups("s1").await;
+    let stored = store.stored("s1");
+    assert!(stored.len() >= 4, "stored={stored:?}");
+    assert_eq!(stored[0].role, "user", "the question is stored first");
+    assert_eq!(
+        stored.last().expect("row").role,
+        "assistant",
+        "the answer closes the turn"
+    );
+    for (index, row) in stored.iter().enumerate() {
+        assert_eq!(row.seq, index as i64 + 1, "row {index}: {row:?}");
+    }
 }
 
 #[tokio::test]
@@ -560,10 +692,13 @@ async fn the_stream_pushes_cache_usage_and_actual_reasoning() {
     assert!(
         body.contains(r#""stage":"reasoning""#)
             && body.contains(r#""cache_read_tokens":80"#)
-            && body.contains(r#""turns_synced":true"#),
+            && body.contains(r#""turns_synced":false"#),
         "missing live fields: {body}"
     );
 
+    // The rows are a backup written behind the stream, so the reader asks for
+    // them here the way the app's recovery read does.
+    gateway.await_backups("s1").await;
     let turns = store.stored_turns("s1");
     let last = turns.last().expect("stored row");
     assert_eq!(last.reasoning_content, "real thought");
@@ -2281,11 +2416,13 @@ async fn restart_writes_the_exit_file_in_home() {
     );
 }
 
-/// A keyless provider that answers a quota error is asked again instead of
-/// failing the turn: the free tiers throttle for a fixed per-IP window, so the
-/// phone should see the answer after the window rather than an outage.
+/// A keyless provider that throttles the turn is asked again instead of failing
+/// it: the free tiers throttle per IP for a fixed window, so the phone should
+/// see the answer after the window rather than an outage. The wording matters —
+/// a plain rate limit paces, a spent allowance is terminal (see
+/// `a_spent_free_quota_fails_fast_instead_of_stalling` in the provider).
 #[tokio::test]
-async fn a_keyless_turn_retries_after_a_quota_answer() {
+async fn a_keyless_turn_retries_after_a_throttle_answer() {
     let _guard = config_lock().lock().unwrap();
     let hits = Arc::new(Mutex::new(0usize));
     let seen = hits.clone();
@@ -2301,7 +2438,7 @@ async fn a_keyless_turn_retries_after_a_quota_answer() {
                 return (
                     StatusCode::TOO_MANY_REQUESTS,
                     [(header::CONTENT_TYPE, "application/json")],
-                    r#"{"error":{"message":"free tier quota"}}"#,
+                    r#"{"error":{"message":"too many requests"}}"#,
                 )
                     .into_response();
             }

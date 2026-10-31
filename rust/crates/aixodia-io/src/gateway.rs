@@ -159,6 +159,58 @@ pub struct Gateway {
     /// resend a message whose ack was lost while the first turn still runs; the
     /// duplicate must not start a second answer.
     turns: Mutex<HashSet<String>>,
+    /// The D1 rows each chat still owes, written behind the turn.
+    pub(crate) backups: Backups,
+}
+
+/// The D1 writes a process owes, one ordered queue per chat.
+///
+/// A turn never waits for its own rows. D1 answers one HTTPS request per call,
+/// so a write the reader is not waiting on would still put a second or more
+/// between the message and the model. Writes queue here instead, serialized per
+/// chat, so a question lands before the tool steps of the round it asked for and
+/// the answer lands last.
+#[derive(Clone, Default)]
+pub struct Backups {
+    queues: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+}
+
+impl Backups {
+    fn queue_for(&self, session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut queues = self.queues.lock().unwrap_or_else(|e| e.into_inner());
+        Arc::clone(
+            queues
+                .entry(session_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    }
+
+    /// Runs a write behind everything already queued for the chat. The caller
+    /// does not wait for it, and nothing waits for the caller.
+    pub fn queue<F>(&self, session_id: &str, job: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        if session_id.is_empty() {
+            return;
+        }
+        let queue = self.queue_for(session_id);
+        tokio::spawn(async move {
+            let _turn = queue.lock().await;
+            job.await;
+        });
+    }
+
+    /// Waits until every write queued for the chat has landed. The next turn of
+    /// a chat takes this before reading its history, so a message sent the
+    /// moment its answer appeared still reads that answer.
+    pub async fn drain(&self, session_id: &str) {
+        if session_id.is_empty() {
+            return;
+        }
+        let queue = self.queue_for(session_id);
+        let _turn = queue.lock().await;
+    }
 }
 
 /// One upstream's model list and when it was fetched.
@@ -188,7 +240,22 @@ impl Gateway {
             state: RwLock::new(None),
             objectives: RwLock::new(None),
             turns: Mutex::new(HashSet::new()),
+            backups: Backups::default(),
         }
+    }
+
+    /// Runs a D1 write behind the chat's turn instead of inside it.
+    pub(crate) fn queue_backup<F>(&self, session_id: &str, job: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.backups.queue(session_id, job);
+    }
+
+    /// Waits for the writes an earlier turn of this chat left behind, so the
+    /// history read that follows sees them.
+    pub(crate) async fn await_backups(&self, session_id: &str) {
+        self.backups.drain(session_id).await;
     }
 
     /// Claims a chat for one handling turn. Direct HTTP callers and the mobile

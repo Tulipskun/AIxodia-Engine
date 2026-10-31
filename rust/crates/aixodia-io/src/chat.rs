@@ -3,7 +3,7 @@
 //! Port of the Go `io/gateway/chat.go`.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -30,7 +30,7 @@ use crate::attach::ChatAttachment;
 use crate::breaker::Cancelled;
 use crate::gateway::{
     decode_body, first_non_zero, first_non_zero_ptr, new_completion_id, truncate, write_error,
-    write_json, Gateway, SessionStore, KEYLESS_ATTEMPTS, KEYLESS_BACKOFF, KEY_ATTEMPTS,
+    write_json, Backups, Gateway, SessionStore, KEYLESS_ATTEMPTS, KEYLESS_BACKOFF, KEY_ATTEMPTS,
     MAX_TOOL_ROUNDS, UPSTREAM_WAIT,
 };
 use crate::remind::ReminderState;
@@ -155,8 +155,36 @@ impl ChatSink for NullSink {}
 
 pub type SinkRef = Arc<Mutex<Box<dyn ChatSink>>>;
 
+/// The same watcher seen from a write that may outlive its stream.
+type SinkWeak = std::sync::Weak<std::sync::Mutex<Box<dyn ChatSink>>>;
+
 pub(crate) fn lock_sink(sink: &SinkRef) -> std::sync::MutexGuard<'_, Box<dyn ChatSink>> {
     sink.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The watcher a row write reports to.
+///
+/// A turn that waits for its own write holds the stream anyway, so it hands the
+/// strong reference straight over. A write that runs behind the turn holds only a
+/// weak one and upgrades at the moment it reports — never across the store call,
+/// which would keep a stream the reader already left open for as long as D1 takes.
+#[derive(Clone)]
+pub(crate) enum Reporter {
+    Live(SinkRef),
+    Behind(SinkWeak),
+}
+
+impl Reporter {
+    fn report(&self, rows: &[Turn], error: Option<&str>) {
+        match self {
+            Reporter::Live(sink) => lock_sink(sink).on_stored(rows, error),
+            Reporter::Behind(sink) => {
+                if let Some(sink) = sink.upgrade() {
+                    lock_sink(&sink).on_stored(rows, error);
+                }
+            }
+        }
+    }
 }
 
 /// Hands the adapter the sink and counts what it emitted, which is what decides
@@ -203,6 +231,11 @@ pub struct TrailWriter {
     /// it — a tool result is a string — so it is stamped onto the stored row
     /// here, where the phone can still read it after the turn closes.
     durations: Arc<Mutex<HashMap<String, i64>>>,
+    /// The chat's write queue, used when the rows go behind the turn.
+    backups: Backups,
+    /// True when the turn must not wait for D1. The round's tool steps then
+    /// queue behind the chat instead of holding the next request.
+    deferred: bool,
 }
 
 impl TrailWriter {
@@ -224,7 +257,17 @@ impl TrailWriter {
             pending: None,
             pending_end: 0,
             durations,
+            backups: Backups::default(),
+            deferred: false,
         }
+    }
+
+    /// Stores this trail's rows behind the turn, on the chat's own queue, so a
+    /// round's tool steps never hold up the request that follows them.
+    pub fn behind(mut self, backups: Backups) -> Self {
+        self.deferred = true;
+        self.backups = backups;
+        self
     }
 
     pub fn durations(&self) -> Arc<Mutex<HashMap<String, i64>>> {
@@ -254,6 +297,10 @@ impl TrailWriter {
     /// Stores the steps of `trail` that are not stored yet. A failed write
     /// leaves them unmarked, so the next round, or persist at the end, retries.
     pub async fn flush(&mut self, trail: &[Message], sink: &SinkRef) {
+        if self.deferred {
+            self.queue_flush(trail, sink);
+            return;
+        }
         let mut guard = 0;
         loop {
             guard += 1;
@@ -285,6 +332,56 @@ impl TrailWriter {
             self.saved = self.pending_end;
             self.pending = None;
         }
+    }
+
+    /// Marks the round's steps as ours to store and hands them to the chat's
+    /// queue. The next request goes out now; D1 catches up behind the turn, and
+    /// the rows still land in order because the queue is one at a time.
+    fn queue_flush(&mut self, trail: &[Message], sink: &SinkRef) {
+        if self.saved >= trail.len() {
+            return;
+        }
+        let mut pending = trail_turns(&trail[self.saved..]);
+        attach_tool_durations(&mut pending, &self.durations);
+        self.saved = trail.len();
+        self.pending_end = self.saved;
+        self.pending = None;
+        if pending.is_empty() {
+            return;
+        }
+        let sessions = self.sessions.clone();
+        let queue_id = self.id.clone();
+        let job_id = self.id.clone();
+        let sink = Reporter::Behind(Arc::downgrade(sink));
+        self.backups.queue(&queue_id, async move {
+            save_trail(&sessions, &job_id, pending, &sink).await;
+        });
+    }
+}
+
+/// Writes a round's tool steps, giving back to the next write whatever the store
+/// refused after its own tries.
+async fn save_trail(
+    sessions: &Arc<dyn SessionStore>,
+    id: &str,
+    mut rows: Vec<TurnInput>,
+    sink: &Reporter,
+) {
+    for _attempt in 0..3 {
+        if rows.is_empty() {
+            return;
+        }
+        let appended = sessions.append_turns_partial(id, &rows).await;
+        let error = appended.error.map(|err| err.to_string());
+        let written = appended.rows.len().min(rows.len());
+        rows.drain(..written);
+        sink.report(&appended.rows, error.as_deref());
+        if let Some(err) = error {
+            tracing::warn!("gateway: save tool steps: {err}");
+        }
+    }
+    if !rows.is_empty() {
+        tracing::warn!("gateway: {} tool steps never reached the store", rows.len());
     }
 }
 
@@ -344,16 +441,31 @@ pub async fn chat(State(g): State<Arc<Gateway>>, body: Bytes) -> AxumResponse {
             "messages must not be empty",
         );
     }
-    let stored: Option<Session> = if body.session_id.is_empty() {
+    // An earlier turn of this chat left its rows to be written behind it. The
+    // history read below has to see them, so a message typed the moment its
+    // answer appeared still reads that answer; a chat whose writes landed while
+    // its reader was still looking at the answer waits on nothing.
+    g.await_backups(&body.session_id).await;
+    // The session and its transcript key off the same id and neither one feeds
+    // the other, and each is a separate HTTPS call to the store — so asking
+    // both at once takes a round trip off the time before the model is asked.
+    let reads = if body.session_id.is_empty() {
         None
     } else {
-        match g.sessions.get(&body.session_id).await {
-            Ok(found) => Some(found),
-            Err(err) => {
-                return write_error(StatusCode::NOT_FOUND, "not_found", &err.to_string());
-            }
+        let session_id = body.session_id.clone();
+        Some(tokio::join!(
+            g.sessions.get(&session_id),
+            g.sessions.turns(&session_id)
+        ))
+    };
+    let stored: Option<Session> = match &reads {
+        None => None,
+        Some((Ok(found), _)) => Some(found.clone()),
+        Some((Err(err), _)) => {
+            return write_error(StatusCode::NOT_FOUND, "not_found", &err.to_string());
         }
     };
+    let preloaded = reads.map(|(_, turns)| turns);
     if let Some(found) = &stored {
         if !g.begin_turn(&found.id) {
             return write_error(
@@ -363,6 +475,18 @@ pub async fn chat(State(g): State<Arc<Gateway>>, body: Bytes) -> AxumResponse {
             );
         }
     }
+    // A transcript the store would not name is no answer the model can be asked
+    // for, and the turn claim taken above has to be given back first.
+    let preloaded = match preloaded {
+        Some(Ok(turns)) => turns,
+        Some(Err(err)) => {
+            if let Some(found) = &stored {
+                g.end_turn(&found.id);
+            }
+            return write_error(StatusCode::BAD_GATEWAY, "database_error", &err.to_string());
+        }
+        None => Vec::new(),
+    };
 
     let incoming: Vec<Message> = body
         .messages
@@ -401,13 +525,7 @@ pub async fn chat(State(g): State<Arc<Gateway>>, body: Bytes) -> AxumResponse {
                 "retry requires a session_id",
             );
         };
-        saved_turns = match g.sessions.turns(&found.id).await {
-            Ok(turns) => turns,
-            Err(err) => {
-                g.end_turn(&found.id);
-                return write_error(StatusCode::BAD_GATEWAY, "database_error", &err.to_string());
-            }
-        };
+        saved_turns = preloaded;
         saved = messages_from_turns(&saved_turns);
         if !has_unfinished_question(&saved_turns) {
             g.end_turn(&found.id);
@@ -422,14 +540,8 @@ pub async fn chat(State(g): State<Arc<Gateway>>, body: Bytes) -> AxumResponse {
         // produces from here on.
         history = saved.clone();
         delta = Vec::new();
-    } else if let Some(found) = &stored {
-        saved_turns = match g.sessions.turns(&found.id).await {
-            Ok(turns) => turns,
-            Err(err) => {
-                g.end_turn(&found.id);
-                return write_error(StatusCode::BAD_GATEWAY, "database_error", &err.to_string());
-            }
-        };
+    } else if stored.is_some() {
+        saved_turns = preloaded;
         saved = messages_from_turns(&saved_turns);
         if body.append {
             let (full, new_delta) = append_delta(&saved, &incoming);
@@ -611,7 +723,6 @@ async fn chat_stream(
     let created = unix_now();
     let id = new_completion_id();
     let model_id = primary.model.clone();
-    let turns_synced = Arc::new(AtomicBool::new(stored.is_some()));
     let durations: Arc<Mutex<HashMap<String, i64>>> = Arc::new(Mutex::new(HashMap::new()));
     let sink: SinkRef = Arc::new(Mutex::new(Box::new(SseSink {
         tx: tx.clone(),
@@ -619,7 +730,6 @@ async fn chat_stream(
         created,
         model: model_id,
         first: true,
-        turns_synced: turns_synced.clone(),
         open_round: 0,
         durations: durations.clone(),
     })));
@@ -628,19 +738,37 @@ async fn chat_stream(
     let task_sink = sink.clone();
     let mut task_options = options.clone();
     task_options.stream = true;
+    let backups = g.backups.clone();
     tokio::spawn(async move {
         let started = Instant::now();
         let sessions = task_g.sessions();
         let mut trail = stored
             .as_ref()
-            .map(|s| TrailWriter::with_durations(sessions, s, durations.clone()));
+            .map(|s| TrailWriter::with_durations(sessions, s, durations.clone()).behind(backups));
 
         if let Some(reused) = task_options.reused_user.clone() {
             lock_sink(&task_sink).on_stored(std::slice::from_ref(&reused), None);
         }
-        task_g
-            .persist_user_before(stored.as_ref(), &history, &delta, &task_sink)
-            .await;
+        // The question is written now — just not waited on. D1 answers one
+        // HTTPS call per read and per insert, and a turn that waits for its own
+        // bookkeeping makes the reader wait for it; the chat's queue keeps the
+        // rows in order behind the answer instead.
+        let rows = task_g.user_rows(stored.as_ref(), &history, &delta);
+        if !rows.is_empty() {
+            if let Some(found) = &stored {
+                let g = task_g.clone();
+                // A backup must not keep the stream open: a strong sink owns a
+                // sender, and the body ends only when the last one drops. The
+                // job reaches the watcher only once a write has landed, and only
+                // while the reader is still there.
+                let sink = Reporter::Behind(Arc::downgrade(&task_sink));
+                let queue_id = found.id.clone();
+                let session_id = found.id.clone();
+                task_g.queue_backup(&queue_id, async move {
+                    g.save_turns(&session_id, &rows, &sink).await;
+                });
+            }
+        }
 
         let result = task_g
             .complete(
@@ -670,16 +798,35 @@ async fn chat_stream(
             }
         };
         let duration = started.elapsed().as_millis() as i64;
-        let answer = task_g
-            .persist(
-                stored.as_ref(),
-                &delta,
-                &resp,
-                trail.as_mut(),
-                &task_sink,
-                duration,
-            )
-            .await;
+        // The rows are built from the answer in memory, so the frame that ends
+        // the turn needs no write to have landed. Only its seq is unknown until
+        // D1 keeps it, which is what `turns_synced: false` tells the reader.
+        let (rows, title) = task_g.answer_rows(&delta, &resp, trail.as_ref(), duration);
+        let answer = stored_turn(
+            stored.as_ref().map(|s| s.id.as_str()).unwrap_or(""),
+            0,
+            unix_now(),
+            &rows[rows.len() - 1],
+        );
+        if let Some(found) = &stored {
+            let g = task_g.clone();
+            let sink = Reporter::Behind(Arc::downgrade(&task_sink));
+            let stored_session = found.clone();
+            let model = resp.model.clone();
+            let provider = resp.provider.clone();
+            let id = found.id.clone();
+            task_g.queue_backup(&id, async move {
+                g.persist_answer(
+                    Some(&stored_session),
+                    &rows,
+                    &title,
+                    &provider,
+                    &model,
+                    &sink,
+                )
+                .await;
+            });
+        }
         if let Some(found) = &stored {
             task_g.end_turn(&found.id);
         }
@@ -691,7 +838,10 @@ async fn chat_stream(
         };
         let final_frame = json!({
             "turn": serde_json::to_value(&answer).unwrap_or(Value::Null),
-            "turns_synced": turns_synced.load(Ordering::SeqCst),
+            // The rows this turn made are still on their way to the store, so
+            // the reader cannot trust the seq it is handed: false is the app's
+            // cue to read the chat back once it is ready.
+            "turns_synced": false,
             "id": id,
             "object": "chat.completion.chunk",
             "created": created,
@@ -726,7 +876,6 @@ struct SseSink {
     created: i64,
     model: String,
     first: bool,
-    turns_synced: Arc<AtomicBool>,
     /// The round the loop is spending now. Reasoning and tool events carry no
     /// round of their own — they fire inside the provider call — so the handler
     /// stamps the round that is open when each one arrives.
@@ -843,10 +992,7 @@ impl ChatSink for SseSink {
         );
     }
 
-    fn on_stored(&mut self, rows: &[Turn], error: Option<&str>) {
-        if error.is_some() {
-            self.turns_synced.store(false, Ordering::SeqCst);
-        }
+    fn on_stored(&mut self, rows: &[Turn], _error: Option<&str>) {
         if !rows.is_empty() {
             write_sse(
                 &self.tx,
@@ -1308,9 +1454,46 @@ impl Gateway {
         Ok(!items.is_empty())
     }
 
+    /// The rows the new messages add to the transcript, or none when there is
+    /// nothing new — a question already recorded by an earlier failed attempt is
+    /// not stacked again.
+    pub(crate) fn user_rows(
+        &self,
+        stored: Option<&Session>,
+        history: &[Message],
+        delta: &[Message],
+    ) -> Vec<TurnInput> {
+        if stored.is_none() || delta.is_empty() {
+            return Vec::new();
+        }
+        let recorded: Vec<Message> = if history.len() >= delta.len() {
+            history[..history.len() - delta.len()].to_vec()
+        } else {
+            history.to_vec()
+        };
+        if is_repeat_of_tail(&recorded, delta) {
+            return Vec::new();
+        }
+        delta
+            .iter()
+            .filter(|message| message.role == "user")
+            .map(|message| TurnInput::text(message.role.clone(), message.content.clone()))
+            .collect()
+    }
+
+    /// Appends rows and tells the watcher what the store gave back.
+    pub(crate) async fn save_turns(&self, session_id: &str, turns: &[TurnInput], sink: &Reporter) {
+        let appended = self.sessions.append_turns_partial(session_id, turns).await;
+        let rows = appended.rows;
+        let error = appended.error.map(|err| err.to_string());
+        sink.report(&rows, error.as_deref());
+        if let Some(err) = error {
+            tracing::warn!("gateway: save turns: {err}");
+        }
+    }
+
     /// Records the user's new turns before the upstream call, so a failed send
-    /// still leaves its question in history instead of vanishing. A question
-    /// already recorded by an earlier failed attempt is not stacked again.
+    /// still leaves its question in history instead of vanishing.
     pub(crate) async fn persist_user_before(
         &self,
         stored: Option<&Session>,
@@ -1321,49 +1504,23 @@ impl Gateway {
         let Some(stored) = stored else {
             return;
         };
-        if delta.is_empty() {
-            return;
-        }
-        let recorded: Vec<Message> = if history.len() >= delta.len() {
-            history[..history.len() - delta.len()].to_vec()
-        } else {
-            history.to_vec()
-        };
-        if is_repeat_of_tail(&recorded, delta) {
-            return;
-        }
-        let turns: Vec<TurnInput> = delta
-            .iter()
-            .filter(|message| message.role == "user")
-            .map(|message| TurnInput::text(message.role.clone(), message.content.clone()))
-            .collect();
+        let turns = self.user_rows(Some(stored), history, delta);
         if turns.is_empty() {
             return;
         }
-        let appended = self.sessions.append_turns_partial(&stored.id, &turns).await;
-        lock_sink(sink).on_stored(
-            &appended.rows,
-            appended
-                .error
-                .as_ref()
-                .map(|err| err.to_string())
-                .as_deref(),
-        );
-        if let Some(err) = appended.error {
-            tracing::warn!("gateway: save failed delta: {err}");
-        }
+        self.save_turns(&stored.id, &turns, &Reporter::Live(sink.clone()))
+            .await;
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn persist(
+    /// The rows this turn made that the store does not have yet: the tool steps
+    /// the trail still owes, then the answer that closes them.
+    pub(crate) fn answer_rows(
         &self,
-        stored: Option<&Session>,
         delta: &[Message],
         resp: &Response,
-        trail: Option<&mut TrailWriter>,
-        sink: &SinkRef,
+        trail: Option<&TrailWriter>,
         duration: i64,
-    ) -> Turn {
+    ) -> (Vec<TurnInput>, String) {
         // The incoming question has already been persisted before upstream was
         // called, so here we only append the assistant reply (and the tool trail
         // that belongs to it). Appending it again would duplicate it.
@@ -1376,7 +1533,7 @@ impl Gateway {
 
         let mut turns: Vec<TurnInput> = Vec::new();
         let mut pending_snapshot: Option<(Vec<TurnInput>, usize)> = None;
-        if let Some(writer) = trail.as_deref() {
+        if let Some(writer) = trail {
             turns.extend(trail_turns(&writer.rest(&resp.trail)));
             if let Some(pending) = &writer.pending {
                 pending_snapshot = Some((pending.clone(), writer.pending_end));
@@ -1414,16 +1571,31 @@ impl Gateway {
             duration_ms: duration,
             generation_ms: generation,
         });
+        (turns, title)
+    }
 
+    /// Writes a finished turn's rows and the route it answered on, and answers
+    /// with the stored reply. The local copy is the answer when the store gave
+    /// no row back: it is what the reader already saw, only unnumbered.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn persist_answer(
+        &self,
+        stored: Option<&Session>,
+        turns: &[TurnInput],
+        title: &str,
+        provider: &str,
+        model: &str,
+        sink: &Reporter,
+    ) -> Turn {
         let session_id = stored.map(|s| s.id.clone()).unwrap_or_default();
         let mut answer = stored_turn(&session_id, 0, unix_now(), &turns[turns.len() - 1]);
         let Some(stored) = stored else {
             return answer;
         };
-        let appended = self.sessions.append_turns_partial(&stored.id, &turns).await;
+        let appended = self.sessions.append_turns_partial(&stored.id, turns).await;
         let rows = appended.rows;
         let error = appended.error;
-        lock_sink(sink).on_stored(&rows, error.as_ref().map(|err| err.to_string()).as_deref());
+        sink.report(&rows, error.as_ref().map(|err| err.to_string()).as_deref());
         if rows.len() == turns.len() {
             answer = rows[rows.len() - 1].clone();
         }
@@ -1432,12 +1604,12 @@ impl Gateway {
         }
 
         let mut saved = Session {
-            provider: resp.provider.clone(),
-            model: resp.model.clone(),
+            provider: provider.to_string(),
+            model: model.to_string(),
             ..Session::default()
         };
         if stored.title.is_empty() {
-            saved.title = title;
+            saved.title = title.to_string();
         }
         for attempt in 0..3 {
             match self.sessions.save_config(&stored.id, &saved).await {
@@ -1450,6 +1622,30 @@ impl Gateway {
             }
         }
         answer
+    }
+
+    /// The non-streaming turn's answer: build its rows and wait for the store to
+    /// keep them, since there is no stream to hand back until they are kept.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn persist(
+        &self,
+        stored: Option<&Session>,
+        delta: &[Message],
+        resp: &Response,
+        trail: Option<&mut TrailWriter>,
+        sink: &SinkRef,
+        duration: i64,
+    ) -> Turn {
+        let (turns, title) = self.answer_rows(delta, resp, trail.as_deref(), duration);
+        self.persist_answer(
+            stored,
+            &turns,
+            &title,
+            &resp.provider,
+            &resp.model,
+            &Reporter::Live(sink.clone()),
+        )
+        .await
     }
 }
 
