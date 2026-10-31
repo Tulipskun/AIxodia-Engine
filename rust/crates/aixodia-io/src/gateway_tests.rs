@@ -34,7 +34,7 @@ use crate::chat::{
     is_repeat_of_tail, merge_history, select_tools, to_internal_provider, ChatSink,
     CompletionOptions, NullSink, Route, SinkRef, TrailWriter,
 };
-use crate::gateway::{Gateway, SessionStore, StateStore, REQUEST_MAX_BODY};
+use crate::gateway::{Backups, Gateway, SessionStore, StateStore, REQUEST_MAX_BODY};
 
 // ---------------------------------------------------------------------------
 // The store the Go tests drive the gateway against.
@@ -630,9 +630,17 @@ async fn a_store_that_takes_its_time_does_not_hold_the_answer() {
         "rows landed through a parked store: {:?}",
         store.stored("s1")
     );
+    assert!(
+        gateway.owes_backups(),
+        "an update would have replaced the process mid-write"
+    );
 
     drop(parked);
     gateway.await_backups("s1").await;
+    assert!(
+        !gateway.owes_backups(),
+        "the write was still owed after its queue drained"
+    );
     let stored = store.stored("s1");
     assert!(stored.len() >= 4, "stored={stored:?}");
     assert_eq!(stored[0].role, "user", "the question is stored first");
@@ -644,6 +652,48 @@ async fn a_store_that_takes_its_time_does_not_hold_the_answer() {
     for (index, row) in stored.iter().enumerate() {
         assert_eq!(row.seq, index as i64 + 1, "row {index}: {row:?}");
     }
+}
+
+/// An exit drains every chat's queue, so a write a turn left behind is not lost
+/// with the process that owed it.
+#[tokio::test]
+async fn an_exit_waits_for_every_owed_write() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let backups = Backups::default();
+    let gate = Arc::new(tokio::sync::Mutex::new(()));
+    let landed = Arc::new(AtomicUsize::new(0));
+    for chat in ["a", "b"] {
+        let gate = gate.clone();
+        let landed = landed.clone();
+        backups.queue(chat, async move {
+            let _parked = gate.lock().await;
+            landed.fetch_add(1, Ordering::SeqCst);
+        });
+    }
+    let parked = gate.lock().await;
+    let draining = {
+        let queue = backups.clone();
+        let landed = landed.clone();
+        tokio::spawn(async move {
+            queue.drain_all().await;
+            landed.load(Ordering::SeqCst)
+        })
+    };
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        landed.load(Ordering::SeqCst),
+        0,
+        "a write landed through a parked store"
+    );
+    drop(parked);
+    assert_eq!(
+        draining.await.unwrap(),
+        2,
+        "the exit left an owed write behind"
+    );
 }
 
 #[tokio::test]

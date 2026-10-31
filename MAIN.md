@@ -28,7 +28,14 @@ GOAL:
             `Behind` (weak, upgraded only at the moment it reports), and the new
             test a_store_that_takes_its_time_does_not_hold_the_answer parks the
             store mid-write and asserts both the closed stream and the rows
-            arriving in order once it is released.
+            arriving in order once it is released. What it costs: a turn's rows
+            are this process's to finish, so an exit drains every chat's queue
+            (five seconds, then it gives up) rather than taking an owed write
+            down with it, and an in-place update — which replaces the process
+            with `execve` and never reaches that exit — now waits for the same
+            counter to reach zero before it installs. A kill inside that window
+            can still lose the last turn's rows, which the phone shows from its
+            own copy.
 [COMPLETED] A spent free-tier quota must fail fast, not stall the phone for
             half a minute (operator: "แก้ไขความเร็วหน่อย มันไม่ควรช้าขนาดนี้",
             screenshot of a first turn stuck on "Sending request to provider…
@@ -46,10 +53,18 @@ GOAL:
             plain "rate limit"/"too many requests" 429 still paces. New tests
             a_momentary_throttle_is_worth_retrying and
             a_spent_free_quota_fails_fast_instead_of_stalling. Shipped: 040cf55
-            — CI 41187238106 and Release engine 41187238156 both green, and
-            `aixodia update` swapped pid 1649 in place at 09:15:18 installing
-            the build published 09:13:36. It was the fix for the log-visible
-            failure, not for the ordinary slowness; see the entry above.
+            — Release engine 41187238156 green, and `aixodia update` swapped pid
+            1649 in place at 09:15:18 installing the build published 09:13:36.
+            CI 41187238106 was NOT green, as this entry first claimed: the old
+            a_keyless_turn_retries_after_a_quota_answer still expected a retried
+            429, and the wording it faked ("free tier quota") became terminal
+            with this very fix, so its assert panicked, poisoned the shared
+            config lock and failed ~25 gateway tests behind it. That was a stale
+            test, not a lost contract — the retry-a-throttle case is now mocked
+            with "too many requests" and still passes (c646b36; the same commit's
+            CI 41193504711 and Release 41193504692 are both green).
+            It was the fix for the log-visible failure, not for the ordinary
+            slowness; see the entry above.
 [COMPLETED] A tool block must carry its own done-ness, not infer it from an
             empty result (operator: "การแสดงผลบัคอีกแล้ว" — a `rm` shell card spun
             forever). `tool_block` derived STATE_DONE only when the result text

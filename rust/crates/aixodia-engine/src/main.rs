@@ -249,7 +249,14 @@ async fn run(cancel: CancellationToken) -> anyhow::Result<()> {
 
     let idle = {
         let runs = runs.clone();
-        move || ACTIVE_CHATS.load(Ordering::SeqCst) == 0 && runs.active() == 0
+        let gateway = gateway.clone();
+        move || {
+            ACTIVE_CHATS.load(Ordering::SeqCst) == 0
+                && runs.active() == 0
+                // A turn that answered before its rows landed still owes D1 the
+                // write, and an in-place update cannot finish it afterwards.
+                && !gateway.owes_backups()
+        }
     };
     tokio::spawn(selfupdate::run_loop(cancel.clone(), idle.clone()));
     let _update = selfupdate::notify_update(idle);
@@ -270,6 +277,9 @@ async fn run(cancel: CancellationToken) -> anyhow::Result<()> {
             let _ = tokio::time::timeout(Duration::from_secs(5), &mut server).await;
         }
     }
+    // A turn can answer while its rows are still on their way to D1, and those
+    // writes belong to this process: an exit must not take the catch-up with it.
+    let _ = tokio::time::timeout(Duration::from_secs(5), gateway.await_all_backups()).await;
     Ok(())
 }
 

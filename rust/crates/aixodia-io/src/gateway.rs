@@ -170,9 +170,22 @@ pub struct Gateway {
 /// between the message and the model. Writes queue here instead, serialized per
 /// chat, so a question lands before the tool steps of the round it asked for and
 /// the answer lands last.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Backups {
     queues: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Writes queued and not finished yet. An update that replaces this process
+    /// with `execve` cannot finish them afterwards, so it waits for this to
+    /// reach zero the same way it waits for a chat to end.
+    owed: Arc<AtomicI64>,
+}
+
+impl Default for Backups {
+    fn default() -> Self {
+        Self {
+            queues: Arc::default(),
+            owed: Arc::new(AtomicI64::new(0)),
+        }
+    }
 }
 
 impl Backups {
@@ -185,6 +198,11 @@ impl Backups {
         )
     }
 
+    /// Whether this process still owes a chat a write.
+    pub fn owes(&self) -> bool {
+        self.owed.load(Ordering::SeqCst) > 0
+    }
+
     /// Runs a write behind everything already queued for the chat. The caller
     /// does not wait for it, and nothing waits for the caller.
     pub fn queue<F>(&self, session_id: &str, job: F)
@@ -195,9 +213,12 @@ impl Backups {
             return;
         }
         let queue = self.queue_for(session_id);
+        let owed = self.owed.clone();
+        owed.fetch_add(1, Ordering::SeqCst);
         tokio::spawn(async move {
             let _turn = queue.lock().await;
             job.await;
+            owed.fetch_sub(1, Ordering::SeqCst);
         });
     }
 
@@ -210,6 +231,22 @@ impl Backups {
         }
         let queue = self.queue_for(session_id);
         let _turn = queue.lock().await;
+    }
+
+    /// Waits for every write of every chat. A turn that answered before D1 kept
+    /// its rows leaves the catch-up to this queue, and a process about to exit
+    /// must not take the catch-up away with it.
+    pub async fn drain_all(&self) {
+        let queues: Vec<Arc<tokio::sync::Mutex<()>>> = self
+            .queues
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .map(Arc::clone)
+            .collect();
+        for queue in queues {
+            let _turn = queue.lock().await;
+        }
     }
 }
 
@@ -256,6 +293,17 @@ impl Gateway {
     /// history read that follows sees them.
     pub(crate) async fn await_backups(&self, session_id: &str) {
         self.backups.drain(session_id).await;
+    }
+
+    /// Waits for every D1 write this process owes, which is what an exit does
+    /// before it stops.
+    pub async fn await_all_backups(&self) {
+        self.backups.drain_all().await;
+    }
+
+    /// Whether a turn of any chat still owes D1 a write.
+    pub fn owes_backups(&self) -> bool {
+        self.backups.owes()
     }
 
     /// Claims a chat for one handling turn. Direct HTTP callers and the mobile
