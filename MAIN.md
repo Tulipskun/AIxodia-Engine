@@ -146,7 +146,7 @@ GOAL:
             `started`/selfupdate log, since ps keeps the original start time
             across the re-exec and /proc/<pid>/exe follows the path, not the
             inode.
-[IN_PROCESS] Fix "Upstream request failed: [400] Assistant tool call
+[COMPLETED] Fix "Upstream request failed: [400] Assistant tool call
             function.arguments must be valid JSON" on the Opencode ladder. The
             engine replays an assistant turn's tool calls verbatim; a call whose
             arguments never parsed (stream cut mid-JSON, or a model that named
@@ -155,10 +155,18 @@ GOAL:
             JSON", so the ladder aborts on attempt 1. The OpenAI chat and
             Responses wire paths now substitute `{}` for empty/unparseable
             arguments (the Anthropic path already did), leaving the stored call
-            untouched. Regression test captures the outgoing body.
+            untouched. Regression test captures the outgoing body. Shipped
+            4c9e2a0 (VERSION v1.161); CI 41150390919 and Release engine
+            41150390939 green, engine-latest amd64 17,715,296 bytes sha256
+            ca12978f…12fb. Deployed in place, pid 1649 kept: the first `aixodia
+            update` read a stale unauthenticated release listing and answered
+            "already the published build"; the retry 74 s later logged
+            "installing the build published=2026-10-31T00:36:57Z", restarted at
+            00:38:41 and /healthz now reports v1.161 (started 1793407120). A
+            live turn on Opencode/big-pickle answered "DEPLOY OK".
 
 PLAN:
-[IN_PROCESS] Provider: repair replayed tool-call arguments at the OpenAI chat
+[COMPLETED] Provider: repair replayed tool-call arguments at the OpenAI chat
             and Responses wire boundary; regression test; fmt/clippy/tests;
             bump VERSION to v1.161; commit, push, watch CI + Release, deploy
             with `aixodia update`, verify a live turn.
