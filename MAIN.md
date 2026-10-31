@@ -1,4 +1,21 @@
 GOAL:
+[IN PROGRESS] A spent free-tier quota must fail fast, not stall the phone for
+            half a minute (operator: "แก้ไขความเร็วหน่อย มันไม่ควรช้าขนาดนี้",
+            screenshot of a first turn stuck on "Sending request to provider…
+            17s"). The engine log shows the turn ended in
+            "upstream HTTP 429: Free usage limit reached" (Opencode/beam-free).
+            Root cause: a keyless free provider retries a 429 up to
+            KEYLESS_ATTEMPTS=4 times with the [3s, 8s, 20s] backoff — ~31s of
+            sleeping — which is right for a per-IP throttle that clears in
+            seconds (Pollinations) but pointless for a hard quota that a wait
+            cannot refill, so the user just watches a spinner before the same
+            answer. `retryable()` now treats a 429 whose message says the
+            allowance is spent ("free usage limit", "limit reached", "subscribe",
+            "upgrade", "quota", "insufficient", "out of funds", "billing") as
+            terminal and returns false, so the turn surfaces after one call; a
+            plain "rate limit"/"too many requests" 429 still paces. New tests
+            a_momentary_throttle_is_worth_retrying and
+            a_spent_free_quota_fails_fast_instead_of_stalling.
 [COMPLETED] A tool block must carry its own done-ness, not infer it from an
             empty result (operator: "การแสดงผลบัคอีกแล้ว" — a `rm` shell card spun
             forever). `tool_block` derived STATE_DONE only when the result text

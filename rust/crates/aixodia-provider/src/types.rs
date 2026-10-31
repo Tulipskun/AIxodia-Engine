@@ -165,11 +165,32 @@ impl APIError {
     }
 }
 
+/// Whether a 429 is a hard quota rather than a momentary throttle. A free tier
+/// that has run out says so ("Free usage limit reached", "subscribe", "quota");
+/// waiting seconds will not refill it, so the paced keyless retry only makes
+/// the phone stare at "Sending request to provider…" for half a minute before
+/// the same answer. A plain "rate limit" / "too many requests" is the opposite:
+/// a per-IP window that a short retry rides out.
+fn quota_is_terminal(message: &str) -> bool {
+    let m = message.to_lowercase();
+    m.contains("free usage limit")
+        || m.contains("limit reached")
+        || m.contains("subscribe")
+        || m.contains("upgrade")
+        || m.contains("quota")
+        || m.contains("insufficient")
+        || m.contains("out of funds")
+        || m.contains("billing")
+}
+
 /// Whether the gateway should try again: a transport failure, or one of the
 /// statuses providers use for transient conditions.
 pub fn retryable(err: &anyhow::Error) -> bool {
     match err.downcast_ref::<APIError>() {
         Some(api) => {
+            if api.status_code == 429 && quota_is_terminal(&api.message) {
+                return false;
+            }
             api.status_code == 401
                 || api.status_code == 402
                 || api.status_code == 408
@@ -330,4 +351,39 @@ pub trait Adapter: Send + Sync {
         key: &str,
         emit: &mut dyn Emitter,
     ) -> Result<Response>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn api(status: u16, message: &str) -> anyhow::Error {
+        APIError::new(status, message).into_anyhow()
+    }
+
+    #[test]
+    fn a_momentary_throttle_is_worth_retrying() {
+        assert!(retryable(&api(429, "Too many requests, slow down")));
+        assert!(retryable(&api(
+            429,
+            "rate limit exceeded, retry in 30 seconds"
+        )));
+        assert!(retryable(&api(503, "temporarily unavailable")));
+    }
+
+    #[test]
+    fn a_spent_free_quota_fails_fast_instead_of_stalling() {
+        // The Opencode free-tier answer: waiting seconds will not refill it, so
+        // the paced retry only keeps the phone staring at a spinner.
+        let spent = api(
+            429,
+            "Free usage limit reached. Free models work in OpenCode; subscribe to OpenCode Go to keep going.",
+        );
+        assert!(!retryable(&spent));
+        assert!(!retryable(&api(429, "Monthly quota exceeded.")));
+        assert!(!retryable(&api(
+            429,
+            "Insufficient credits, upgrade your plan."
+        )));
+    }
 }
