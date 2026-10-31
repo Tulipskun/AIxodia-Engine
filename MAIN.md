@@ -1,5 +1,5 @@
 GOAL:
-[IN PROGRESS] A tool block must carry its own done-ness, not infer it from an
+[COMPLETED] A tool block must carry its own done-ness, not infer it from an
             empty result (operator: "การแสดงผลบัคอีกแล้ว" — a `rm` shell card spun
             forever). `tool_block` derived STATE_DONE only when the result text
             was non-empty, so a successful command that printed nothing
@@ -7,8 +7,19 @@ GOAL:
             explicit `has_result` and a quiet success is STATE_DONE; the stage
             at each of the six call sites (chat.rs, trail.rs, mobile lib.rs) is
             what sets it. New test a_quiet_success_is_done_not_running; the
-            existing settle test updated for the new parameter. Build + tests +
-            fmt + clippy clean; not yet shipped.
+            existing settle test updated for the new parameter. fmt clean,
+            aixodia-session 16 passed (aixodia-io/mobile included), clippy
+            exit 0. Shipped: 98abef7 — CI 41183703843 and Release engine
+            41183703811 both green; `aixodia update` swapped pid 1649 in place
+            (self-update "installing the build published=2026-10-31T08:19:42Z",
+            this commit's CI, engine started 08:23:09), so the running daemon
+            now emits state=done for a quiet success. Live prove of the
+            empty-result path was blocked upstream, not by this change: a
+            throwaway session's turn died on "upstream HTTP 429: Free usage
+            limit reached" (free-tier quota) before any tool_result was made —
+            that probe session is deleted. The wire schema was still confirmed:
+            tool events carry `data.stage` (tool_call/tool_result/usage) and
+            `data.block.state`, exactly the field the app now trusts.
 [COMPLETED] A bare `aixodia` starts nothing (operator: "ไม่ ถ้าใช่แค่ aixodia จะไม่ทำงาน
             แต่จะแสดง version และวิธีการใช้งานแทน" then "aixodia status only"). It
             printed the version the running engine reports through /healthz — the
