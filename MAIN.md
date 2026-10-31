@@ -42,7 +42,13 @@ GOAL:
             answer at the next free seq of its own, and reads the store again
             2.5s after the turn — long enough for D1 to have kept the write — so
             the engine's numbered row replaces the phone's copy on the same
-            screen (AIxodia, same day). Shipped: c646b36 plus 0d2d4c3 — CI
+            screen (AIxodia, same day). Checked on the wire, not assumed: a run
+            through the poll endpoint showed the `final` event persisted as
+            `{turn, usage}` — sink.rs drops `turns_synced` in that projection —
+            with the turn inside it at `seq: 0`, D1 holding only the question at
+            the moment the stream closed and both rows 2.5s later. The seq is
+            therefore the word the phone can always rely on, and the flag is
+            read when a transport carries it. Shipped: c646b36 plus 0d2d4c3 — CI
             41194131602 and Release engine 41194131609 both green — and `aixodia
             update` swapped pid 1649 in place at 10:59:38. Measured through the
             live tunnel afterwards: the first `request` block at +0.62s and
