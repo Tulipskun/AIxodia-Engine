@@ -782,7 +782,7 @@ impl ChatSink for SseSink {
 
     fn on_tool_call(&mut self, call: &ToolCall) {
         let block =
-            aixodia_session::tool_block(&call.id, &call.name, &call.arguments, "", false, 0);
+            aixodia_session::tool_block(&call.id, &call.name, &call.arguments, "", false, 0, false);
         write_sse(
             &self.tx,
             &json!({"tool_event": {
@@ -830,6 +830,7 @@ impl ChatSink for SseSink {
             &text,
             is_error,
             duration_ms,
+            true,
         );
         write_sse(
             &self.tx,

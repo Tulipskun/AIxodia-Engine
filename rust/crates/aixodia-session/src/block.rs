@@ -114,7 +114,12 @@ pub fn text_block(id: &str, text: &str) -> Block {
     }
 }
 
-/// One tool step. A call without a result is still running; a result settles it.
+/// One tool step. `has_result` says whether this block carries the tool's
+/// result at all: a call that has not returned yet is running, a result settles
+/// it. The result text cannot stand in for that — a command that succeeds
+/// quietly (`rm`, `mkdir`, `cd`) returns an empty string, and inferring
+/// "still running" from that left the phone spinning a finished card for the
+/// rest of the turn.
 pub fn tool_block(
     call_id: &str,
     name: &str,
@@ -122,8 +127,9 @@ pub fn tool_block(
     result: &str,
     is_error: bool,
     duration_ms: i64,
+    has_result: bool,
 ) -> Block {
-    let state = if result.is_empty() && !is_error {
+    let state = if !has_result {
         STATE_RUNNING
     } else if is_error {
         STATE_ERROR
@@ -159,16 +165,25 @@ mod tests {
 
     #[test]
     fn tool_block_settles_on_a_result() {
-        let running = tool_block("call_1", "shell", "{}", "", false, 0);
+        let running = tool_block("call_1", "shell", "{}", "", false, 0, false);
         assert_eq!(running.state, STATE_RUNNING);
 
-        let done = tool_block("call_1", "shell", "{}", "ok", false, 12);
+        let done = tool_block("call_1", "shell", "{}", "ok", false, 12, true);
         assert_eq!(done.state, STATE_DONE);
         assert_eq!(done.duration_ms, 12);
 
-        let failed = tool_block("call_1", "shell", "{}", "{\"error\":\"x\"}", true, 0);
+        let failed = tool_block("call_1", "shell", "{}", "{\"error\":\"x\"}", true, 0, true);
         assert_eq!(failed.state, STATE_ERROR);
         assert!(failed.is_error);
+    }
+
+    #[test]
+    fn a_quiet_success_is_done_not_running() {
+        // `rm`/`mkdir`/`cd` return no output. That is a finished step, not one
+        // still in flight — the empty text must not be read as "no result yet".
+        let quiet = tool_block("call_1", "shell", "{}", "", false, 4, true);
+        assert_eq!(quiet.state, STATE_DONE);
+        assert_eq!(quiet.duration_ms, 4);
     }
 
     #[test]

@@ -686,6 +686,7 @@ fn tool_block(event: &ToolEvent) -> Option<Block> {
             "",
             false,
             0,
+            false,
         )),
         "tool_result" => Some(aixodia_session::tool_block(
             &event.call_id,
@@ -694,6 +695,7 @@ fn tool_block(event: &ToolEvent) -> Option<Block> {
             &event.text,
             event.is_error,
             event.duration_ms,
+            true,
         )),
         "request" => Some(aixodia_session::request_block(event.round, &event.state)),
         "reasoning" => Some(aixodia_session::reasoning_block(event.round, &event.text)),

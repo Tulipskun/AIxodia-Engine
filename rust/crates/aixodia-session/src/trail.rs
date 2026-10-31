@@ -69,7 +69,8 @@ pub fn trail_turns(trail: &[Message]) -> Vec<TurnInput> {
                 out.push(TurnInput {
                     role: "tool_call".to_string(),
                     text: serde_json::to_string(&row).unwrap_or_else(|_| "{}".to_string()),
-                    block: tool_block(&call.id, &call.name, &call.arguments, "", false, 0).json(),
+                    block: tool_block(&call.id, &call.name, &call.arguments, "", false, 0, false)
+                        .json(),
                     ..TurnInput::default()
                 });
             }
@@ -89,6 +90,7 @@ pub fn trail_turns(trail: &[Message]) -> Vec<TurnInput> {
                     &message.content,
                     is_error_output(&message.content),
                     0,
+                    true,
                 )
                 .json(),
                 ..TurnInput::default()

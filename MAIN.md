@@ -1,4 +1,14 @@
 GOAL:
+[IN PROGRESS] A tool block must carry its own done-ness, not infer it from an
+            empty result (operator: "การแสดงผลบัคอีกแล้ว" — a `rm` shell card spun
+            forever). `tool_block` derived STATE_DONE only when the result text
+            was non-empty, so a successful command that printed nothing
+            (`rm`, `mkdir`, `cd`) came out "running". `tool_block` now takes an
+            explicit `has_result` and a quiet success is STATE_DONE; the stage
+            at each of the six call sites (chat.rs, trail.rs, mobile lib.rs) is
+            what sets it. New test a_quiet_success_is_done_not_running; the
+            existing settle test updated for the new parameter. Build + tests +
+            fmt + clippy clean; not yet shipped.
 [COMPLETED] A bare `aixodia` starts nothing (operator: "ไม่ ถ้าใช่แค่ aixodia จะไม่ทำงาน
             แต่จะแสดง version และวิธีการใช้งานแทน" then "aixodia status only"). It
             printed the version the running engine reports through /healthz — the
