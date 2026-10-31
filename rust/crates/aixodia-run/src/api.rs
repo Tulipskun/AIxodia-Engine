@@ -123,10 +123,20 @@ async fn handle_events(
         return error(StatusCode::NOT_FOUND, "run not found");
     }
 
+    // `?poll=1` answers with whatever the run has produced since `after` and
+    // closes. A caller behind a buffering proxy (Cloudflare Quick Tunnels
+    // buffer `text/event-stream` until the origin closes) still sees each turn
+    // as it grows by asking again with the last sequence it applied.
+    let poll = query
+        .get("poll")
+        .map(|raw| matches!(raw.trim(), "1" | "true"))
+        .unwrap_or(false);
+
     let status = subscription.run.status;
     let mut backlog = subscription.backlog;
     sort_events(&mut backlog);
-    let live = if subscription.active && subscription.live.is_some() && !status.terminal() {
+    let live = if !poll && subscription.active && subscription.live.is_some() && !status.terminal()
+    {
         subscription.live
     } else {
         None
@@ -232,6 +242,70 @@ mod tests {
             sink.write(b"data: [DONE]\n\n");
             Ok(())
         }
+    }
+
+    /// Emits one tool event, then keeps the run alive so the test can ask what
+    /// a poll sees while the turn is still running.
+    struct Live;
+
+    #[async_trait]
+    impl ChatExecutor for Live {
+        async fn execute(
+            &self,
+            _job: crate::event::ChatJob,
+            sink: Arc<SseSink>,
+            _cancel: CancellationToken,
+        ) -> Result<(), String> {
+            sink.write(b"data: {\"tool_event\":{\"stage\":\"tool_result\",\"round\":1}}\n\n");
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_poll_answers_a_running_run_and_closes() {
+        let manager = Arc::new(Manager::new(Arc::new(MemoryStore::new()), Arc::new(Live)));
+        let app = router(manager.clone());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/runs")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"session_id":"s1","message":"hi"}"#))
+            .expect("request");
+        let response = app.clone().oneshot(request).await.expect("response");
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let value: Value = serde_json::from_slice(&bytes).expect("json");
+        let id = value["run"]["id"].as_str().expect("id").to_string();
+
+        for _ in 0..100 {
+            let backlog = manager.subscribe(&id, 0).await.expect("subscribe").backlog;
+            if backlog.iter().any(|event| event.kind == "tool") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let request = Request::builder()
+            .uri(format!("/v1/runs/{id}/events?after=0&poll=1"))
+            .body(Body::empty())
+            .expect("request");
+        let response =
+            tokio::time::timeout(std::time::Duration::from_secs(2), app.oneshot(request))
+                .await
+                .expect("a poll must not wait for the run to end")
+                .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            axum::body::to_bytes(response.into_body(), 64 * 1024),
+        )
+        .await
+        .expect("a poll must close its body")
+        .expect("body");
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("event: tool"), "got {text}");
     }
 
     #[tokio::test]

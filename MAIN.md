@@ -784,3 +784,14 @@ NOTE:
 
 
 
+- 2026-10-31T06:1xZ poll mode (operator: "การสตรีมไม่แสดงผล การส่งข้อความก็
+  ช้ามาก หรืออาจจะเร็วแต่การแสดงผลไม่ถูกต้องก็ไม่รู้"). Measured with raw
+  per-byte reads: the engine streams events correctly on 127.0.0.1 over both
+  HTTP/1.1 and HTTP/2 (0.12s cadence); the same GET through the Cloudflare
+  Quick Tunnel delivered the entire body 14s later, at the moment the run
+  ended. Cloudflare documents that Quick Tunnels do not support SSE — the edge
+  buffers text/event-stream. GET /v1/runs/:id/events now accepts ?poll=1: it
+  answers with the backlog after `after` and closes even while the run is
+  live, so a client can ask again with the last sequence it applied over
+  ordinary HTTP, which the tunnel passes through. Default (no poll) keeps the
+  held SSE stream. New test: a_poll_answers_a_running_run_and_closes.
