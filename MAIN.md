@@ -1,5 +1,5 @@
 GOAL:
-[IN PROGRESS] D1 must be a backup, not a step of the turn (operator: "ไม่ใช่เพราะ
+[COMPLETED] D1 must be a backup, not a step of the turn (operator: "ไม่ใช่เพราะ
             error 429 แต่ในสถานการณ์ปกติมันก็ช้าเหมือนกัน" then "D1 ทำหลังจากกระบวนการทุกอย่าง
             ไว้เป็น backup ไม่ต้องรอ D1 เขียนเสร็จ"). Measured on localhost with a
             warm provider: the first `request` block only appeared at +4.65s,
@@ -19,8 +19,8 @@ GOAL:
             history, so the model still sees its own last answer; a chat whose
             writes already landed pays nothing. The `final` frame keeps a turn
             object built from the response in memory (seq 0) and says
-            `turns_synced: false`, which is the app's existing "re-read D1"
-            recovery path. Caught while proving it: a queued write that holds a
+            `turns_synced: false` — the phone may not trust that seq, and what
+            it does about it is written below. Caught while proving it: a queued write that holds a
             strong sink holds the SSE sender with it, so the turn finished and
             `[DONE]` was written while the response body stayed open — the read
             never returned. A row write now reports through a `Reporter`, either
@@ -35,7 +35,21 @@ GOAL:
             with `execve` and never reaches that exit — now waits for the same
             counter to reach zero before it installs. A kill inside that window
             can still lose the last turn's rows, which the phone shows from its
-            own copy.
+            own copy. What the phone did need: an answer that arrives with seq 0
+            is not a row its `onFrame` used to write, so the live copy of the
+            reply was dropped at the closing frame and the bubble left the thread
+            until a pull brought it back. The app now commits an unnumbered
+            answer at the next free seq of its own, and reads the store again
+            2.5s after the turn — long enough for D1 to have kept the write — so
+            the engine's numbered row replaces the phone's copy on the same
+            screen (AIxodia, same day). Shipped: c646b36 plus 0d2d4c3 — CI
+            41194131602 and Release engine 41194131609 both green — and `aixodia
+            update` swapped pid 1649 in place at 10:59:38. Measured through the
+            live tunnel afterwards: the first `request` block at +0.62s and
+            +0.93s (was +4.65/+4.86/+7.15s), `[DONE]` and the closed body at the
+            same instant, the rows landing in seq order after the answer, and a
+            second turn answering "SYNCOK" out of the first turn's stored
+            history — the drain before reading history is what makes that work.
 [COMPLETED] A spent free-tier quota must fail fast, not stall the phone for
             half a minute (operator: "แก้ไขความเร็วหน่อย มันไม่ควรช้าขนาดนี้",
             screenshot of a first turn stuck on "Sending request to provider…
@@ -61,8 +75,10 @@ GOAL:
             with this very fix, so its assert panicked, poisoned the shared
             config lock and failed ~25 gateway tests behind it. That was a stale
             test, not a lost contract — the retry-a-throttle case is now mocked
-            with "too many requests" and still passes (c646b36; the same commit's
-            CI 41193504711 and Release 41193504692 are both green).
+            with "too many requests" and still passes (c646b36; its CI
+            41193504711 is green, and the Release that commit queued,
+            41193504692, was superseded — the shipped bytes come from 0d2d4c3's
+            run).
             It was the fix for the log-visible failure, not for the ordinary
             slowness; see the entry above.
 [COMPLETED] A tool block must carry its own done-ness, not infer it from an
