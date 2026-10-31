@@ -146,8 +146,22 @@ GOAL:
             `started`/selfupdate log, since ps keeps the original start time
             across the re-exec and /proc/<pid>/exe follows the path, not the
             inode.
+[IN_PROCESS] Fix "Upstream request failed: [400] Assistant tool call
+            function.arguments must be valid JSON" on the Opencode ladder. The
+            engine replays an assistant turn's tool calls verbatim; a call whose
+            arguments never parsed (stream cut mid-JSON, or a model that named
+            the function and filled nothing) makes every later round of the turn
+            a 400, and `is_tool_protocol_error` does not match "must be valid
+            JSON", so the ladder aborts on attempt 1. The OpenAI chat and
+            Responses wire paths now substitute `{}` for empty/unparseable
+            arguments (the Anthropic path already did), leaving the stored call
+            untouched. Regression test captures the outgoing body.
 
 PLAN:
+[IN_PROCESS] Provider: repair replayed tool-call arguments at the OpenAI chat
+            and Responses wire boundary; regression test; fmt/clippy/tests;
+            bump VERSION to v1.161; commit, push, watch CI + Release, deploy
+            with `aixodia update`, verify a live turn.
 [COMPLETED] Fix the blank terminal after a reconnect (operator: "หลังจากการ
             reconnect เห็นหน้าจอว่าง ต้องเปิด/ปิดแป้นพิมพ์ก่อน 1 ครั้งถึงจะเห็น
             หน้าจอ"). Under tmux the attach sends only the RIS reset — the ring

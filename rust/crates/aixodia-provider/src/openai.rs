@@ -798,7 +798,7 @@ fn to_messages(messages: &[Message]) -> Vec<WireMessage> {
                         kind: "function".to_string(),
                         function: WireFunction {
                             name: call.name.clone(),
-                            arguments: call.arguments.clone(),
+                            arguments: replay_arguments(&call.arguments),
                         },
                     });
                 }
@@ -826,6 +826,22 @@ fn tool_output(content: &str) -> String {
         "(no output)".to_string()
     } else {
         content.to_string()
+    }
+}
+
+/// Replays a tool call's arguments in a shape the upstream parser accepts.
+/// A call whose arguments never parsed — a stream cut mid-JSON, or a model that
+/// named a function and filled nothing — is replayed on every later round of the
+/// turn, and the upstream rejects the whole request (`function.arguments must be
+/// valid JSON`) rather than the one call. `{}` is what the Anthropic wire path
+/// already substitutes for the same broken call.
+fn replay_arguments(raw: &str) -> String {
+    if raw.trim().is_empty() {
+        return "{}".to_string();
+    }
+    match serde_json::from_str::<Value>(raw) {
+        Ok(_) => raw.to_string(),
+        Err(_) => "{}".to_string(),
     }
 }
 
@@ -1078,7 +1094,7 @@ fn build_responses_request(req: &Request, stream: bool) -> ResponsesRequest {
                     "type": "function_call",
                     "call_id": call.id,
                     "name": call.name,
-                    "arguments": call.arguments,
+                    "arguments": replay_arguments(&call.arguments),
                 }));
             }
             continue;
