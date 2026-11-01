@@ -135,8 +135,10 @@ pub async fn api_backup_status(State(g): State<Arc<Gateway>>) -> Response {
     write_json(
         StatusCode::OK,
         json!({
-            "configured": ready(&config),
-            "needs": needs(&config),
+            "configured": ready(&config, BACKUP_RUN),
+            "needs": needs(&config, BACKUP_RUN),
+            "restorable": ready(&config, RESTORE_RUN),
+            "needs_restore": needs(&config, RESTORE_RUN),
             "bucket": config.bucket,
             "prefix": config.prefix,
             "root": config.root.display().to_string(),
@@ -228,8 +230,10 @@ pub async fn api_backup_config_put(State(g): State<Arc<Gateway>>, body: Bytes) -
     write_json(
         StatusCode::OK,
         json!({
-            "configured": ready(&config),
-            "needs": needs(&config),
+            "configured": ready(&config, BACKUP_RUN),
+            "needs": needs(&config, BACKUP_RUN),
+            "restorable": ready(&config, RESTORE_RUN),
+            "needs_restore": needs(&config, RESTORE_RUN),
             "bucket": config.bucket,
             "prefix": config.prefix,
             "root": config.root.display().to_string(),
@@ -247,8 +251,8 @@ pub async fn api_backup_start(State(g): State<Arc<Gateway>>) -> Response {
         Err(err) => return write_error(StatusCode::BAD_GATEWAY, "database_error", &err),
     };
     let config = resolve(stored.as_deref());
-    if !ready(&config) {
-        return not_configured(&config);
+    if !ready(&config, BACKUP_RUN) {
+        return not_configured(&config, BACKUP_RUN);
     }
     let Some(reporter) = claim("backup") else {
         return busy();
@@ -299,8 +303,8 @@ pub async fn api_backup_restore(State(g): State<Arc<Gateway>>, body: Bytes) -> R
         Err(err) => return write_error(StatusCode::BAD_GATEWAY, "database_error", &err),
     };
     let config = resolve(stored.as_deref());
-    if !ready(&config) {
-        return not_configured(&config);
+    if !ready(&config, RESTORE_RUN) {
+        return not_configured(&config, RESTORE_RUN);
     }
     let Some(reporter) = claim("restore") else {
         return busy();
@@ -326,13 +330,24 @@ fn json_of<T: serde::Serialize>(value: T) -> Result<Value, aixodia_backup::Error
 }
 
 /// Whether a run could start now.
-fn ready(config: &aixodia_backup::Config) -> bool {
-    needs(config).is_empty()
+fn ready(config: &aixodia_backup::Config, for_backup: bool) -> bool {
+    needs(config, for_backup).is_empty()
 }
+
+/// `needs()` argument: this run reads the tree, so the root has to be there.
+const BACKUP_RUN: bool = true;
+/// `needs()` argument: this run rebuilds the tree, so a missing root is the
+/// reason to run it, not a reason to refuse.
+const RESTORE_RUN: bool = false;
 
 /// What has to be filled in before a run can start, as field names the app can
 /// point at.
-fn needs(config: &aixodia_backup::Config) -> Vec<&'static str> {
+///
+/// `for_backup` decides whether the root itself has to exist. A backup reads the
+/// tree, so a missing root is a mistake in the configuration; a restore is the
+/// answer to a missing tree — refusing it because the directory is not there
+/// would be refusing to do the one job it has. The restore creates the root.
+fn needs(config: &aixodia_backup::Config, for_backup: bool) -> Vec<&'static str> {
     let mut missing = Vec::new();
     if config.token.trim().is_empty() {
         missing.push("token");
@@ -340,16 +355,16 @@ fn needs(config: &aixodia_backup::Config) -> Vec<&'static str> {
     if config.bucket.trim().is_empty() {
         missing.push("bucket");
     }
-    if !config.root.is_dir() {
+    if for_backup && !config.root.is_dir() {
         missing.push("root");
     }
     missing
 }
 
-fn not_configured(config: &aixodia_backup::Config) -> Response {
+fn not_configured(config: &aixodia_backup::Config, for_backup: bool) -> Response {
     write_json(
         StatusCode::BAD_REQUEST,
-        json!({"error": "backup is not configured", "needs": needs(config)}),
+        json!({"error": "backup is not configured", "needs": needs(config, for_backup)}),
     )
 }
 
@@ -464,8 +479,29 @@ mod tests {
             root: std::path::PathBuf::from("/definitely/not/here"),
             ..Default::default()
         };
-        assert_eq!(needs(&cfg), vec!["token", "bucket", "root"]);
-        assert!(!ready(&cfg));
+        assert_eq!(needs(&cfg, BACKUP_RUN), vec!["token", "bucket", "root"]);
+        assert!(!ready(&cfg, BACKUP_RUN));
+    }
+
+    /// A machine whose tree is gone is exactly the machine that needs a restore,
+    /// so the missing directory may not be a reason to refuse one.
+    #[test]
+    fn a_missing_root_blocks_a_backup_not_a_restore() {
+        let dir = std::env::temp_dir().join(format!("aix-backup-root-{}", std::process::id()));
+        let gone = dir.join("no-longer-here");
+        let cfg = aixodia_backup::Config {
+            token: "hf_stored".into(),
+            bucket: "me/bucket".into(),
+            root: gone.clone(),
+            ..Default::default()
+        };
+        assert_eq!(needs(&cfg, BACKUP_RUN), vec!["root"]);
+        assert!(!ready(&cfg, BACKUP_RUN));
+        assert!(needs(&cfg, RESTORE_RUN).is_empty());
+        assert!(ready(&cfg, RESTORE_RUN));
+
+        std::fs::create_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

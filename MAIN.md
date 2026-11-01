@@ -46,6 +46,18 @@ GOAL:
             slot through `catch_unwind`. Restore takes no target path from the
             client — it always rebuilds the configured root — and refuses to run
             at all unless the body says `confirm: true`.
+            A defect the deployed route gave up on itself, found by running it:
+            `POST /api/backup/restore` answered
+            `400 {"error":"backup is not configured","needs":["root"]}` for a
+            confirmed restore of a root that had just been deleted. `needs()`
+            required `root.is_dir()` for every run, so the engine refused to
+            rebuild the very tree that was missing — which is the only case a
+            disaster recovery is asked for. `needs()` and `ready()` now take
+            whether the run reads the tree (`BACKUP_RUN`, root must exist) or
+            writes it (`RESTORE_RUN`, a missing root is the reason to run, and
+            `ops::restore` already creates it), the status route answers both
+            views (`configured`/`needs` and `restorable`/`needs_restore`), and a
+            test pins it: `a_missing_root_blocks_a_backup_not_a_restore`. v1.165.
 [COMPLETED] The `aixodia-backup` crate itself, compiling and unit-tested (10
             tests). `lib.rs` holds the key layout, `Config`, `Entry`,
             `Manifest`, the progress `Reporter` and `join_under`, which is what
