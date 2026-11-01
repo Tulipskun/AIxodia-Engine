@@ -18,7 +18,16 @@ GOAL:
             seconds apart both answered 200 (`created` 1793492639 ->
             1793492641), so the `1-req/IP` serialization that killed round 4 on
             Oct 27-28 is not active upstream, and adding inter-round pacing would
-            slow every turn to defend a condition measured absent. What IS a
+            slow every turn to defend a condition measured absent. IPv6 was ruled
+            out the same way on 2026-11-01, on the record: this host has no global
+            v6 address and no v6 default route (`ip -6 addr show scope global` and
+            `ip -6 route show default` both empty; `ip -6 addr` is 3 lines — ::1 on
+            lo), while opencode.ai is v6-reachable (AAAA `2606:4700:78::90:0:*`,
+            Cloudflare; `curl -4` lands on 172.65.90.20). So the blocker is entirely
+            our side, and clearing it would only be another way to present as a
+            different client — which is the thing declined above. It is also not
+            clearly a fresh allowance: at Cloudflare scale a limit is commonly keyed
+            on the prefix rather than the single address. What IS a
             defect, provable by reading: `APIError` carried only
             `{status_code, message}`, `error_message` returned only
             `error.message` (dropping `error.type` and every timing field), and
