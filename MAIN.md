@@ -1089,6 +1089,14 @@ NOTE:
   operator chose strict over auto-fallback on 2026-10-28, so it is their call, not
   a silent change. Lesson for next time: measure a free tier's remaining
   allowance before spending it on repeated smoke probes.
+- 2026-11-01T04:0Z: measured, with one probe and then stopped — the free limit is
+  per egress, not per model. `Opencode/beam-free` returned the same
+  `429 Free usage limit reached` as `big-pickle`, in 243 ms on a single attempt
+  (the v1.162 fail-fast, again confirmed on a live 429). The upstream states its own
+  remedy in that message: free models work only until the free usage limit, and
+  subscribing to OpenCode Go is what keeps them going. So no arrangement of
+  models, and no arrangement of source addresses, yields more anonymous turns
+  here — which is also why the IPv6/egress question was answered as it was.
 - 2026-11-01T03:56Z: the reap path has not fired in production yet, and it could
   not have: v1.162 predates the feature and wrote no pidfile, so this handover
   correctly found nothing to reap. The first real reap will log `tunnel: reaped
