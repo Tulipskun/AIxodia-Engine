@@ -144,6 +144,7 @@ pub async fn api_backup_status(State(g): State<Arc<Gateway>>) -> Response {
             "root": config.root.display().to_string(),
             "retention": config.retention,
             "gc": config.gc,
+            "excludes": config.excludes,
             "token": mask(&config.token),
             "active": active,
             "finished": slots.finished,
@@ -239,6 +240,7 @@ pub async fn api_backup_config_put(State(g): State<Arc<Gateway>>, body: Bytes) -
             "root": config.root.display().to_string(),
             "retention": config.retention,
             "gc": config.gc,
+            "excludes": config.excludes,
             "token": mask(&config.token),
         }),
     )
@@ -527,6 +529,29 @@ mod tests {
         // the one thing the merge decides: a write that never mentions the
         // token does not clear it.
         assert!(!cfg.token.is_empty() || std::env::var("HF_TOKEN").is_err());
+    }
+
+    /// An omitted `excludes` is the phone saying nothing about the scope, which
+    /// must not silently widen or narrow what a run walks. Sending a list — even
+    /// an empty one — is the phone answering for it, and an empty list really
+    /// does mean "exclude nothing".
+    #[test]
+    fn a_write_that_does_not_mention_excludes_leaves_them_alone() {
+        let previous: Stored = serde_json::from_str(r#"{"excludes":["target","*.pyc"]}"#).unwrap();
+        let untouched: Stored = serde_json::from_str(r#"{"bucket":"me/bucket"}"#).unwrap();
+        assert_eq!(
+            untouched.excludes.or(previous.excludes),
+            Some(vec!["target".to_string(), "*.pyc".to_string()]),
+            "a write that never mentions the scope keeps it"
+        );
+
+        let previous: Stored = serde_json::from_str(r#"{"excludes":["target"]}"#).unwrap();
+        let cleared: Stored = serde_json::from_str(r#"{"excludes":[]}"#).unwrap();
+        assert_eq!(
+            cleared.excludes.or(previous.excludes),
+            Some(Vec::new()),
+            "an explicit empty list is not an absent one"
+        );
     }
 
     #[test]

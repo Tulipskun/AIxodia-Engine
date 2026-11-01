@@ -1,4 +1,17 @@
 GOAL:
+[COMPLETED] Report the backup scope to the phone (operator: "การ backup ควรเลือกได้
+            ว่าไม่ backup อะไร"). `excludes` was already stored in D1 under
+            `backup/config` and already reached `scan()`, but neither
+            `GET /api/backup` nor the `PUT` reply echoed it — so a phone that
+            offered to edit the list had nothing true to put in the field, and a
+            wrong scope is the one mistake a backup tool cannot take back. Both
+            responses now return it; the two lines are additive, and a phone old
+            enough to ignore the field is unaffected. `a_write_that_does_not_
+            mention_excludes_leaves_them_alone` pins the distinction the UI
+            depends on: an omitted list keeps what is stored, an empty one means
+            the walker leaves nothing out — defaults included.
+            Not compiled here either (no cargo on this host); `Release engine`
+            and `ci.yml` are the build and the test run.
 [COMPLETED] A backup function that stores data in the HF storage bucket the
             operator named (operator: "สร้างฟังชั่น backup ข้อมูลโดยเก็บไว้ใน HF
             <hub write token, not repeated here> และหาวิธีที่เร็วที่สุด ทั้งการ
