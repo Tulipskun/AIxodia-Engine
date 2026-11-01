@@ -69,6 +69,15 @@ struct Pending {
 pub fn backup(cfg: &Config, reporter: &Reporter) -> Result<BackupReport> {
     let started = std::time::Instant::now();
     cfg.validate()?;
+    // A backup reads the tree. Walking a root that is not there would write an
+    // empty manifest and then pruning would treat the real tree's objects as
+    // unreferenced, so it is refused here rather than at the HTTP layer.
+    if !cfg.root.is_dir() {
+        return Err(Error::Config(format!(
+            "nothing to back up: {} is not a directory",
+            cfg.root.display()
+        )));
+    }
     let hub = Hub::new(cfg)?;
 
     reporter.set(Phase::Scanning, "reading the previous manifest");

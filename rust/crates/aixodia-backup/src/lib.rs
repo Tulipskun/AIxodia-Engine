@@ -127,6 +127,9 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The shape of a usable configuration. Deliberately says nothing about
+    /// whether [`Config::root`] exists: a backup needs the tree to be there and
+    /// says so itself, while a restore is how a missing tree comes back.
     pub fn validate(&self) -> Result<()> {
         if self.token.trim().is_empty() {
             return Err(Error::Config("no hub token is set".into()));
@@ -142,12 +145,6 @@ impl Config {
         }
         if self.prefix.starts_with('/') || self.prefix.contains("//") {
             return Err(Error::Config(format!("bad key prefix {:?}", self.prefix)));
-        }
-        if !self.root.is_dir() {
-            return Err(Error::Config(format!(
-                "{} is not a directory",
-                self.root.display()
-            )));
         }
         Ok(())
     }
@@ -436,6 +433,19 @@ mod tests {
             ..Default::default()
         };
         assert!(cfg.validate().is_err());
+    }
+
+    /// A restore is how a wiped tree comes back, so a root that does not exist
+    /// is a valid configuration — it is not the machine that is broken yet.
+    #[test]
+    fn a_config_is_valid_when_its_root_is_gone() {
+        let cfg = Config {
+            token: "hf_x".into(),
+            bucket: "me/bucket".into(),
+            root: std::path::PathBuf::from("/definitely/not/here"),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

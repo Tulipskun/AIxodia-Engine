@@ -58,6 +58,19 @@ GOAL:
             `ops::restore` already creates it), the status route answers both
             views (`configured`/`needs` and `restorable`/`needs_restore`), and a
             test pins it: `a_missing_root_blocks_a_backup_not_a_restore`. v1.165.
+            The same bug had a second layer, found by deploying the first fix and
+            trying the restore for real: `POST /api/backup/restore` answered 202,
+            ran, and reported
+            `{"ok":false,"error":"backup: /tmp/aix-verify is not a directory"}`.
+            `Config::validate()` itself required `root.is_dir()`, and it is shared
+            by both operations — so the HTTP gate was fixed above a crate that
+            still refused. `validate()` now checks only the shape of a
+            configuration (token, bucket, prefix) and says so in its doc;
+            `ops::backup` refuses a missing root on its own, because walking a
+            directory that is not there would publish an empty manifest and let
+            pruning treat the real tree's objects as unreferenced. Two tests pin
+            the split: a config whose root is gone validates ok, and a backup of
+            it is refused. v1.166.
 [COMPLETED] The `aixodia-backup` crate itself, compiling and unit-tested (10
             tests). `lib.rs` holds the key layout, `Config`, `Entry`,
             `Manifest`, the progress `Reporter` and `join_under`, which is what
@@ -658,6 +671,18 @@ so suspect the WebView xterm.js client or a bytes path that mangles ESC[Z
             from D1; 0 rows left, sessions=19
 
 NOTE:
+- 2026-11-01T08:42Z: the backup is live on this machine. v1.164 self-installed
+  from the rolling release at 08:37:30 (pid 5832 preserved, `engine started`
+  08:37:33, listening 08:37:42, tunnel re-registered), the hub token and bucket
+  went into D1 through `PUT /api/backup/config` (`configured: true`,
+  `token.tail: vCLt`), and the engine's own first backup of `/root` finished in
+  3,613 ms: 442 files, 11,324,010 bytes, 374 files and 4 objects reused,
+  649,461 bytes uploaded, manifest `aixodia/root/manifests/20261101T084242Z.json`.
+  `GET /api/backup/list` answers 5 manifests. A scratch root (`/tmp/aix-verify`,
+  3 files / 4,194,312 bytes) then proved the confirm guard — `400
+  {"confirm_required":true}` for an empty body — and then, with the tree deleted
+  to test a confirmed restore, found the `needs:["root"]` refusal above. The
+  directory is still gone: the fix has to deploy before that restore can run.
 - Operator directive 2026-10-27 (mid-task): after the fix is done and the gate
   is green, commit, push, deploy and cut the rolling release.
 - Capture method: /tmp/sniff_ja3.py binds an AF_PACKET raw socket on eth0, parses
