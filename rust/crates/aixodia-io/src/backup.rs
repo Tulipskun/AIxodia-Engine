@@ -537,15 +537,17 @@ mod tests {
     /// does mean "exclude nothing".
     #[test]
     fn a_write_that_does_not_mention_excludes_leaves_them_alone() {
-        let previous: Stored =
-            serde_json::from_str(r#"{"excludes":["target","*.pyc"]}"#).unwrap();
+        let previous: Stored = serde_json::from_str(r#"{"excludes":["target","*.pyc"]}"#).unwrap();
         let untouched: Stored = serde_json::from_str(r#"{"bucket":"me/bucket"}"#).unwrap();
         let merged = previous.excludes.or(untouched.excludes).unwrap();
         assert_eq!(merged, vec!["target", "*.pyc"]);
 
         let cleared: Stored = serde_json::from_str(r#"{"excludes":[]}"#).unwrap();
         let merged = cleared.excludes.or(Some(vec!["target".into()])).unwrap();
-        assert!(merged.is_empty(), "an explicit empty list is not an absent one");
+        assert!(
+            merged.is_empty(),
+            "an explicit empty list is not an absent one"
+        );
     }
 
     #[test]
