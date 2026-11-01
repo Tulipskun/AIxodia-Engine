@@ -1,8 +1,9 @@
-//! The two operations, plus listing.
+//! The two operations.
 //!
 //! [`backup`] walks the tree, reuses whatever the bucket already holds, and
-//! writes one manifest per run. [`restore`] reads a manifest and rebuilds the
-//! tree under a root, in parallel, verifying every file's sha256 afterwards.
+//! replaces the bucket's one manifest with the result. [`restore`] reads that
+//! manifest and rebuilds the tree under a root, in parallel, verifying every
+//! file's sha256 afterwards and retrying a flaky download before failing.
 //!
 //! Both block, on purpose: nothing here is `async`, so a caller cannot hold a
 //! tokio worker. Start them with `std::thread::spawn` and read progress from a
@@ -10,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
@@ -18,7 +19,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use crate::scan::{self, Scanned};
 use crate::xet::{self, Job, Source};
 use crate::{
-    Config, Counts, Entry, Error, Hub, Kind, Manifest, ManifestHead, Phase, Reporter, Result,
+    Config, Counts, Entry, Error, Hub, Kind, Manifest, Phase, Reporter, Result, RESTORE_ATTEMPTS,
     RESTORE_CONCURRENCY,
 };
 
@@ -39,8 +40,8 @@ pub struct BackupReport {
     pub files_reused: usize,
     pub objects_reused: usize,
     pub skipped: Vec<String>,
+    /// The manifest this run replaced. There is never more than one stored.
     pub deleted_manifests: usize,
-    pub deleted_objects: usize,
     pub duration_ms: u64,
 }
 
@@ -142,8 +143,9 @@ pub fn backup(cfg: &Config, reporter: &Reporter) -> Result<BackupReport> {
             });
         }
     }
-    // A file the previous manifest already named is in the bucket unless a
-    // prune removed it, so only the remaining keys are worth asking about.
+    // Objects are never deleted, so a file the previous manifest already
+    // named is in the bucket, and only the remaining keys are worth asking
+    // about.
     let keys: Vec<String> = pending.iter().map(|p| p.key.clone()).collect();
     if !keys.is_empty() {
         reporter.set(
@@ -227,12 +229,20 @@ pub fn backup(cfg: &Config, reporter: &Reporter) -> Result<BackupReport> {
     )?;
 
     let mut deleted_manifests = 0usize;
-    let mut deleted_objects = 0usize;
-    if cfg.retention > 0 || cfg.gc {
-        reporter.set(Phase::Pruning, "pruning");
-        let (manifests, objects) = prune(&hub, cfg)?;
-        deleted_manifests = manifests;
-        deleted_objects = objects;
+    {
+        // The bucket holds one manifest: this run's. Older ones are replaced,
+        // while objects stay so the next run can reuse them unread.
+        reporter.set(Phase::Pruning, "replacing the previous manifest");
+        let stale: Vec<String> = hub
+            .list_files(&hub.manifests_prefix())?
+            .into_iter()
+            .map(|item| item.path)
+            .filter(|path| path != &manifest_key)
+            .collect();
+        if !stale.is_empty() {
+            hub.delete_keys(&stale)?;
+        }
+        deleted_manifests = stale.len();
     }
 
     reporter.set(
@@ -258,7 +268,6 @@ pub fn backup(cfg: &Config, reporter: &Reporter) -> Result<BackupReport> {
         objects_reused,
         skipped,
         deleted_manifests,
-        deleted_objects,
         duration_ms: elapsed_ms(started),
     })
 }
@@ -288,71 +297,16 @@ pub fn fetch_manifest(hub: &Hub, name: &str) -> Result<Manifest> {
     serde_json::from_slice(&bytes).map_err(|e| Error::Manifest(name.to_string(), e.to_string()))
 }
 
-/// Stored backups, newest first.
-pub fn list(cfg: &Config) -> Result<Vec<ManifestHead>> {
-    cfg.validate()?;
-    let hub = Hub::new(cfg)?;
-    let mut names: Vec<String> = hub
-        .list_files(&hub.manifests_prefix())?
-        .into_iter()
-        .filter_map(|item| {
-            item.path
-                .rsplit('/')
-                .next()
-                .and_then(|tail| tail.strip_suffix(".json"))
-                .map(str::to_string)
-        })
-        .collect();
-    names.sort();
-    names.reverse();
-
-    // A head costs the manifest it names, so fetch them together.
-    let queue = Arc::new(Mutex::new(VecDeque::from(names)));
-    let heads: Arc<Mutex<Vec<ManifestHead>>> = Arc::new(Mutex::new(Vec::new()));
-    let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    std::thread::scope(|scope| {
-        for _ in 0..4 {
-            let (hub, queue, heads, errors) = (&hub, &queue, &heads, &errors);
-            scope.spawn(move || loop {
-                let next = queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
-                let Some(name) = next else { break };
-                match fetch_manifest(hub, &name) {
-                    Ok(manifest) => heads
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .push(head_of(&name, &manifest)),
-                    Err(err) => errors
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .push(format!("{name}: {err}")),
-                }
-            });
-        }
-    });
-    fail_if_any("list manifests", &errors)?;
-    let mut out = heads.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    out.sort_by(|a, b| b.name.cmp(&a.name));
-    Ok(out)
-}
-
-/// Rebuild `manifest` (or the newest one) under `root`.
+/// Rebuild the bucket's manifest under `root`.
 ///
 /// Nothing is deleted: files the manifest does not name are left exactly as
 /// they are, so a restore onto a live tree only ever adds and overwrites.
-pub fn restore(
-    cfg: &Config,
-    name: Option<&str>,
-    root: &Path,
-    reporter: &Reporter,
-) -> Result<RestoreReport> {
+pub fn restore(cfg: &Config, root: &Path, reporter: &Reporter) -> Result<RestoreReport> {
     let started = std::time::Instant::now();
     cfg.validate()?;
     let hub = Hub::new(cfg)?;
-    let manifest = match name {
-        Some(name) => fetch_manifest(&hub, name)?,
-        None => latest_manifest(&hub)?
-            .ok_or_else(|| Error::Config("the bucket holds no backup yet".into()))?,
-    };
+    let manifest = latest_manifest(&hub)?
+        .ok_or_else(|| Error::Config("the bucket holds no backup yet".into()))?;
     fs::create_dir_all(root).map_err(|source| Error::Io {
         path: root.display().to_string(),
         source,
@@ -478,26 +432,36 @@ pub fn restore(
 
 /// Download, verify, then set mode and times. A file that already holds the
 /// manifest's content is left alone — that is the whole cost of a repeat
-/// restore.
+/// restore. Its mtime matching is enough to know it does: a restore is the
+/// only writer of that stamp, so an untouched file keeps it.
 fn restore_file(hub: &Hub, cfg: &Config, entry: &Entry, path: &Path) -> Result<(u64, bool)> {
     let key = entry
         .object_key(&cfg.prefix)
         .ok_or_else(|| Error::Manifest(entry.path.clone(), "no object key".into()))?;
     let want = entry.sha256.clone().unwrap_or_default();
     let meta = fs::symlink_metadata(path);
-    let already_regular = meta.as_ref().map(|m| m.is_file()).unwrap_or(false);
-    if already_regular
-        && meta.as_ref().map(|m| m.len()).unwrap_or(0) == entry.size
-        && scan::hash_file(path)? == want
-    {
-        set_mtime(path, entry.mtime);
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(entry.mode.max(0o600)));
-        return Ok((0, true));
+    if let Ok(meta) = meta.as_ref() {
+        if meta.is_file() && meta.len() == entry.size {
+            let fresh = entry.mtime > 0 && meta.mtime() == entry.mtime;
+            if fresh || (!want.is_empty() && scan::hash_file(path)? == want) {
+                set_mtime(path, entry.mtime);
+                let _ =
+                    fs::set_permissions(path, fs::Permissions::from_mode(entry.mode.max(0o600)));
+                return Ok((0, true));
+            }
+        }
     }
-    if meta.is_ok() && !already_regular {
+    if meta.is_ok() && !meta.as_ref().map(|m| m.is_file()).unwrap_or(false) {
         // Something else occupies the path: a symlink, or a directory where a
-        // file belongs.
-        fs::remove_file(path).map_err(|source| Error::Io {
+        // file belongs. A half-restored or hand-made tree can present either,
+        // and refusing to replace a directory is how a restore dies at the
+        // exact moment the machine needs it most.
+        let removed = if meta.as_ref().map(|m| m.is_dir()).unwrap_or(false) {
+            fs::remove_dir_all(path)
+        } else {
+            fs::remove_file(path)
+        };
+        removed.map_err(|source| Error::Io {
             path: path.display().to_string(),
             source,
         })?;
@@ -508,7 +472,7 @@ fn restore_file(hub: &Hub, cfg: &Config, entry: &Entry, path: &Path) -> Result<(
             source,
         })?;
     }
-    let written = hub.download_to(&key, path)?;
+    let written = download_with_retry(hub, &key, path)?;
     if !want.is_empty() {
         let got = scan::hash_file(path)?;
         if got != want {
@@ -527,6 +491,25 @@ fn restore_file(hub: &Hub, cfg: &Config, entry: &Entry, path: &Path) -> Result<(
     )?;
     set_mtime(path, entry.mtime);
     Ok((written, false))
+}
+
+/// A CDN hop that drops is normal on a flaky uplink, so one failed request is
+/// retried with a short backoff before it is called a restore failure.
+fn download_with_retry(hub: &Hub, key: &str, path: &Path) -> Result<u64> {
+    let mut attempts = 0usize;
+    loop {
+        attempts += 1;
+        match hub.download_to(key, path) {
+            Ok(written) => return Ok(written),
+            Err(err) if attempts < RESTORE_ATTEMPTS => {
+                tracing::warn!("restore: {key} attempt {attempts} failed ({err}); retrying");
+                std::thread::sleep(Duration::from_millis(
+                    250 * 2u64.pow(attempts as u32 - 1) * 2,
+                ));
+            }
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 fn read_link_text(path: &Path) -> Option<String> {
@@ -562,71 +545,6 @@ fn write_json(hub: &Hub, cfg: &Config, items: &[(&str, Vec<u8>, Option<&str>)]) 
     hub.add_files(&registered)
 }
 
-/// Drop manifests past `retention`, and with `gc` on, every object no retained
-/// manifest references.
-fn prune(hub: &Hub, cfg: &Config) -> Result<(usize, usize)> {
-    let mut manifests: Vec<String> = hub
-        .list_files(&hub.manifests_prefix())?
-        .into_iter()
-        .map(|i| i.path)
-        .collect();
-    manifests.sort();
-    manifests.reverse();
-    // With garbage collection off, nothing is kept by count alone; the newest
-    // manifest is always the one to reference.
-    let keep = if cfg.retention > 0 { cfg.retention } else { 1 };
-    let mut doomed: Vec<String> = Vec::new();
-    if cfg.retention > 0 && manifests.len() > cfg.retention {
-        doomed = manifests[cfg.retention..].to_vec();
-    }
-    if !doomed.is_empty() {
-        hub.delete_keys(&doomed)?;
-    }
-    let mut deleted_objects = 0usize;
-    if cfg.gc {
-        let retained = &manifests[..manifests.len().min(keep)];
-        let mut referenced: HashSet<String> = HashSet::new();
-        for key in retained {
-            let Some(name) = short_name(key) else {
-                continue;
-            };
-            let manifest = fetch_manifest(hub, name)?;
-            referenced.extend(manifest.absolute(&cfg.prefix));
-        }
-        let orphans: Vec<String> = hub
-            .list_files(&hub.objects_prefix())?
-            .into_iter()
-            .map(|i| i.path)
-            .filter(|path| !referenced.contains(path))
-            .collect();
-        deleted_objects = orphans.len();
-        if !orphans.is_empty() {
-            hub.delete_keys(&orphans)?;
-        }
-    }
-    Ok((doomed.len(), deleted_objects))
-}
-
-/// `aixodia/root/manifests/20261101T053000Z.json` -> `20261101T053000Z`.
-fn short_name(key: &str) -> Option<&str> {
-    key.rsplit('/')
-        .next()
-        .and_then(|tail| tail.strip_suffix(".json"))
-        .filter(|name| !name.is_empty())
-}
-
-fn head_of(name: &str, manifest: &Manifest) -> ManifestHead {
-    ManifestHead {
-        name: name.to_string(),
-        created_at: manifest.created_at,
-        files: manifest.counts.files,
-        bytes: manifest.counts.bytes,
-        uploaded_bytes: manifest.uploaded_bytes,
-        root: manifest.root.clone(),
-        host: manifest.host.clone(),
-    }
-}
-
 fn count(entries: &[Entry]) -> Counts {
     let mut counts = Counts::default();
     for entry in entries {
@@ -640,17 +558,6 @@ fn count(entries: &[Entry]) -> Counts {
         }
     }
     counts
-}
-
-fn fail_if_any(operation: &str, errors: &Arc<Mutex<Vec<String>>>) -> Result<()> {
-    let problems = errors.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    if problems.is_empty() {
-        return Ok(());
-    }
-    Err(Error::Api {
-        operation: operation.into(),
-        message: problems.join("; "),
-    })
 }
 
 fn depth(path: &str) -> usize {

@@ -25,8 +25,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bucket: "kyomu53n/Bucket".into(),
         prefix: prefix_for_cfg,
         root: root.clone(),
-        retention: 3,
-        gc: true,
         ..Default::default()
     };
 
@@ -40,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reporter = Reporter::new("live-backup");
     let report = aixodia_backup::backup(&cfg, &reporter)?;
     println!(
-        "backup {}: {} files, {} dirs, {} links, {} bytes, uploaded {}, reused {} files / {} objects, {} skipped, pruned {} manifests + {} objects, {} ms",
+        "backup {}: {} files, {} dirs, {} links, {} bytes, uploaded {}, reused {} files / {} objects, {} skipped, replaced {} manifest(s), {} ms",
         report.name,
         report.files,
         report.dirs,
@@ -51,7 +49,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         report.objects_reused,
         report.skipped.len(),
         report.deleted_manifests,
-        report.deleted_objects,
         report.duration_ms
     );
     for line in &report.skipped {
@@ -68,17 +65,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         again.duration_ms
     );
 
-    let heads = aixodia_backup::list(&cfg)?;
-    println!(
-        "list: {} manifest(s), newest {}",
-        heads.len(),
-        heads[0].name
-    );
-
     let into = std::env::temp_dir().join(format!("aix-restore-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&into);
     let started = std::time::Instant::now();
-    let restored = aixodia_backup::restore(&cfg, None, &into, &Reporter::new("live-restore"))?;
+    let restored = aixodia_backup::restore(&cfg, &into, &Reporter::new("live-restore"))?;
     println!(
         "restore {} into {}: {} files, {} dirs, {} links, {} bytes, {} unchanged, {} ms",
         restored.name,
@@ -141,7 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Re-restore: everything should be recognised as already correct.
     let again = std::time::Instant::now();
-    let twice = aixodia_backup::restore(&cfg, None, &into, &Reporter::new("live-restore-2"))?;
+    let twice = aixodia_backup::restore(&cfg, &into, &Reporter::new("live-restore-2"))?;
     println!(
         "re-restore: {} unchanged of {} files, {} ms",
         twice.unchanged,

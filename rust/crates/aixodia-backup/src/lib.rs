@@ -1,13 +1,18 @@
 //! aixodia-backup — the engine's own backup of a filesystem tree onto a
 //! Hugging Face storage bucket.
 //!
-//! The layout is content addressed:
+//! The layout is content addressed and holds exactly one backup at a time:
 //!
 //! ```text
 //! <prefix>/objects/<aa>/<sha256>      one object per distinct file content
-//! <prefix>/manifests/<utc>.json       one manifest per backup run
-//! <prefix>/latest.json                pointer at the newest manifest
+//! <prefix>/manifests/<utc>.json       the manifest of the newest backup run
+//! <prefix>/latest.json                pointer at that manifest
 //! ```
+//!
+//! Each run replaces the manifest before it, so the bucket holds the tree as
+//! it was at the last successful backup and nothing older. Objects are never
+//! deleted: they are what makes the next run cheap, and Xet dedups their
+//! bytes, so unchanged content costs nothing to keep.
 //!
 //! Two properties make this fast. A file whose size and mtime still match the
 //! previous manifest is never read or hashed, so an unchanged tree costs one
@@ -28,9 +33,7 @@ pub mod scan;
 mod xet;
 
 pub use hub::{FileItem, Hub};
-pub use ops::{
-    backup, fetch_manifest, latest_manifest, list, restore, BackupReport, RestoreReport,
-};
+pub use ops::{backup, fetch_manifest, latest_manifest, restore, BackupReport, RestoreReport};
 pub use scan::{plan, DEFAULT_EXCLUDES};
 
 use std::path::{Path, PathBuf};
@@ -41,13 +44,17 @@ use std::sync::{Arc, Mutex};
 /// through the hub API.
 pub const DEFAULT_ENDPOINT: &str = "https://huggingface.co";
 pub const DEFAULT_PREFIX: &str = "aixodia/root";
-pub const DEFAULT_RETENTION: usize = 14;
 
 /// Concurrency for restore. Measured on this host: one stream from the bucket
 /// saturates the link, but a tree of small files is round-trip bound, so the
 /// win comes from having several requests in flight, not from splitting one
 /// large file.
 pub const RESTORE_CONCURRENCY: usize = 12;
+
+/// Attempts per file before a restore gives up on it. A half-open connection
+/// to the CDN is routine on a mobile uplink; refusing the whole restore for
+/// one of them is what left trees half-restored.
+pub const RESTORE_ATTEMPTS: usize = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -62,7 +69,7 @@ pub enum Error {
     },
     #[error("backup: {operation} failed: {message}")]
     Api { operation: String, message: String },
-    #[error("backup: read {path} for upload: {source}")]
+    #[error("backup: {path}: {source}")]
     Io {
         path: String,
         #[source]
@@ -101,11 +108,6 @@ pub struct Config {
     pub prefix: String,
     /// Exclusion patterns; see [`scan`].
     pub excludes: Vec<String>,
-    /// Manifests kept before the oldest is pruned.
-    pub retention: usize,
-    /// Delete objects no retained manifest still references. Off by default:
-    /// the bucket bills what it holds, but a pruned object cannot come back.
-    pub gc: bool,
     /// Extra seconds added to every request timeout, for a slow uplink.
     pub timeout_secs: u64,
 }
@@ -119,8 +121,6 @@ impl Default for Config {
             root: PathBuf::from("/root"),
             prefix: DEFAULT_PREFIX.to_string(),
             excludes: DEFAULT_EXCLUDES.iter().map(|s| s.to_string()).collect(),
-            retention: DEFAULT_RETENTION,
-            gc: false,
             timeout_secs: 120,
         }
     }
@@ -244,18 +244,6 @@ impl Manifest {
             .map(|k| format!("{key_prefix}/{k}"))
             .collect()
     }
-}
-
-/// A short record of a stored manifest, for listing without downloading them.
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct ManifestHead {
-    pub name: String,
-    pub created_at: i64,
-    pub files: usize,
-    pub bytes: u64,
-    pub uploaded_bytes: u64,
-    pub root: String,
-    pub host: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]

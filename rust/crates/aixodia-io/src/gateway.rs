@@ -429,7 +429,6 @@ impl Gateway {
                 "/api/backup",
                 get(crate::backup::api_backup_status).post(crate::backup::api_backup_start),
             )
-            .route("/api/backup/list", get(crate::backup::api_backup_list))
             .route(
                 "/api/backup/config",
                 get(crate::backup::api_backup_status).put(crate::backup::api_backup_config_put),

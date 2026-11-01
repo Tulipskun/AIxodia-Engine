@@ -58,10 +58,6 @@ struct Stored {
     #[serde(default)]
     root: Option<String>,
     #[serde(default)]
-    retention: Option<usize>,
-    #[serde(default)]
-    gc: Option<bool>,
-    #[serde(default)]
     excludes: Option<Vec<String>>,
 }
 
@@ -100,8 +96,6 @@ fn resolve(stored: Option<&str>) -> aixodia_backup::Config {
         prefix: parsed.prefix.unwrap_or(defaults.prefix),
         root,
         excludes: parsed.excludes.unwrap_or(defaults.excludes),
-        retention: parsed.retention.unwrap_or(defaults.retention),
-        gc: parsed.gc.unwrap_or(defaults.gc),
         timeout_secs: defaults.timeout_secs,
     }
 }
@@ -142,34 +136,12 @@ pub async fn api_backup_status(State(g): State<Arc<Gateway>>) -> Response {
             "bucket": config.bucket,
             "prefix": config.prefix,
             "root": config.root.display().to_string(),
-            "retention": config.retention,
-            "gc": config.gc,
             "excludes": config.excludes,
             "token": mask(&config.token),
             "active": active,
             "finished": slots.finished,
         }),
     )
-}
-
-/// `GET /api/backup/list` — the manifests in the bucket, newest first.
-pub async fn api_backup_list(State(g): State<Arc<Gateway>>) -> Response {
-    let stored = match stored_config(&g).await {
-        Ok(stored) => stored,
-        Err(err) => return write_error(StatusCode::BAD_GATEWAY, "database_error", &err),
-    };
-    let config = resolve(stored.as_deref());
-    let listed = in_thread(move || {
-        aixodia_backup::list(&config)
-            .and_then(json_of)
-            .map_err(|err| err.to_string())
-    })
-    .await;
-    match listed {
-        Ok(Ok(backups)) => write_json(StatusCode::OK, json!({"backups": backups})),
-        Ok(Err(err)) => write_error(StatusCode::BAD_GATEWAY, "backup_failed", &err),
-        Err(err) => write_error(StatusCode::BAD_GATEWAY, "backup_failed", &err),
-    }
 }
 
 /// `PUT /api/backup/config` — store the hub token and the bucket in D1.
@@ -210,8 +182,6 @@ pub async fn api_backup_config_put(State(g): State<Arc<Gateway>>, body: Bytes) -
         endpoint: incoming.endpoint.or(previous.endpoint),
         prefix: incoming.prefix.or(previous.prefix),
         root: incoming.root.or(previous.root),
-        retention: incoming.retention.or(previous.retention),
-        gc: incoming.gc.or(previous.gc),
         excludes: incoming.excludes.or(previous.excludes),
     };
     let raw = match serde_json::to_string(&merged) {
@@ -238,8 +208,6 @@ pub async fn api_backup_config_put(State(g): State<Arc<Gateway>>, body: Bytes) -
             "bucket": config.bucket,
             "prefix": config.prefix,
             "root": config.root.display().to_string(),
-            "retention": config.retention,
-            "gc": config.gc,
             "excludes": config.excludes,
             "token": mask(&config.token),
         }),
@@ -270,12 +238,11 @@ pub async fn api_backup_start(State(g): State<Arc<Gateway>>) -> Response {
     )
 }
 
-/// `POST /api/backup/restore` — rebuild the tree. Requires `confirm`.
+/// `POST /api/backup/restore` — rebuild the tree from the bucket's one
+/// manifest. Requires `confirm`.
 pub async fn api_backup_restore(State(g): State<Arc<Gateway>>, body: Bytes) -> Response {
     #[derive(Deserialize)]
     struct Request {
-        #[serde(default)]
-        name: Option<String>,
         #[serde(default)]
         confirm: bool,
     }
@@ -311,13 +278,12 @@ pub async fn api_backup_restore(State(g): State<Arc<Gateway>>, body: Bytes) -> R
     let Some(reporter) = claim("restore") else {
         return busy();
     };
-    let name = request.name.filter(|name| !name.trim().is_empty());
-    // The target is always the configured root: a client chooses which backup to
-    // restore, never where it lands.
+    // The target is always the configured root: a client chooses nothing about
+    // where the tree lands.
     let root = config.root.clone();
     let label = root.display().to_string();
     spawn_job("restore", move || {
-        aixodia_backup::restore(&config, name.as_deref(), &root, &reporter)
+        aixodia_backup::restore(&config, &root, &reporter)
             .and_then(json_of)
             .map_err(|err| err.to_string())
     });
@@ -448,27 +414,6 @@ fn finish(operation: &str, started_at: i64, outcome: Result<Value, String>) {
     }
 }
 
-/// Run blocking bucket work on a thread of its own and await it, so no tokio
-/// worker ever ends up inside `reqwest::blocking`.
-async fn in_thread<T, F>(work: F) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce() -> T + Send + 'static,
-{
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(work());
-    });
-    // Even the wait is off the workers: a task blocked on the bucket is a task
-    // no session can use until it answers.
-    tokio::task::spawn_blocking(move || {
-        rx.recv()
-            .map_err(|_| "the backup worker ended without an answer".to_string())
-    })
-    .await
-    .map_err(|err| err.to_string())?
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,8 +463,6 @@ mod tests {
             endpoint: incoming.endpoint.or(previous.endpoint),
             prefix: incoming.prefix.or(previous.prefix),
             root: incoming.root.or(previous.root),
-            retention: incoming.retention.or(previous.retention),
-            gc: incoming.gc.or(previous.gc),
             excludes: incoming.excludes.or(previous.excludes),
         };
         let cfg = resolve(Some(&serde_json::to_string(&merged).unwrap()));

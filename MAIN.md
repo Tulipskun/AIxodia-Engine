@@ -1,4 +1,31 @@
 GOAL:
+[COMPLETED] Fix the backup/restore system (operator: "แก้ไขระบบ backup restore
+            ของ AIxodia ให้ถูกต้อง ... การทำ backup หลาย version นั้นไม่ใช่ของ
+            ที่จำเป็น ... เวลาในการ backup/restore ช้ามาก และการ restore ครั้ง
+            ล่าสุดเกิด error"). Three changes, all in `aixodia-backup` and its
+            handler in `aixodia-io`:
+            (1) Single version. `Config` lost `retention`/`gc`, `list()` and
+            `ManifestHead` are gone, and a backup run replaces every manifest
+            except its own, so the bucket holds exactly one tree — the last
+            successful backup. Objects are never deleted because they are what
+            makes the next run cheap. `/api/backup/list` and the `retention`,
+            `gc`, and restore-`name` fields of the API are removed.
+            (2) Correct restore. The failed restore left a plain non-git tree
+            behind and the run died on the first bad download with no retry:
+            per-file failures now retry up to `RESTORE_ATTEMPTS` times with a
+            short backoff, a directory sitting on a manifest file path is
+            replaced rather than erroring, and the `Io` error string no longer
+            lies about direction ("for upload" during a restore). `restore`
+            takes no name — it restores the one manifest.
+            (3) Speed. `scan::plan` hashes the files that must be read on up to
+            16 threads instead of one, and restore recognises an already-
+            correct file by size+mtime (stamped by the previous run) without
+            reading it — only files whose times disagree are hashed.
+            Not compiled here (no cargo on this host); CI is the build and the
+            test run. The app side of the same change is in the `AIxodia`
+            MAIN.md. The daemon still running is the previous build; a
+            self-update carries this one.
+
 [COMPLETED] Report the backup scope to the phone (operator: "การ backup ควรเลือกได้
             ว่าไม่ backup อะไร"). `excludes` was already stored in D1 under
             `backup/config` and already reached `scan()`, but neither

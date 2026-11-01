@@ -267,6 +267,9 @@ pub struct Plan {
 /// the previous manifest keeps that manifest's sha256 and is not opened; a file
 /// the bucket already holds under the same content key is not uploaded.
 ///
+/// The files that must be read are hashed on several threads, because a first
+/// full backup of a large tree is bound by hashing, not by the wire.
+///
 /// `known_keys` is the set of object keys already present in the bucket.
 /// Files that cannot be read are recorded in `unreadable` and left out of the
 /// manifest; a tree being written while it is scanned must not fail the run.
@@ -282,8 +285,69 @@ pub fn plan(
         .map(|m| m.entries.iter().map(|e| (e.path.as_str(), e)).collect())
         .unwrap_or_default();
 
+    // Reused hashes need no read; everything else is hashed in parallel.
+    let mut reused_sha: HashMap<usize, String> = HashMap::new();
+    let mut to_hash: Vec<usize> = Vec::new();
+    for (i, item) in scanned.iter().enumerate() {
+        if item.kind != Kind::File {
+            continue;
+        }
+        if let Some(old) = previous_by_path.get(item.path.as_str()) {
+            if old.kind == Kind::File && old.size == item.size && old.mtime == item.mtime {
+                if let Some(known) = old.sha256.as_ref() {
+                    reused_sha.insert(i, known.clone());
+                    continue;
+                }
+            }
+        }
+        to_hash.push(i);
+    }
+
+    let mut hashed: HashMap<usize, String> = HashMap::new();
+    let mut read_errors: Vec<(usize, String)> = Vec::new();
+    if !to_hash.is_empty() {
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(to_hash.len())
+            .min(16);
+        let scanned_ref = &scanned;
+        let root_ref = root;
+        let results: Vec<Vec<(usize, std::result::Result<String, String>)>> =
+            std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(threads);
+                for chunk in to_hash.chunks(to_hash.len().div_ceil(threads)) {
+                    let chunk = chunk.to_vec();
+                    handles.push(scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .map(|&i| {
+                                let path = root_ref.join(&scanned_ref[i].path);
+                                let out = hash_file(&path).map_err(|err| err.to_string());
+                                (i, out)
+                            })
+                            .collect()
+                    }));
+                }
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap_or_default())
+                    .collect()
+            });
+        for batch in results {
+            for (i, outcome) in batch {
+                match outcome {
+                    Ok(sha) => {
+                        hashed.insert(i, sha);
+                    }
+                    Err(err) => read_errors.push((i, err)),
+                }
+            }
+        }
+    }
+
     let mut plan = Plan::default();
-    for item in scanned {
+    for (i, item) in scanned.into_iter().enumerate() {
         match item.kind {
             Kind::Dir | Kind::Symlink => {
                 plan.entries.push(crate::Entry {
@@ -299,23 +363,21 @@ pub fn plan(
             }
             Kind::File => {}
         }
-
-        let mut sha = None;
-        if let Some(old) = previous_by_path.get(item.path.as_str()) {
-            if old.kind == Kind::File && old.size == item.size && old.mtime == item.mtime {
-                if let Some(known) = old.sha256.as_ref() {
-                    sha = Some(known.clone());
-                    plan.reused += 1;
-                    plan.bytes_reused += item.size;
-                }
+        let sha = match reused_sha.remove(&i) {
+            Some(sha) => {
+                plan.reused += 1;
+                plan.bytes_reused += item.size;
+                sha
             }
-        }
-        let sha = match sha {
-            Some(sha) => sha,
-            None => match hash_file(&root.join(&item.path)) {
-                Ok(sha) => sha,
-                Err(err) => {
-                    unreadable.push(format!("{} (cannot read: {err})", item.path));
+            None => match hashed.remove(&i) {
+                Some(sha) => sha,
+                None => {
+                    let reason = read_errors
+                        .iter()
+                        .find(|(at, _)| *at == i)
+                        .map(|(_, why)| why.clone())
+                        .unwrap_or_else(|| "not hashed".to_string());
+                    unreadable.push(format!("{} (cannot read: {reason})", item.path));
                     continue;
                 }
             },
@@ -323,7 +385,7 @@ pub fn plan(
 
         let key = format!("{prefix}/objects/{}/{}", &sha[..2], sha);
         if !known_keys.contains(&key) {
-            plan.uploads.push((root.join(&item.path), key));
+            plan.uploads.push((root.join(&item.path), key.clone()));
             plan.bytes_upload += item.size;
         }
         plan.entries.push(crate::Entry {
