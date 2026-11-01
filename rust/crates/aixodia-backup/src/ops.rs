@@ -611,7 +611,7 @@ fn restore_file(
             source,
         })?;
     }
-    let written = fetch_object(downloader, &key, &want, path)?;
+    let written = fetch_object(downloader, &key, &want, entry.size, path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(entry.mode.max(0o600))).map_err(
         |source| Error::Io {
             path: path.display().to_string(),
@@ -628,11 +628,17 @@ fn restore_file(
 /// key: the file is not worth reporting as failed until that has been asked a
 /// second time. An answer that will not change — a missing or refused object —
 /// is not asked at all.
-fn fetch_object(downloader: &Resolver, key: &str, want: &str, path: &Path) -> Result<u64> {
+fn fetch_object(
+    downloader: &Resolver,
+    key: &str,
+    want: &str,
+    size: u64,
+    path: &Path,
+) -> Result<u64> {
     let mut attempts = 0usize;
     loop {
         attempts += 1;
-        let outcome = downloader.download_to(key, path).and_then(|written| {
+        let outcome = downloader.download_to(key, size, path).and_then(|written| {
             if want.is_empty() {
                 return Ok(written);
             }

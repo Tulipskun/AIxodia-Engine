@@ -61,8 +61,22 @@ pub struct Hub {
     resolve: String,
     token: String,
     client: reqwest::blocking::Client,
-    /// How long one object download may take. See [`Resolver`].
-    download_timeout: Duration,
+    /// The download window, in seconds: what [`Config::timeout_secs`] allows,
+    /// bounded. See [`Resolver`] and [`object_timeout_secs`].
+    window: u64,
+}
+
+/// How long one object may take to arrive: enough for its own bytes at a rate a
+/// weak uplink sustains (25 KB/s), never under the floor, and never over the
+/// window the run allows. This is what stops a forty-eight-byte file from being
+/// waited on for a minute and a half — and a tree of small files is what a
+/// restore is mostly made of.
+fn object_timeout_secs(size: u64, window: u64) -> u64 {
+    let needed = 5 + size / 25_000;
+    needed
+        .max(DOWNLOAD_TIMEOUT_SECS)
+        .min(window)
+        .min(DOWNLOAD_TIMEOUT_MAX)
 }
 
 /// How long a download may run: the configured allowance, bounded so that a
@@ -94,7 +108,7 @@ impl Hub {
                 cfg.bucket
             ),
             token: cfg.token.clone(),
-            download_timeout: Duration::from_secs(download_timeout_secs(cfg.timeout_secs)),
+            window: download_timeout_secs(cfg.timeout_secs),
             client,
         })
     }
@@ -107,13 +121,14 @@ impl Hub {
     /// Call this once per worker.
     pub fn downloader(&self) -> Result<Resolver> {
         let client = reqwest::blocking::Client::builder()
-            .timeout(self.download_timeout)
+            .timeout(Duration::from_secs(self.window))
             .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
             .tcp_nodelay(true)
             .build()?;
         Ok(Resolver {
             resolve: self.resolve.clone(),
             token: self.token.clone(),
+            window: self.window,
             client,
         })
     }
@@ -233,7 +248,10 @@ impl Hub {
     /// as a failed run in seconds rather than as silence for two minutes.
     pub fn get_bytes(&self, key: &str) -> Result<Option<Vec<u8>>> {
         let url = format!("{}/{}", self.resolve, encode_key(key));
-        let response = self.get(&url).timeout(self.download_timeout).send()?;
+        let response = self
+            .get(&url)
+            .timeout(Duration::from_secs(self.window))
+            .send()?;
         let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -329,16 +347,18 @@ pub struct Resolver {
     resolve: String,
     token: String,
     client: reqwest::blocking::Client,
+    window: u64,
 }
 
 impl Resolver {
     /// `GET /buckets/{bucket}/resolve/{key}`, straight into `path`. A temporary
     /// sibling is written so a half-received file never poses as a restored one.
-    pub fn download_to(&self, key: &str, path: &Path) -> Result<u64> {
+    pub fn download_to(&self, key: &str, size: u64, path: &Path) -> Result<u64> {
         let url = format!("{}/{}", self.resolve, encode_key(key));
         let response = self
             .client
             .get(&url)
+            .timeout(Duration::from_secs(object_timeout_secs(size, self.window)))
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(ACCEPT_ENCODING, "identity")
             .send()?;
@@ -435,5 +455,15 @@ mod tests {
         assert_eq!(download_timeout_secs(3600), DOWNLOAD_TIMEOUT_MAX);
         assert_eq!(download_timeout_secs(1), DOWNLOAD_TIMEOUT_SECS);
         assert_eq!(download_timeout_secs(45), 45);
+    }
+
+    /// A small file's wait is bounded by its size, not by the allowance; a large
+    /// one still gets the time its bytes need.
+    #[test]
+    fn an_object_waits_for_its_own_bytes_and_no_longer() {
+        assert_eq!(object_timeout_secs(48, 90), DOWNLOAD_TIMEOUT_SECS);
+        assert_eq!(object_timeout_secs(1_000_000, 90), 45);
+        assert_eq!(object_timeout_secs(5_000_000, 90), 90);
+        assert_eq!(object_timeout_secs(20_000_000, 3600), DOWNLOAD_TIMEOUT_MAX);
     }
 }

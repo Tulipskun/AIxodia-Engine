@@ -23,8 +23,10 @@ GOAL:
             cannot change its mind. Downloads now run in a window clamped to
             30..90s with a 10s connect bound; a permanent answer (4xx, less
             408/409/425/429) returns at once; backoff is 200/400/800ms rather than
-            0.5/1/2s; and verification moved inside the retry, so a stale body is
-            refetched instead of reported. Each worker also drives its own
+            0.5/1/2s; each object's own window is scaled to its size (25 KB/s
+            plus a floor, capped by the run's window), so a forty-eight-byte file
+            is cut at 30s rather than waited on for 90; and verification moved
+            inside the retry, so a stale body is refetched instead of reported. Each worker also drives its own
             `Resolver`: a `reqwest` blocking client runs every request it is
             handed on one internal thread, so twelve workers sharing one client
             were a queue in which one stuck stream held up the line. The
@@ -33,6 +35,7 @@ GOAL:
             Telemetry, because "it was slow" was not diagnosable afterwards: the
             manifest read, the file phase with its counts, and the slowest file
             are logged per run.
+            18 tests pass, two of them new bounds on the download windows;
             Verification: the toolchain had to be reinstalled first — the
             half-restore this entry is about had taken `/root/.cargo` and
             `/root/.rustup`, and both are in `DEFAULT_EXCLUDES`, so a restore is
