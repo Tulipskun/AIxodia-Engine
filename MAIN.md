@@ -10,8 +10,19 @@ GOAL:
             mention_excludes_leaves_them_alone` pins the distinction the UI
             depends on: an omitted list keeps what is stored, an empty one means
             the walker leaves nothing out — defaults included.
-            Not compiled here either (no cargo on this host); `Release engine`
-            and `ci.yml` are the build and the test run.
+            Not compiled here either (no cargo on this host); `ci.yml` is the
+            build and the test run, and it took three of them to go green —
+            `cargo fmt` on the test added here, then `clippy::or_then_unwrap` on
+            the same test, whose merge is now written the handler's own way
+            (`incoming.excludes.or(previous.excludes)`, asserted on the merged
+            field rather than unwrapped, which is how the neighbouring token test
+            already reads). Build, test, fmt, clippy and the launcher/installer
+            tests then all passed on run 41317738250, main CI on 41318137686, and
+            `Release engine` (41318137673) republished both binaries into
+            `engine-latest` at 15:00Z. The daemon still running on this machine is
+            the build from before this change, so it does not answer `excludes`
+            until it is reinstalled and restarted — and a restart drops a run in
+            flight, so that is the operator's call.
 [COMPLETED] A backup function that stores data in the HF storage bucket the
             operator named (operator: "สร้างฟังชั่น backup ข้อมูลโดยเก็บไว้ใน HF
             <hub write token, not repeated here> และหาวิธีที่เร็วที่สุด ทั้งการ
