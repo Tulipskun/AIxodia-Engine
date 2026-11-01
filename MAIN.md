@@ -21,10 +21,16 @@ GOAL:
             16 threads instead of one, and restore recognises an already-
             correct file by size+mtime (stamped by the previous run) without
             reading it — only files whose times disagree are hashed.
-            Not compiled here (no cargo on this host); CI is the build and the
-            test run. The app side of the same change is in the `AIxodia`
-            MAIN.md. The daemon still running is the previous build; a
-            self-update carries this one.
+            Verification on this host: `aixodia-backup` now type-checks and is
+            clippy-clean under `-D warnings` (this caught one `unused_assignments`
+            on `deleted_manifests`, fixed by binding it once from the pruning
+            block). `aixodia-io` cannot be built here — its `btls-sys`/boringssl
+            binding needs a full clang toolchain this box lacks — so CI is the
+            build and test run for it; imports and removed symbols were audited by
+            hand (no orphaned `in_thread`/`api_backup_list`/`retention`/`gc`).
+            The app side of the same change is in the `AIxodia` MAIN.md. The
+            daemon still running is the previous build; a self-update carries
+            this one.
 
 [COMPLETED] Report the backup scope to the phone (operator: "การ backup ควรเลือกได้
             ว่าไม่ backup อะไร"). `excludes` was already stored in D1 under

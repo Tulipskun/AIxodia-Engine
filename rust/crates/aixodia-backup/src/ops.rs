@@ -228,10 +228,9 @@ pub fn backup(cfg: &Config, reporter: &Reporter) -> Result<BackupReport> {
         ],
     )?;
 
-    let mut deleted_manifests = 0usize;
-    {
-        // The bucket holds one manifest: this run's. Older ones are replaced,
-        // while objects stay so the next run can reuse them unread.
+    // The bucket holds one manifest: this run's. Older ones are replaced,
+    // while objects stay so the next run can reuse them unread.
+    let deleted_manifests = {
         reporter.set(Phase::Pruning, "replacing the previous manifest");
         let stale: Vec<String> = hub
             .list_files(&hub.manifests_prefix())?
@@ -242,8 +241,8 @@ pub fn backup(cfg: &Config, reporter: &Reporter) -> Result<BackupReport> {
         if !stale.is_empty() {
             hub.delete_keys(&stale)?;
         }
-        deleted_manifests = stale.len();
-    }
+        stale.len()
+    };
 
     reporter.set(
         Phase::Done,
