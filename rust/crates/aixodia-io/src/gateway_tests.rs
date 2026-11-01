@@ -2631,3 +2631,18 @@ async fn the_objectives_endpoint_splits_goals_from_plans() {
         "body = {body}"
     );
 }
+
+/// `RIDEABLE_WAIT` is the budget the paced keyless retry spends, and the two
+/// constants live in different crates. This pins them: if `KEYLESS_BACKOFF`
+/// grows and the budget does not, a throttle the retry has now learned to ride
+/// out is still read as a spent allowance and the turn dies on the first answer.
+#[test]
+fn the_rideable_wait_equals_the_keyless_retry_budget() {
+    let budget: Duration = crate::gateway::KEYLESS_BACKOFF.iter().sum();
+    assert_eq!(
+        budget,
+        aixodia_provider::RIDEABLE_WAIT,
+        "KEYLESS_BACKOFF sums to {budget:?} but RIDEABLE_WAIT is {:?}",
+        aixodia_provider::RIDEABLE_WAIT
+    );
+}

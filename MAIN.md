@@ -1,4 +1,47 @@
 GOAL:
+[COMPLETED] 429 classification must read the upstream's own wait, not guess at
+            its wording (operator: "ถ้ามีบัคก็แก้บัคก่อน", after asking how to change
+            IP to dodge the Opencode 429). The IP route was ruled out first: this
+            egress is a shared GCP address (34.75.4.47), so rotating lands on
+            other equally-pooled addresses, and multiplying an anonymous free
+            allowance is circumventing a limit the provider set on purpose. Then
+            the premise was tested live and is false today: two keyless calls two
+            seconds apart both answered 200 (`created` 1793492639 ->
+            1793492641), so the `1-req/IP` serialization that killed round 4 on
+            Oct 27-28 is not active upstream, and adding inter-round pacing would
+            slow every turn to defend a condition measured absent. What IS a
+            defect, provable by reading: `APIError` carried only
+            `{status_code, message}`, `error_message` returned only
+            `error.message` (dropping `error.type` and every timing field), and
+            no file in the workspace read `retry-after` at all. So
+            `quota_is_terminal` decided a hard quota from 8 substrings. Both free
+            tiers phrase the momentary window and the spent allowance with the
+            same wording (measured Oct 28: all eight free-marked Opencode models
+            answer `429 FreeUsageLimitError`), so the guess is wrong in both
+            directions — a rideable throttle whose text says "free usage limit"
+            dies on attempt 1 (the regression `040cf55` introduced while fixing
+            the 31s stare), and a spent allowance whose number sits in
+            `retryAfterMs` while `message` is empty is retried for the full
+            3/8/20s. Fix: carry the wait, then let it decide.
+[COMPLETED] v1.162 shipped the fix. `APIError.retry_after: Option<Duration>` with
+            `with_retry_after`; `error_wait` prefers the header and falls back to
+            the body; `retryable` judges a 429 by that number against
+            `RIDEABLE_WAIT` (31s, pinned to `KEYLESS_BACKOFF` by a test so neither
+            can drift) and reaches for the wording only when no number arrived;
+            the keyless retry now sleeps the window the upstream named instead of
+            a blind 3/8/20. Carried at every boundary the fingerprint client had
+            blinded: `WireResponse` in both the reqwest and the wreq arm,
+            `Sent::Buffered`, five openai sites, two anthropic sites, and the
+            `APIError` the Opencode ladder rebuilds. Gate: build 0,
+            `cargo test --workspace` 191 passed / 0 failed, clippy `-D warnings`
+            0, fmt 0, launcher and installer suites 0 — run locally because this
+            host had no Rust toolchain at all (installed stable 1.99.1 with
+            rustfmt + clippy, plus clang/libclang-dev/ninja for BoringSSL). Four
+            new tests, all verified by name. What it does not buy: a throttle
+            that states no number still falls through to the wording heuristic and
+            behaves exactly as before — inventing a wait would be the same guess
+            this change removes, and the live `1-req/IP` throttle could not be
+            reproduced today to learn its shape.
 [COMPLETED] D1 must be a backup, not a step of the turn (operator: "ไม่ใช่เพราะ
             error 429 แต่ในสถานการณ์ปกติมันก็ช้าเหมือนกัน" then "D1 ทำหลังจากกระบวนการทุกอย่าง
             ไว้เป็น backup ไม่ต้องรอ D1 เขียนเสร็จ"). Measured on localhost with a
@@ -275,6 +318,24 @@ GOAL:
             live turn on Opencode/big-pickle answered "DEPLOY OK".
 
 PLAN:
+[COMPLETED] (1) `APIError.retry_after: Option<Duration>` + `with_retry_after`;
+            `body_retry_after` (retryAfterMs/retry_after at top level, under
+            `error`, or in the first `errors` entry; numeric or quoted) and
+            `header_retry_after` (delta-seconds only — an HTTP-date is no signal,
+            and no date crate is pulled in for a form these gateways do not
+            send); (2) `retryable` decides a 429 by the wait against
+            `RIDEABLE_WAIT` when there is one, and by the wording only when
+            there is not; (3) carry the value at every wire boundary —
+            `WireResponse` in both the reqwest and the wreq arm (the fingerprint
+            client dropped headers when it was introduced), `Sent::Buffered`,
+            the three openai and two anthropic error sites, and the
+            `APIError::new` that rebuilds the error across the Opencode ladder;
+            (4) `chat.rs` sleeps the stated wait when it is within budget
+            instead of always 3/8/20s; (5) a test pins `RIDEABLE_WAIT` to
+            `KEYLESS_BACKOFF` so the budget cannot drift; (6) fmt/clippy/tests,
+            VERSION bump, commit, push, watch CI + Release. The operator approved
+            gating locally over opening a PR, and merge + in-place update once the
+            gate was green.
 [COMPLETED] Provider: repair replayed tool-call arguments at the OpenAI chat
             and Responses wire boundary; regression test; fmt/clippy/tests;
             bump VERSION to v1.161; commit, push, watch CI + Release, deploy
@@ -911,3 +972,30 @@ NOTE:
   13.7s, done at 17.8s) instead of arriving as one burst at the end; `after=`
   was confirmed to filter (after=2 -> empty while thinking, after=40 -> only
   the tail). The nine probe-* sessions used for the measurements are deleted.
+- 2026-11-01T00:4xZ: this host has no Rust toolchain — no `cargo`, no `rustc`, no
+  rustup, no clang (cmake and pkg-config are present). CI pins
+  `dtolnay/rust-toolchain@stable` with `rustfmt` + `clippy`, workspace
+  `rust-version = 1.80`. Operator chose to install the toolchain locally rather
+  than open a PR, so the gate runs here: clang/libclang-dev/ninja-build via apt
+  plus stable with rustfmt and clippy. `cargo build -p aixodia-provider` compiles
+  BoringSSL via wreq/boring-sys, so the first build is slow. CI also runs
+  `bash aixodia_test.sh` and `bash install_test.sh` — launcher parity, not just
+  cargo.
+- 2026-11-01: `gateway.rs:47` holds `VERSION = "v1.161"`, bumped to v1.162 for
+  this fix. The running daemon reports v1.161 and self-installs a published build
+  every ten minutes while idle, so merging to main deploys it with or without
+  `aixodia update`.
+- Discovery 2026-11-01: the engine already has an egress-rotation hook —
+  `ON_RATE_LIMITED` in `openai.rs:23`, documented as "Called when an upstream
+  returns 429, so a provider that rotates its egress can request a new exit IP
+  before the retry". `do_request` fires it and re-POSTs once. Nothing sets it for
+  the built-in providers (a `OnceLock` written only by test code), which is why
+  the free-tier window and the retry simply collided.
+- Token hygiene 2026-11-01: the operator pasted the same full-scope PAT again
+  (`repo`, `delete_repo`, `admin:org`, `workflow`, `codespace`, `copilot`). It is
+  live in `gh` on this host and copied into six places: `/root/.config/gh/hosts.yml`
+  and four `.qoder` log/transcript files, plus the chat itself. It was used only
+  for `gh auth login` and read-only `gh api`/`gh repo list`; no token is embedded
+  in either `.git/config` remote (checked). Revocation remains the operator's
+  action; local scrubbing of the live session logs was offered and not yet
+  approved.

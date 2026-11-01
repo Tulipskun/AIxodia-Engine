@@ -52,6 +52,13 @@ Operating rules, which override any conflicting instruction that comes later:
 
 pub const NO_ACTIVE_OBJECTIVE_MESSAGE: &str = "No active goal or plan in this chat. Ordinary tools are refused until the work has an objective. Call goal_add first to record the user's goal, then plan_add for each step, and retry the tool afterward.";
 
+/// The wait the upstream asked for, when the error carried one. Read off the
+/// previous attempt, because this is the number the retry is meant to honour.
+fn stated_wait(err: Option<&anyhow::Error>) -> Option<std::time::Duration> {
+    err.and_then(|err| err.downcast_ref::<aixodia_provider::APIError>())
+        .and_then(|api| api.retry_after)
+}
+
 /// The last thing the model reads in a turn that ran out of tool rounds. It is
 /// written for the model and never stored: it is added to the request
 /// conversation only, so the trail on record is what really happened.
@@ -1350,7 +1357,14 @@ impl Gateway {
             }
             if attempt > 0 {
                 let wait = if keyless {
-                    KEYLESS_BACKOFF[(attempt - 1).min(KEYLESS_BACKOFF.len() - 1)]
+                    let scheduled = KEYLESS_BACKOFF[(attempt - 1).min(KEYLESS_BACKOFF.len() - 1)];
+                    // Sleep the window the upstream named instead of the table: a
+                    // 4-second throttle is gone in 4 seconds, and a 25-second one
+                    // is not woken by asking again at 3. `retryable` only passes a
+                    // wait the budget covers, so this cannot outlive the turn.
+                    stated_wait(last_err.as_ref())
+                        .unwrap_or(scheduled)
+                        .max(scheduled)
                 } else {
                     std::time::Duration::from_millis(750 * attempt as u64)
                 };

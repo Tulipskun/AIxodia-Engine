@@ -5,6 +5,7 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
@@ -137,6 +138,10 @@ pub struct Provider {
 pub struct APIError {
     pub status_code: u16,
     pub message: String,
+    /// How long the upstream asked us to wait, when it said. Read from its
+    /// `retry-after` header or from a `retryAfterMs`-style field in the error
+    /// body; `None` means the upstream gave no number at all.
+    pub retry_after: Option<Duration>,
 }
 
 impl std::fmt::Display for APIError {
@@ -156,7 +161,15 @@ impl APIError {
         Self {
             status_code,
             message: message.into(),
+            retry_after: None,
         }
+    }
+
+    /// Attaches the wait the upstream asked for. Kept separate from `new` so an
+    /// adapter that has no number to report stays a two-argument call.
+    pub fn with_retry_after(mut self, retry_after: Option<Duration>) -> Self {
+        self.retry_after = retry_after;
+        self
     }
 
     /// Wraps into an `anyhow::Error` whose downcast recovers the `APIError`.
@@ -165,7 +178,8 @@ impl APIError {
     }
 }
 
-/// Whether a 429 is a hard quota rather than a momentary throttle. A free tier
+/// Whether a 429 is a hard quota rather than a momentary throttle, judged from
+/// its wording alone. Only used when the upstream stated no wait: a free tier
 /// that has run out says so ("Free usage limit reached", "subscribe", "quota");
 /// waiting seconds will not refill it, so the paced keyless retry only makes
 /// the phone stare at "Sending request to provider…" for half a minute before
@@ -183,22 +197,99 @@ fn quota_is_terminal(message: &str) -> bool {
         || m.contains("billing")
 }
 
+/// The longest wait the paced keyless retry can cover. `gateway::KEYLESS_BACKOFF`
+/// sums to exactly this, so a stated wait within it can be ridden out by
+/// sleeping it off, and anything longer is a free tier closing a window the
+/// turn cannot wait inside. Pinned to the backoff table by a test in
+/// `aixodia-io`, so the two cannot drift apart.
+pub const RIDEABLE_WAIT: Duration = Duration::from_secs(31);
+
 /// Whether the gateway should try again: a transport failure, or one of the
 /// statuses providers use for transient conditions.
+///
+/// A 429 is decided by the upstream's own number when it gave one, and by the
+/// wording only when it did not. The number is the only signal that separates a
+/// per-IP window a short retry rides out from a daily allowance no retry inside
+/// a turn will refill — and both free tiers this engine talks to phrase the two
+/// the same way, which is what made the wording guess wrong in both directions.
 pub fn retryable(err: &anyhow::Error) -> bool {
     match err.downcast_ref::<APIError>() {
-        Some(api) => {
-            if api.status_code == 429 && quota_is_terminal(&api.message) {
-                return false;
-            }
-            api.status_code == 401
-                || api.status_code == 402
-                || api.status_code == 408
-                || api.status_code == 429
-                || api.status_code >= 500
-        }
+        Some(api) => match api.status_code {
+            429 => match api.retry_after {
+                Some(wait) => wait <= RIDEABLE_WAIT,
+                None => !quota_is_terminal(&api.message),
+            },
+            401 | 402 | 408 => true,
+            code => code >= 500,
+        },
         None => true,
     }
+}
+
+/// The keys an upstream puts a wait under, in seconds and in milliseconds.
+const RETRY_KEYS_SECONDS: [&str; 4] = ["retry_after", "retryAfter", "retry-after", "Retry-After"];
+const RETRY_KEYS_MILLIS: [&str; 3] = ["retryAfterMs", "retry_after_ms", "retry-after-ms"];
+
+fn as_whole_number(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(number) => number.as_u64(),
+        // Gateways that quote the number rather than type it.
+        Value::String(text) => text.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+fn stated_wait(map: &Map<String, Value>) -> Option<Duration> {
+    for key in RETRY_KEYS_MILLIS {
+        if let Some(millis) = map.get(key).and_then(as_whole_number) {
+            return Some(Duration::from_millis(millis));
+        }
+    }
+    for key in RETRY_KEYS_SECONDS {
+        if let Some(seconds) = map.get(key).and_then(as_whole_number) {
+            return Some(Duration::from_secs(seconds));
+        }
+    }
+    None
+}
+
+/// Reads the wait an upstream asked for out of an error body, at the top level
+/// or nested in `error` / the first `errors` entry.
+pub fn body_retry_after(body: &[u8]) -> Option<Duration> {
+    let root: Value = serde_json::from_slice(body).ok()?;
+    let root = root.as_object()?;
+    if let Some(wait) = stated_wait(root) {
+        return Some(wait);
+    }
+    for container in ["error", "errors"] {
+        let nested = match root.get(container) {
+            Some(Value::Object(map)) => Some(map),
+            Some(Value::Array(items)) => items.first().and_then(Value::as_object),
+            _ => None,
+        };
+        if let Some(map) = nested {
+            if let Some(wait) = stated_wait(map) {
+                return Some(wait);
+            }
+        }
+    }
+    None
+}
+
+/// Reads the `Retry-After` header. Only the delta-seconds form is understood; an
+/// HTTP-date is reported as no wait, which leaves the wording to decide — no
+/// date crate is pulled in for a form these gateways do not send.
+pub fn header_retry_after(value: Option<&str>) -> Option<Duration> {
+    let seconds = value?.trim().parse::<u64>().ok()?;
+    Some(Duration::from_secs(seconds))
+}
+
+/// The wait a failed response asked for: its header when it carried one,
+/// otherwise a number in its body. Shared by both adapters, because the header
+/// has to be captured before the body is read and the body cannot answer for a
+/// 429 an edge wrote as HTML.
+pub fn error_wait(raw: &[u8], retry_after: Option<Duration>) -> Option<Duration> {
+    retry_after.or_else(|| body_retry_after(raw))
 }
 
 /// Resolves the endpoint for one operation, appending `suffix` when the caller
@@ -356,6 +447,7 @@ pub trait Adapter: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn api(status: u16, message: &str) -> anyhow::Error {
         APIError::new(status, message).into_anyhow()
@@ -385,5 +477,69 @@ mod tests {
             429,
             "Insufficient credits, upgrade your plan."
         )));
+    }
+
+    #[test]
+    fn the_stated_wait_decides_a_429_and_not_the_wording() {
+        // Both free tiers phrase the momentary window and the spent allowance
+        // alike, so the number is what tells them apart. A wait the paced retry
+        // can cover is worth riding out even when the text says "free usage
+        // limit"; a wait longer than the budget is terminal even when the text
+        // reads like a transient throttle.
+        let momentary = APIError::new(
+            429,
+            "Free usage limit reached. Free models work in OpenCode.",
+        )
+        .with_retry_after(Some(Duration::from_secs(4)))
+        .into_anyhow();
+        assert!(retryable(&momentary));
+
+        let window_closed = APIError::new(429, "Too many requests, slow down")
+            .with_retry_after(Some(Duration::from_secs(500)))
+            .into_anyhow();
+        assert!(!retryable(&window_closed));
+
+        // The budget exactly: a wait that is coverable is coverable.
+        let at_budget = APIError::new(429, "throttled")
+            .with_retry_after(Some(RIDEABLE_WAIT))
+            .into_anyhow();
+        assert!(retryable(&at_budget));
+    }
+
+    #[test]
+    fn a_wait_is_read_from_the_body_in_either_shape() {
+        // Opencode nests it under `error` and names it in milliseconds.
+        let nested =
+            br#"{"error":{"type":"FreeUsageLimitError","message":"no","retryAfterMs":3000}}"#;
+        assert_eq!(body_retry_after(nested), Some(Duration::from_secs(3)));
+
+        // A quoted number is as good as a typed one.
+        let quoted = br#"{"error":{"retry_after":"12"}}"#;
+        assert_eq!(body_retry_after(quoted), Some(Duration::from_secs(12)));
+
+        // Pollinations-style top level.
+        let top = br#"{"retryAfter":45}"#;
+        assert_eq!(body_retry_after(top), Some(Duration::from_secs(45)));
+
+        // An errors array, and a body with no number at all.
+        let array = br#"{"errors":[{"message":"rate limited","retryAfterMs":2500}]}"#;
+        assert_eq!(body_retry_after(array), Some(Duration::from_millis(2500)));
+        assert_eq!(
+            body_retry_after(br#"{"error":{"message":"no number here"}}"#),
+            None
+        );
+        assert_eq!(body_retry_after(b"not json"), None);
+    }
+
+    #[test]
+    fn a_wait_is_read_from_the_header_when_there_is_one() {
+        assert_eq!(header_retry_after(Some("7")), Some(Duration::from_secs(7)));
+        // A date is not parsed, so it reports no wait and the wording decides.
+        assert_eq!(
+            header_retry_after(Some("Wed, 21 Oct 2026 07:28:00 GMT")),
+            None
+        );
+        assert_eq!(header_retry_after(None), None);
+        assert_eq!(header_retry_after(Some("")), None);
     }
 }

@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::types::{
-    endpoint, error_message, read_sse, APIError, Emitter, Image, Message, Provider, Request,
-    Response, ToolCall, Usage, USER_AGENT,
+    endpoint, error_message, error_wait, read_sse, APIError, Emitter, Image, Message, Provider,
+    Request, Response, ToolCall, Usage, USER_AGENT,
 };
 
 /// Called when an upstream returns 429, so a provider that rotates its egress
@@ -82,16 +82,23 @@ impl Adapter {
         key: &str,
     ) -> Result<Response> {
         let sent = self.send(req, prov, key, false).await?;
-        let (status, raw) = match sent {
+        let (status, retry_after, raw) = match sent {
             Sent::Live(response) => {
                 let response = *response;
                 let status = response.status();
-                (status, response.read(8 << 20).await?)
+                let retry_after = response.retry_after;
+                (status, retry_after, response.read(8 << 20).await?)
             }
-            Sent::Buffered { status, raw } => (status, raw),
+            Sent::Buffered {
+                status,
+                retry_after,
+                raw,
+            } => (status, retry_after, raw),
         };
         if !(200..300).contains(&status) {
-            return Err(APIError::new(status, error_message(&raw)).into_anyhow());
+            return Err(APIError::new(status, error_message(&raw))
+                .with_retry_after(error_wait(&raw, retry_after))
+                .into_anyhow());
         }
         parse_chat_response(&raw)
     }
@@ -107,15 +114,24 @@ impl Adapter {
         let sent = self.send(req, prov, key, true).await?;
         let response = match sent {
             Sent::Live(response) => *response,
-            Sent::Buffered { status, raw } => {
-                return Err(APIError::new(status, error_message(&raw)).into_anyhow());
+            Sent::Buffered {
+                status,
+                retry_after,
+                raw,
+            } => {
+                return Err(APIError::new(status, error_message(&raw))
+                    .with_retry_after(error_wait(&raw, retry_after))
+                    .into_anyhow());
             }
         };
 
         let status = response.status();
+        let retry_after = response.retry_after;
         if !(200..300).contains(&status) {
             let raw = response.read(1 << 20).await?;
-            return Err(APIError::new(status, error_message(&raw)).into_anyhow());
+            return Err(APIError::new(status, error_message(&raw))
+                .with_retry_after(error_wait(&raw, retry_after))
+                .into_anyhow());
         }
 
         let mut out = Response::default();
@@ -212,9 +228,14 @@ impl Adapter {
         }
 
         let status = 400;
+        let retry_after = response.retry_after;
         let raw = response.read(1 << 20).await?;
         if !error_message(&raw).contains("reasoning_content") {
-            return Ok(Sent::Buffered { status, raw });
+            return Ok(Sent::Buffered {
+                status,
+                retry_after,
+                raw,
+            });
         }
 
         let body = serde_json::to_vec(&build_request_with_reasoning(req, stream))?;
@@ -255,8 +276,10 @@ impl Adapter {
                 .body(body.to_vec())
                 .send()
                 .await?;
+            let retry_after = retry_after_from(response.headers());
             return Ok(WireResponse::new(
                 response.status().as_u16(),
+                retry_after,
                 WireBody::Wreq(response),
             ));
         }
@@ -267,8 +290,10 @@ impl Adapter {
             .body(body.to_vec())
             .send()
             .await?;
+        let retry_after = retry_after_from(response.headers());
         Ok(WireResponse::new(
             response.status().as_u16(),
+            retry_after,
             WireBody::Reqwest(response),
         ))
     }
@@ -324,9 +349,12 @@ impl Adapter {
         let body = serde_json::to_vec(&build_responses_request(req, false))?;
         let response = self.post(&endpoint, key, &body, "application/json").await?;
         let status = response.status();
+        let retry_after = response.retry_after;
         let raw = response.read(8 << 20).await?;
         if !(200..300).contains(&status) {
-            return Err(APIError::new(status, error_message(&raw)).into_anyhow());
+            return Err(APIError::new(status, error_message(&raw))
+                .with_retry_after(error_wait(&raw, retry_after))
+                .into_anyhow());
         }
 
         let parsed: ResponsesResponse = serde_json::from_slice(&raw)
@@ -362,9 +390,12 @@ impl Adapter {
             .post(&endpoint, key, &body, "text/event-stream")
             .await?;
         let status = response.status();
+        let retry_after = response.retry_after;
         if !(200..300).contains(&status) {
             let raw = response.read(1 << 20).await?;
-            return Err(APIError::new(status, error_message(&raw)).into_anyhow());
+            return Err(APIError::new(status, error_message(&raw))
+                .with_retry_after(error_wait(&raw, retry_after))
+                .into_anyhow());
         }
 
         let mut out = Response::default();
@@ -471,15 +502,34 @@ impl Adapter {
     }
 }
 
+/// Reads the `Retry-After` header off either HTTP stack's response headers.
+/// `reqwest` and `wreq` re-export the same `http` header map, which is what lets
+/// one set of built headers feed both clients here.
+fn retry_after_from(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
+    crate::types::header_retry_after(
+        headers
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok()),
+    )
+}
+
 enum Sent {
     Live(Box<WireResponse>),
-    Buffered { status: u16, raw: Vec<u8> },
+    Buffered {
+        status: u16,
+        retry_after: Option<std::time::Duration>,
+        raw: Vec<u8>,
+    },
 }
 
 /// One response from either HTTP stack.
 pub(crate) struct WireResponse {
     status: u16,
     body: WireBody,
+    /// The `Retry-After` header, read before the response is consumed. Kept
+    /// beside the status because a 429's body is the last place the value is
+    /// guaranteed to survive: an HTML error page from an edge carries none.
+    retry_after: Option<std::time::Duration>,
 }
 
 enum WireBody {
@@ -488,8 +538,12 @@ enum WireBody {
 }
 
 impl WireResponse {
-    fn new(status: u16, body: WireBody) -> Self {
-        Self { status, body }
+    fn new(status: u16, retry_after: Option<std::time::Duration>, body: WireBody) -> Self {
+        Self {
+            status,
+            body,
+            retry_after,
+        }
     }
 
     fn status(&self) -> u16 {

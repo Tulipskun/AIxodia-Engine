@@ -14,5 +14,5 @@ pub use registry::Registry;
 
 pub use types::{
     endpoint, error_message, read_sse, retryable, APIError, Adapter, Image, Message, Provider,
-    ReasoningFn, Request, Response, ToolCall, ToolDef, Usage, USER_AGENT,
+    ReasoningFn, Request, Response, ToolCall, ToolDef, Usage, RIDEABLE_WAIT, USER_AGENT,
 };

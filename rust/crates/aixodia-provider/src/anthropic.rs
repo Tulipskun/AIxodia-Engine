@@ -14,8 +14,8 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::types::{
-    endpoint, error_message, read_sse, APIError, Emitter, Provider, Request, Response, ToolCall,
-    Usage, USER_AGENT,
+    endpoint, error_message, error_wait, read_sse, APIError, Emitter, Provider, Request, Response,
+    ToolCall, Usage, USER_AGENT,
 };
 
 const API_VERSION: &str = "2023-06-01";
@@ -84,9 +84,12 @@ impl crate::types::Adapter for Adapter {
         let body = serde_json::to_vec(&build_request(req, false))?;
         let response = self.do_request(prov, key, &body).await?;
         let status = response.status().as_u16();
+        let retry_after = retry_after_from(&response);
         let raw = read_up_to(response, 8 << 20).await?;
         if !(200..300).contains(&status) {
-            return Err(APIError::new(status, error_message(&raw)).into_anyhow());
+            return Err(APIError::new(status, error_message(&raw))
+                .with_retry_after(error_wait(&raw, retry_after))
+                .into_anyhow());
         }
 
         let parsed: WireResponse =
@@ -136,9 +139,12 @@ impl crate::types::Adapter for Adapter {
         let body = serde_json::to_vec(&build_request(req, true))?;
         let response = self.do_request(prov, key, &body).await?;
         let status = response.status().as_u16();
+        let retry_after = retry_after_from(&response);
         if !(200..300).contains(&status) {
             let raw = read_up_to(response, 8 << 20).await?;
-            return Err(APIError::new(status, error_message(&raw)).into_anyhow());
+            return Err(APIError::new(status, error_message(&raw))
+                .with_retry_after(error_wait(&raw, retry_after))
+                .into_anyhow());
         }
 
         let mut out = Response::default();
@@ -233,6 +239,16 @@ struct Block {
     args: String,
     #[allow(dead_code)]
     text: String,
+}
+
+/// Reads the `Retry-After` header before the response body consumes it.
+fn retry_after_from(response: &reqwest::Response) -> Option<std::time::Duration> {
+    crate::types::header_retry_after(
+        response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok()),
+    )
 }
 
 async fn read_up_to(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {

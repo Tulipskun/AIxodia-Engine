@@ -168,6 +168,7 @@ impl Adapter {
                     api.status_code,
                     format!("{} [attempts: {attempts}]", api.message),
                 )
+                .with_retry_after(api.retry_after)
                 .into_anyhow();
             }
             if trace.is_empty() {
