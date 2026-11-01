@@ -1,5 +1,5 @@
 GOAL:
-[IN_PROCESS] A backup function that stores data in the HF storage bucket the
+[COMPLETED] A backup function that stores data in the HF storage bucket the
             operator named (operator: "สร้างฟังชั่น backup ข้อมูลโดยเก็บไว้ใน HF
             <hub write token, not repeated here> และหาวิธีที่เร็วที่สุด ทั้งการ
             backup และ restore"). Scope settled by the operator: the tree is
@@ -30,7 +30,7 @@ GOAL:
             pointer. Unchanged files (size + mtime match the previous manifest)
             are stat'ed only and reused, so a steady-state backup costs a couple
             of round trips; changed bytes move through Xet.
-[IN_PROCESS] The engine side: `aixodia-io/src/backup.rs` puts the five routes
+[COMPLETED] The engine side: `aixodia-io/src/backup.rs` puts the five routes
             on the gateway — `GET/POST /api/backup` (status, start),
             `GET /api/backup/list`, `PUT /api/backup/config` and
             `POST /api/backup/restore`. The config, hub token included, is a
@@ -46,6 +46,17 @@ GOAL:
             slot through `catch_unwind`. Restore takes no target path from the
             client — it always rebuilds the configured root — and refuses to run
             at all unless the body says `confirm: true`.
+            Proven on the deployed build, not only in the crate's own harness:
+            v1.166 (adopted 09:41:56, pid 5832 preserved) restored a scratch root
+            that had been deleted — `{"confirm":true}` → 202 → 3 files,
+            4,194,312 bytes, 1 dir in 1,161 ms, with mode 644 and the recorded
+            mtime carried over to the nanosecond. `{"confirm":false}` is a 400
+            with `confirm_required`. Pruning and GC ran for real: dropping
+            retention to 3 pruned 5 manifests and 44 objects across two backups,
+            and setting it back to 14 left the bucket holding exactly the
+            /root manifests. Steady state on the live tree, measured through the
+            route: 481 files / 12,074,014 bytes, 480 reused, 618,203 bytes
+            uploaded (the log and what changed), **2,729 ms**.
             A defect the deployed route gave up on itself, found by running it:
             `POST /api/backup/restore` answered
             `400 {"error":"backup is not configured","needs":["root"]}` for a
@@ -735,6 +746,12 @@ NOTE:
 - The engine's bearer token is CF_TOKEN and /api/* is guarded by it: curl -H
   "Authorization: Bearer $CF_TOKEN" http://127.0.0.1:8787. Use it from the
   environment and never print it.
+- A restore replaces a file by writing a sibling and renaming it, which is the
+  right thing for correctness and the wrong thing for a file the running engine
+  holds open: `.aixodia/aixodia.log` keeps its own append on the old inode, so the
+  visible file stops being the one the process writes to. It is a caveat, not a
+  defect — the machine a restore is meant for is one where the engine is not
+  running yet (a fresh image, then `restore` before `aixodia start`).
 - The hub write token the operator pasted for the backup is quoted in this file
   as "<hub write token, not repeated here>": this repo is PUBLIC and `MAIN.md`
   is committed, so the literal must never reach it. The engine keeps the real
