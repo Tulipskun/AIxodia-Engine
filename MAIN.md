@@ -1,15 +1,13 @@
 GOAL:
-[IN_PROCESS] An in-place update must not leave the previous build's cloudflared
-            running (operator: "เก็บกวาดตัวเก่า แล้วจัดการป้องกันไม่ให้เกิดขึ้นอีก"). Done
-            so far: the orphan 5910 (`fold-decrease-owners-venture`, up since
-            00:14:43) was SIGTERMed and the published tunnel
-            `gourmet-changes-instrumentation-welfare` still answers
-            `/healthz` v1.162. The prevention is in `tunnel.rs`: a keeper records
-            its cloudflared pid in `$AIXODIA_HOME/cloudflared.pid`, and the next
-            process image reaps that pid before dialing — verified against
-            `/proc/<pid>/cmdline` so a recycled pid is never signalled, and
-            `waitpid`ed so the dead tunnel does not linger as a zombie under the
-            pid `execve` preserved.
+[COMPLETED] An in-place update must not leave the previous build's cloudflared
+            running (operator: "เก็บกวาดตัวเก่า แล้วจัดการป้องกันไม่ให้เกิดขึ้นอีก"). The
+            orphan 5910 (`fold-decrease-owners-venture`, up since 00:14:43) was
+            SIGTERMed. The prevention shipped in v1.163 (`a83a6f1`): a keeper
+            records its cloudflared pid in `$AIXODIA_HOME/cloudflared.pid`, and
+            the next process image reaps that pid before dialing — verified
+            against `/proc/<pid>/cmdline` so a recycled pid is never signalled,
+            and `waitpid`ed so the dead tunnel does not linger as a zombie under
+            the pid `execve` preserved.
 [COMPLETED] 429 classification must read the upstream's own wait, not guess at
             its wording (operator: "ถ้ามีบัคก็แก้บัคก่อน", after asking how to change
             IP to dodge the Opencode 429). The IP route was ruled out first: this
@@ -344,7 +342,7 @@ GOAL:
             live turn on Opencode/big-pickle answered "DEPLOY OK".
 
 PLAN:
-[IN_PROCESS] (1) record the spawned cloudflared pid — `Tunnel.pid` from
+[COMPLETED] (1) record the spawned cloudflared pid — `Tunnel.pid` from
             `child.id()`, written to `$AIXODIA_HOME/cloudflared.pid` by the
             keeper on every start; (2) `reap_stale_tunnel` at the top of
             `Keeper::run`: read the pid, confirm `/proc/<pid>/cmdline` really is a
@@ -360,6 +358,21 @@ PLAN:
             deploy. Chosen over fixing only the handover path, because a crash or
             a SIGKILL orphans the tunnel the same way and a pre-exec cancel would
             not cover either.
+[COMPLETED] Deployed as v1.163 and measured. CI 41270440586 and Release
+            41270440608 green on `a83a6f1`; asset 17,842,400 bytes digest
+            sha256:6e0a5443…, distinguishable from v1.162 (17,830,048 /
+            sha256:92eb21bd…) by size as well as digest. Gated on this host before
+            pushing: build 0, `cargo test --workspace` 202 passed / 0 failed,
+            `cargo fmt --check` 0, `cargo clippy --workspace --all-targets -- -D
+            warnings` 0, `aixodia_test.sh` 0, `install_test.sh` 0. `aixodia
+            update` swapped in place on pid 5832 (`started` moved 1793496182 →
+            1793505315 while the pid held), dialed
+            `varied-guides-cat-neil.trycloudflare.com`, `daemon url saved`
+            03:55:31, and `/root/.aixodia/cloudflared.pid` now holds 89233 — the
+            pid of the one live cloudflared, so the recording half works in
+            production. The address v1.162 had published now answers 530 (nothing
+            behind it), so exactly one tunnel is up and 0 WARN/ERROR since the
+            restart.
 [COMPLETED] (1) `APIError.retry_after: Option<Duration>` + `with_retry_after`;
             `body_retry_after` (retryAfterMs/retry_after at top level, under
             `error`, or in the first `errors` entry; numeric or quoted) and
@@ -1067,3 +1080,20 @@ NOTE:
   operator chose strict over auto-fallback on 2026-10-28, so it is their call, not
   a silent change. Lesson for next time: measure a free tier's remaining
   allowance before spending it on repeated smoke probes.
+- 2026-11-01T03:56Z: the reap path has not fired in production yet, and it could
+  not have: v1.162 predates the feature and wrote no pidfile, so this handover
+  correctly found nothing to reap. The first real reap will log `tunnel: reaped
+  cloudflared <pid> left by the previous build` on the next update; the mechanism
+  itself is covered by `a_tunnel_left_by_the_previous_build_is_reaped`, which
+  spawns a process through the same `start_cloudflared` path and ends it.
+- 2026-11-01: why the leaked tunnel is slow to die on its own. The previous image
+  held cloudflared's stderr pipe read end; `execve` closes that fd, so the orphan
+  exits on EPIPE the next time it logs. 46680 was still answering at 03:31 and was
+  gone by 03:55 — a quiet tunnel logs nothing, so it can hold a live
+  trycloudflare address for hours, which is exactly the window this fix closes.
+- 2026-11-01: unreaped children still accumulate as `Z` entries under the pid the
+  handover preserves — `5910`, `46680` (cloudflared) and four `[tmux: client]`.
+  They hold no tunnel, no fd, and no port, only a slot in the process table until
+  the engine exits. The new `waitpid` closes this for tunnels the keeper reaps;
+  the terminal children are still never waited, which is a separate defect and
+  was not acted on without the operator asking.
