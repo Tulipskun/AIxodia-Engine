@@ -15,6 +15,7 @@ members = [
     "crates/aixodia-relay",
     "crates/aixodia-mobile",
     "crates/aixodia-selfupdate",
+    "crates/aixodia-backup",
     "crates/aixodia-engine",
 ]
 
@@ -42,6 +43,7 @@ hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
 futures-util = "0.3"
 bytes = "1"
+http = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 axum = { version = "0.7", features = ["ws", "macros"] }
 tokio-tungstenite = "0.24"

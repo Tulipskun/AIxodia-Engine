@@ -10,6 +10,7 @@
 
 pub mod api;
 pub mod attach;
+pub mod backup;
 pub mod breaker;
 pub mod chat;
 pub mod gateway;

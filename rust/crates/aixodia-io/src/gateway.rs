@@ -44,7 +44,7 @@ pub const REQUEST_MAX_BODY: usize = 8 << 20;
 
 /// The release tag, baked in at build time. Bump on every release so a live
 /// service can be identified via `GET /healthz`.
-pub const VERSION: &str = "v1.163";
+pub const VERSION: &str = "v1.164";
 
 /// The rule a client-supplied draft id has to follow, as a readable pattern.
 pub const SESSION_ID_PATTERN: &str = "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$";
@@ -425,6 +425,19 @@ impl Gateway {
                 post(crate::upload::api_upload_attachment),
             )
             .route("/api/logs", get(crate::api::api_logs))
+            .route(
+                "/api/backup",
+                get(crate::backup::api_backup_status).post(crate::backup::api_backup_start),
+            )
+            .route("/api/backup/list", get(crate::backup::api_backup_list))
+            .route(
+                "/api/backup/config",
+                get(crate::backup::api_backup_status).put(crate::backup::api_backup_config_put),
+            )
+            .route(
+                "/api/backup/restore",
+                post(crate::backup::api_backup_restore),
+            )
             .route(
                 "/api/sessions/:id",
                 get(crate::api::api_get_session_agent).patch(crate::api::api_patch_session_agent),

@@ -1,4 +1,112 @@
 GOAL:
+[IN_PROCESS] A backup function that stores data in the HF storage bucket the
+            operator named (operator: "สร้างฟังชั่น backup ข้อมูลโดยเก็บไว้ใน HF
+            <hub write token, not repeated here> และหาวิธีที่เร็วที่สุด ทั้งการ
+            backup และ restore"). Scope settled by the operator: the tree is
+            `/root` minus caches and image-supplied directories, the trigger is
+            the phone's `/` menu, the hub token lives in D1 state, and a restore
+            has to be confirmed explicitly.
+            Facts measured on this host before choosing a mechanism:
+            (a) the bucket is `kyomu53n/Bucket`, private, listed by
+            `GET /api/buckets/{namespace}`; (b) the S3 gateway `s3.hf.co`
+            refuses this token (`InvalidAccessKeyId` for SigV4, `invalid header:
+            authorization` for bearer) because it needs separately generated
+            `HFAK` credentials — so the gateway is out and every transfer goes
+            through the hub API; (c) upload needs Xet (`POST
+            /api/buckets/{id}/batch` takes an `xetHash` that must already exist
+            in the CAS), and the Rust crate `hf-xet` exposes exactly the session
+            API the python client uses — proven end to end from Rust: file →
+            `XetUploadCommit` → hash `c409418…` → batch 200 → `resolve` GET →
+            byte-identical; (d) throughput is 26 MB/s up and 37–64 MB/s down per
+            stream, and 8 ranged GETs of one 64 MiB object were *slower* (2.24 s)
+            than one GET (1.78 s), so restore parallelism belongs across files,
+            not inside one; (e) Xet dedups at chunk level — re-uploading an 8.5 MB
+            SQL dump that had grown by 24 KB cost 0.51 s against 1.21 s for the
+            first copy, which is why the tree is stored as content-addressed
+            objects and never as one compressed tarball.
+            Mechanism: `rust/crates/aixodia-backup` — objects keyed by file
+            sha256 under `<prefix>/objects/aa/<sha>`, one manifest per run under
+            `<prefix>/manifests/<utc>.json`, `<prefix>/latest.json` as the
+            pointer. Unchanged files (size + mtime match the previous manifest)
+            are stat'ed only and reused, so a steady-state backup costs a couple
+            of round trips; changed bytes move through Xet.
+[IN_PROCESS] The engine side: `aixodia-io/src/backup.rs` puts the five routes
+            on the gateway — `GET/POST /api/backup` (status, start),
+            `GET /api/backup/list`, `PUT /api/backup/config` and
+            `POST /api/backup/restore`. The config, hub token included, is a
+            single JSON value in D1 state under `backup/config`; a write that
+            omits a field keeps the stored one, so the app can set the bucket
+            without ever resending the token, and nothing but a tail of it is
+            ever reported back. One job slot, `409` while it is held, and the
+            worker reports through a `Reporter` the status route reads.
+            Blocking bucket work never runs on a tokio worker: `reqwest::blocking`
+            refuses to be built in a runtime context and `hf-xet` panics on a
+            worker, so jobs go to a plain OS thread and `list` is awaited over a
+            channel from the blocking pool. A worker that panics releases the
+            slot through `catch_unwind`. Restore takes no target path from the
+            client — it always rebuilds the configured root — and refuses to run
+            at all unless the body says `confirm: true`.
+[COMPLETED] The `aixodia-backup` crate itself, compiling and unit-tested (10
+            tests). `lib.rs` holds the key layout, `Config`, `Entry`,
+            `Manifest`, the progress `Reporter` and `join_under`, which is what
+            stops a manifest from naming a target outside the root it is
+            restored into. `scan.rs` walks the tree (exclusions, one
+            filesystem, symlinks recorded rather than followed) and decides per
+            file whether its bytes have to be read at all. `hub.rs` is the
+            bucket API: paginated `tree`, `paths-info` existence probes, NDJSON
+            `batch` add/delete with per-operation failure reporting, and
+            `resolve` downloads into a temporary sibling that is renamed only
+            once complete. `xet.rs` ingests through `hf-xet`, one commit per
+            1000 objects, on a thread the module owns — the crate's blocking
+            calls panic inside a tokio runtime. `ops.rs` runs the two
+            operations: a steady-state backup is `latest.json`, its manifest,
+            one probe and one manifest write; a restore fans out per file over
+            12 threads, verifies every sha256 after writing, and leaves files
+            the manifest does not name untouched. A file that disappears
+            between the scan and the hash is reported and skipped, not fatal.
+            Clippy's five findings on the first pass are taken: the redundant
+            reference at the restore spawn, the collapsible size-then-hash test
+            in `restore_file`, `as_ref().map(clone)` in `object_keys`, the
+            `let`-then-return in `Reporter::new`, and iterating a map's
+            key-value pairs to read only the keys in the live example.
+            Gate green on the whole workspace: `cargo fmt --all --check`,
+            `cargo clippy --all-targets -- -D warnings` and
+            `cargo test --workspace` (exit 0) all pass on this host.
+            Measured against the real bucket on the real tree (`/root`, prefix
+            `aixodia/root`): a first backup of 392 files / 11,028,084 bytes took
+            **4,289 ms** and uploaded 10,999,649 of them; a later backup of the
+            same tree took **2,906 ms**, uploaded 218,328 bytes (the files that
+            genuinely changed) and pruned 1 manifest + 4 objects no retained
+            manifest needed; a backup of a tree with nothing changed at all took
+            **1,897 ms** and uploaded **0 bytes** — every file reused from the
+            previous manifest, which is the steady-state claim on the wire.
+            A restore into an empty directory pulled all 392 files, 216 dirs and
+            1 symlink back in **6,442 ms** over 12 threads and every entry
+            matched (`MATCH: 609 entries identical`); restoring the same backup
+            again took **598 ms** with 392 files recognised as already correct.
+            Five entries were reported and skipped rather than fatal: jupyter
+            kernel sockets, which are not regular files.
+            `examples/live.rs` had a bug in its own check, found by running it:
+            `fingerprint` walked the source tree with *no* exclusions while the
+            backup had walked it with the defaults, so the comparison would have
+            hashed 20 GB of `target` and caches and then reported a tree full of
+            phantom differences. It now fingerprints with
+            `scan::DEFAULT_EXCLUDES`, the same list the operation used.
+            The second run then failed on exactly one entry, and the entry was
+            honest: `.aixodia/aixodia.log`, the live engine's own log, which grew
+            between the manifest and the comparison. So the check no longer
+            demands that a running machine be still — the source's mtime is
+            compared with the moment the manifest was read, and a file written
+            after that is reported as `CHURN` instead of a mismatch, while a
+            restored file that does not match what was recorded, or an entry that
+            was not written at all, still fails the run.
+[COMPLETED] Add the crate to the workspace (`aixodia-backup`, `hf-xet 1.8`,
+            `xet-data 1.8`, `http 1` as workspace deps).
+            `reqwest 0.12` stays for the rest of the engine and `hf-xet` pulls
+            its own `reqwest 0.13`; two versions coexist rather than churning
+            every provider call in the workspace.
+            `gateway.rs` VERSION is bumped to `v1.164` for this: the routes are
+            new surface, so the build the phone sees has to name itself.
 [COMPLETED] An in-place update must not leave the previous build's cloudflared
             running (operator: "เก็บกวาดตัวเก่า แล้วจัดการป้องกันไม่ให้เกิดขึ้นอีก"). The
             orphan 5910 (`fold-decrease-owners-venture`, up since 00:14:43) was
@@ -590,6 +698,10 @@ NOTE:
 - The engine's bearer token is CF_TOKEN and /api/* is guarded by it: curl -H
   "Authorization: Bearer $CF_TOKEN" http://127.0.0.1:8787. Use it from the
   environment and never print it.
+- The hub write token the operator pasted for the backup is quoted in this file
+  as "<hub write token, not repeated here>": this repo is PUBLIC and `MAIN.md`
+  is committed, so the literal must never reach it. The engine keeps the real
+  one in D1 `backup/config` and only ever reports its last four characters.
 - A chat's model is addressed as "Provider/model" (split on the first '/'), so
   the keyless built-in is "AIxodia Free/openai-fast".
 - AGENTS.md rule: every non-reading tool call must be accompanied by a MAIN.md update.
