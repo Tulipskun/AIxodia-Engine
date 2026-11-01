@@ -539,13 +539,17 @@ mod tests {
     fn a_write_that_does_not_mention_excludes_leaves_them_alone() {
         let previous: Stored = serde_json::from_str(r#"{"excludes":["target","*.pyc"]}"#).unwrap();
         let untouched: Stored = serde_json::from_str(r#"{"bucket":"me/bucket"}"#).unwrap();
-        let merged = previous.excludes.or(untouched.excludes).unwrap();
-        assert_eq!(merged, vec!["target", "*.pyc"]);
+        assert_eq!(
+            untouched.excludes.or(previous.excludes),
+            Some(vec!["target".to_string(), "*.pyc".to_string()]),
+            "a write that never mentions the scope keeps it"
+        );
 
+        let previous: Stored = serde_json::from_str(r#"{"excludes":["target"]}"#).unwrap();
         let cleared: Stored = serde_json::from_str(r#"{"excludes":[]}"#).unwrap();
-        let merged = cleared.excludes.or(Some(vec!["target".into()])).unwrap();
-        assert!(
-            merged.is_empty(),
+        assert_eq!(
+            cleared.excludes.or(previous.excludes),
+            Some(Vec::new()),
             "an explicit empty list is not an absent one"
         );
     }
