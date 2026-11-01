@@ -42,6 +42,21 @@ GOAL:
             behaves exactly as before — inventing a wait would be the same guess
             this change removes, and the live `1-req/IP` throttle could not be
             reproduced today to learn its shape.
+[COMPLETED] Deployed v1.162 and proved the fail-fast path on the wire. CI
+            41260352899 and Release engine 41260353067 both green on 4ad9cea;
+            asset 17,830,048 bytes digest sha256:92eb21bd…, distinguishable from
+            the v1.161 image (17,821,856) by size as well as digest. `aixodia
+            update` swapped it in place on pid 5832 — the listener went dark
+            ~12s (01:23:03 engine started → 01:23:11 listening) while the new
+            image re-verified D1 and re-registered the tunnel, `daemon url saved`
+            01:23:17, `handover: note written`, and `/healthz` then answers
+            `{"pid":5832,"started":1793496182,"version":"v1.162"}` with etime
+            still counting from the original start, which is the exec signature.
+            A live Opencode turn came back HTTP 502 in **98 ms** with a single
+            attempt in the trace, so the wording fallback both refuses a spent
+            allowance and refuses to stall the phone — the `040cf55` contract
+            intact on the new classification code. Pollinations answers normally
+            on the same build ("POLL162 OK", 1823 prompt tokens). 0 WARN/ERROR.
 [COMPLETED] D1 must be a backup, not a step of the turn (operator: "ไม่ใช่เพราะ
             error 429 แต่ในสถานการณ์ปกติมันก็ช้าเหมือนกัน" then "D1 ทำหลังจากกระบวนการทุกอย่าง
             ไว้เป็น backup ไม่ต้องรอ D1 เขียนเสร็จ"). Measured on localhost with a
@@ -999,3 +1014,13 @@ NOTE:
   in either `.git/config` remote (checked). Revocation remains the operator's
   action; local scrubbing of the live session logs was offered and not yet
   approved.
+- 2026-11-01T01:25Z: this host's anonymous Opencode daily quota is spent again,
+  and this session's own probes contributed (QUOTACHECK, two PROBE-1, the
+  provider refresh, and the post-deploy smoke all drew on the same egress
+  34.75.4.47). Because `main` is still Opencode/big-pickle, a route-less chat now
+  answers HTTP 502 "Free usage limit reached" in ~98 ms until the ~00:00Z reset
+  (07:00 Thai). Pollinations/openai-fast answers normally on v1.162 right now, so
+  repointing `main` is the way to make the app usable before the reset — but the
+  operator chose strict over auto-fallback on 2026-10-28, so it is their call, not
+  a silent change. Lesson for next time: measure a free tier's remaining
+  allowance before spending it on repeated smoke probes.
