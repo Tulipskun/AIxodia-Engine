@@ -6,11 +6,15 @@
 //! resulting file hashes under a key.
 
 use std::path::Path;
+use std::time::Duration;
 
 use http::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, LINK, USER_AGENT};
 use serde::Deserialize;
 
-use crate::{encode_key, Config, Error, Result};
+use crate::{
+    encode_key, Config, Error, Result, CONNECT_TIMEOUT_SECS, DOWNLOAD_TIMEOUT_MAX,
+    DOWNLOAD_TIMEOUT_SECS,
+};
 
 /// Operations per `/batch` request. The payload is one small line per key, so
 /// the limit is about keeping a single failure from muddling a large run.
@@ -57,6 +61,14 @@ pub struct Hub {
     resolve: String,
     token: String,
     client: reqwest::blocking::Client,
+    /// How long one object download may take. See [`Resolver`].
+    download_timeout: Duration,
+}
+
+/// How long a download may run: the configured allowance, bounded so that a
+/// stalled stream is cut and retried rather than waited on for minutes.
+fn download_timeout_secs(timeout_secs: u64) -> u64 {
+    timeout_secs.clamp(DOWNLOAD_TIMEOUT_SECS, DOWNLOAD_TIMEOUT_MAX)
 }
 
 impl Hub {
@@ -66,6 +78,7 @@ impl Hub {
         cfg.validate()?;
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(cfg.timeout_secs.max(10)))
+            .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
             .build()?;
         Ok(Self {
             bucket: cfg.bucket.clone(),
@@ -81,6 +94,26 @@ impl Hub {
                 cfg.bucket
             ),
             token: cfg.token.clone(),
+            download_timeout: Duration::from_secs(download_timeout_secs(cfg.timeout_secs)),
+            client,
+        })
+    }
+
+    /// A download window of its own, for one restore worker.
+    ///
+    /// A `reqwest` blocking client drives every request it is handed from a
+    /// single internal thread, so a client shared by twelve workers makes them
+    /// queue behind each other — and behind whatever one of them is stuck on.
+    /// Call this once per worker.
+    pub fn downloader(&self) -> Result<Resolver> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(self.download_timeout)
+            .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+            .tcp_nodelay(true)
+            .build()?;
+        Ok(Resolver {
+            resolve: self.resolve.clone(),
+            token: self.token.clone(),
             client,
         })
     }
@@ -194,9 +227,13 @@ impl Hub {
 
     /// `GET /buckets/{bucket}/resolve/{key}`. Returns `None` when the key is
     /// not there; the hub redirects to the CDN and the redirect is followed.
+    ///
+    /// A manifest is read through here too, and it is the one request a run
+    /// cannot proceed without: it gets the download window, so a stall shows up
+    /// as a failed run in seconds rather than as silence for two minutes.
     pub fn get_bytes(&self, key: &str) -> Result<Option<Vec<u8>>> {
         let url = format!("{}/{}", self.resolve, encode_key(key));
-        let response = self.get(&url).send()?;
+        let response = self.get(&url).timeout(self.download_timeout).send()?;
         let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -212,50 +249,6 @@ impl Hub {
         }
         let body = response.bytes()?;
         Ok(Some(body.to_vec()))
-    }
-
-    /// Downloads `key` straight into `path`, writing a temporary sibling so a
-    /// half-received file never poses as a restored one.
-    pub fn download_to(&self, key: &str, path: &Path) -> Result<u64> {
-        let url = format!("{}/{}", self.resolve, encode_key(key));
-        let response = self.get(&url).header(ACCEPT_ENCODING, "identity").send()?;
-        let status = response.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(Error::Hub {
-                operation: "download".into(),
-                key: key.to_string(),
-                status: 404,
-                body: "the object is not in the bucket".into(),
-            });
-        }
-        if !status.is_success() {
-            let body = response.text().unwrap_or_default();
-            return Err(Error::Hub {
-                operation: "download".into(),
-                key: key.to_string(),
-                status: status.as_u16(),
-                body: trim_body(&body),
-            });
-        }
-        let tmp = temp_path(path);
-        let mut file = std::fs::File::create(&tmp).map_err(|source| Error::Io {
-            path: tmp.display().to_string(),
-            source,
-        })?;
-        let mut stream = response;
-        let written = std::io::copy(&mut stream, &mut file).map_err(|source| {
-            let _ = std::fs::remove_file(&tmp);
-            Error::Io {
-                path: tmp.display().to_string(),
-                source,
-            }
-        })?;
-        drop(file);
-        std::fs::rename(&tmp, path).map_err(|source| Error::Io {
-            path: path.display().to_string(),
-            source,
-        })?;
-        Ok(written)
     }
 
     /// Registers `items` as files: `(key, xet hash, modification time in
@@ -329,6 +322,66 @@ impl Hub {
     }
 }
 
+/// One worker's window on the bucket's `resolve` endpoint: its own connection
+/// pool and its own thread driving them, with a timeout short enough that a
+/// stalled stream costs a retry rather than minutes.
+pub struct Resolver {
+    resolve: String,
+    token: String,
+    client: reqwest::blocking::Client,
+}
+
+impl Resolver {
+    /// `GET /buckets/{bucket}/resolve/{key}`, straight into `path`. A temporary
+    /// sibling is written so a half-received file never poses as a restored one.
+    pub fn download_to(&self, key: &str, path: &Path) -> Result<u64> {
+        let url = format!("{}/{}", self.resolve, encode_key(key));
+        let response = self
+            .client
+            .get(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(ACCEPT_ENCODING, "identity")
+            .send()?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(Error::Hub {
+                operation: "download".into(),
+                key: key.to_string(),
+                status: 404,
+                body: "the object is not in the bucket".into(),
+            });
+        }
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            return Err(Error::Hub {
+                operation: "download".into(),
+                key: key.to_string(),
+                status: status.as_u16(),
+                body: trim_body(&body),
+            });
+        }
+        let tmp = temp_path(path);
+        let mut file = std::fs::File::create(&tmp).map_err(|source| Error::Io {
+            path: tmp.display().to_string(),
+            source,
+        })?;
+        let mut stream = response;
+        let written = std::io::copy(&mut stream, &mut file).map_err(|source| {
+            let _ = std::fs::remove_file(&tmp);
+            Error::Io {
+                path: tmp.display().to_string(),
+                source,
+            }
+        })?;
+        drop(file);
+        std::fs::rename(&tmp, path).map_err(|source| Error::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+        Ok(written)
+    }
+}
+
 fn trim_endpoint(endpoint: &str) -> String {
     endpoint.trim_end_matches('/').to_string()
 }
@@ -367,4 +420,20 @@ fn temp_path(path: &Path) -> std::path::PathBuf {
     path.parent()
         .unwrap_or_else(|| Path::new("."))
         .join(format!(".{name}.aixodia-part"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A download is cut in seconds, not in the caller's patience: four
+    /// attempts each allowed two minutes is how a 12 MB tree became an
+    /// eight-minute restore.
+    #[test]
+    fn a_download_window_is_bounded_whatever_the_configuration_allows() {
+        assert_eq!(download_timeout_secs(120), DOWNLOAD_TIMEOUT_MAX);
+        assert_eq!(download_timeout_secs(3600), DOWNLOAD_TIMEOUT_MAX);
+        assert_eq!(download_timeout_secs(1), DOWNLOAD_TIMEOUT_SECS);
+        assert_eq!(download_timeout_secs(45), 45);
+    }
 }

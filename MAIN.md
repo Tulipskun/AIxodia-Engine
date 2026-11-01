@@ -1,4 +1,52 @@
 GOAL:
+[COMPLETED] Make a restore finish and a backup mean it (operator: "ล่าสุดใช้
+            restore ใช้เวลา 8 นาที นานเกินไป และบางอย่างก็ restore มาไม่สมบูรณ์"
+            then "แก้ไขให้ backup restore ทำงานได้จริงและรวดเร็ว"). Two causes,
+            both structural:
+            (1) Incomplete. `restore` collected per-file failures and then threw
+            the whole run away on them, so one bad object abandoned the rest of
+            the tree mid-flight with five paths named in an error string — and
+            `backup` published whatever manifest it built, including one naming
+            objects the bucket had never received, because keys carried over from
+            the previous manifest were trusted without asking. Restoring that
+            manifest 404s, which is exactly "ไม่สมบูรณ์". The run now goes through
+            every entry and returns `Ok` with `RestoreReport.failed` naming each
+            path and why (a refused path, a directory that could not be made, an
+            object that never arrived); the directory and symlink steps keep going
+            instead of `?`-ing out. Before a manifest is published the bucket is
+            asked for every key it names: anything missing is uploaded once more
+            and re-checked, and if it is still not there the run refuses to
+            publish and says so, leaving `latest.json` on the tree that was whole.
+            (2) Eight minutes for 12 MB. Every request was waited on for
+            `timeout_secs` (120s) and a file attempted four times, so one stalled
+            CDN hop cost eight minutes — and a 404 was retried too, though it
+            cannot change its mind. Downloads now run in a window clamped to
+            30..90s with a 10s connect bound; a permanent answer (4xx, less
+            408/409/425/429) returns at once; backoff is 200/400/800ms rather than
+            0.5/1/2s; and verification moved inside the retry, so a stale body is
+            refetched instead of reported. Each worker also drives its own
+            `Resolver`: a `reqwest` blocking client runs every request it is
+            handed on one internal thread, so twelve workers sharing one client
+            were a queue in which one stuck stream held up the line. The
+            manifest's own read got the same bound — a hub that will not answer
+            now fails a run in seconds instead of going silent for two minutes.
+            Telemetry, because "it was slow" was not diagnosable afterwards: the
+            manifest read, the file phase with its counts, and the slowest file
+            are logged per run.
+            Verification: the toolchain had to be reinstalled first — the
+            half-restore this entry is about had taken `/root/.cargo` and
+            `/root/.rustup`, and both are in `DEFAULT_EXCLUDES`, so a restore is
+            never going to bring a toolchain back. `cargo test -p aixodia-backup`
+            is 17 passed, of which four are new restores run against a loopback
+            fake bucket that serves one object 404 and one 500-then-200; they pin
+            finishing-the-run, no-retry-on-404, retry-on-a-drop, and that a second
+            restore asks for nothing it already holds. `cargo clippy --all-targets
+            -- -D warnings` and `cargo fmt --check` clean. `aixodia-io` still will
+            not build on this host (no clang toolchain for its boringssl binding)
+            and CI remains its build and test run: it touches only
+            `backup`/`restore`/`Config`/`Reporter`, none of which changed shape,
+            and the removed `Hub::download_to` had no caller outside the crate.
+
 [COMPLETED] Fix the backup/restore system (operator: "แก้ไขระบบ backup restore
             ของ AIxodia ให้ถูกต้อง ... การทำ backup หลาย version นั้นไม่ใช่ของ
             ที่จำเป็น ... เวลาในการ backup/restore ช้ามาก และการ restore ครั้ง

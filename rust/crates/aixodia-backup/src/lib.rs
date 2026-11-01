@@ -32,7 +32,7 @@ pub mod ops;
 pub mod scan;
 mod xet;
 
-pub use hub::{FileItem, Hub};
+pub use hub::{FileItem, Hub, Resolver};
 pub use ops::{backup, fetch_manifest, latest_manifest, restore, BackupReport, RestoreReport};
 pub use scan::{plan, DEFAULT_EXCLUDES};
 
@@ -48,13 +48,28 @@ pub const DEFAULT_PREFIX: &str = "aixodia/root";
 /// Concurrency for restore. Measured on this host: one stream from the bucket
 /// saturates the link, but a tree of small files is round-trip bound, so the
 /// win comes from having several requests in flight, not from splitting one
-/// large file.
+/// large file. Each worker gets its own connection pool and its own thread to
+/// drive it, so one stalled stream cannot hold up the others.
 pub const RESTORE_CONCURRENCY: usize = 12;
 
 /// Attempts per file before a restore gives up on it. A half-open connection
 /// to the CDN is routine on a mobile uplink; refusing the whole restore for
 /// one of them is what left trees half-restored.
 pub const RESTORE_ATTEMPTS: usize = 4;
+
+/// How long one download may take in total, including the body. This is the
+/// bound that turns a stalled stream into a retry instead of a lost minute: a
+/// request that hangs is dropped at 30 seconds and the object is asked for
+/// again, rather than being waited on until the caller's own timeout.
+pub const DOWNLOAD_TIMEOUT_SECS: u64 = 30;
+
+/// How far [`Config::timeout_secs`] may raise [`DOWNLOAD_TIMEOUT_SECS`]. A
+/// configuration that allows a download to run for ten minutes reproduces the
+/// failure this is here to prevent, so the ceiling holds.
+pub const DOWNLOAD_TIMEOUT_MAX: u64 = 90;
+
+/// How long a TCP and TLS handshake may take before the request is abandoned.
+pub const CONNECT_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -94,6 +109,23 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    /// Whether asking the hub again for the same thing could produce a
+    /// different answer. A refused or missing object will be refused again, and
+    /// spending four attempts and their backoff on it is what makes a restore
+    /// slow for no reason; a dead stream, a timeout and a body that hashed
+    /// wrong are all worth a second request.
+    pub fn is_permanent(&self) -> bool {
+        match self {
+            Error::Hub { status, .. } => {
+                (400..500).contains(status) && !matches!(status, 408 | 409 | 425 | 429)
+            }
+            Error::Config(_) | Error::Manifest(..) | Error::Escape(_) | Error::Xet(_) => true,
+            _ => false,
+        }
+    }
+}
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Config {
