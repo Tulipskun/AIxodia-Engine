@@ -35,17 +35,17 @@ GOAL:
             Telemetry, because "it was slow" was not diagnosable afterwards: the
             manifest read, the file phase with its counts, and the slowest file
             are logged per run.
-            18 tests pass, two of them new bounds on the download windows;
             Verification: the toolchain had to be reinstalled first — the
             half-restore this entry is about had taken `/root/.cargo` and
             `/root/.rustup`, and both are in `DEFAULT_EXCLUDES`, so a restore is
             never going to bring a toolchain back. `cargo test -p aixodia-backup`
-            is 17 passed, of which four are new restores run against a loopback
-            fake bucket that serves one object 404 and one 500-then-200; they pin
+            is 18 passed: four are new restores run against a loopback fake
+            bucket that serves one object 404 and one 500-then-200; they pin
             finishing-the-run, no-retry-on-404, retry-on-a-drop, and that a second
-            restore asks for nothing it already holds. `cargo clippy --all-targets
-            -- -D warnings` and `cargo fmt --check` clean. `aixodia-io` still will
-            not build on this host (no clang toolchain for its boringssl binding)
+            restore asks for nothing it already holds, and two pin the download
+            windows (the run's bound, and one object's share of it). `cargo
+            clippy --all-targets -- -D warnings` and `cargo fmt --check` clean.
+            `aixodia-io` still will not build on this host (no clang toolchain for its boringssl binding)
             and CI remains its build and test run: it touches only
             `backup`/`restore`/`Config`/`Reporter`, none of which changed shape,
             and the removed `Hub::download_to` had no caller outside the crate.
