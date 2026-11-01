@@ -236,6 +236,7 @@ async fn run(cancel: CancellationToken) -> anyhow::Result<()> {
                 }
             });
         })),
+        home_dir().join(tunnel::PIDFILE),
     ));
     handover::set_session_store(Some(store.clone() as Arc<dyn UnfinishedStore>));
     handover::set_put_handover_state(Some(Arc::new(db.state())));
@@ -664,6 +665,19 @@ fn parse_started(version: &str) -> i64 {
         .take_while(|c| c.is_ascii_digit())
         .collect();
     digits.parse().unwrap_or(0)
+}
+
+/// The state directory, the same one the launcher keeps `aixodia.pid` in. The
+/// keeper's `cloudflared.pid` belongs beside it: after an `execve` handover the
+/// new image is where a stale tunnel gets reaped.
+fn home_dir() -> std::path::PathBuf {
+    match std::env::var_os("AIXODIA_HOME").filter(|home| !home.is_empty()) {
+        Some(home) => std::path::PathBuf::from(home),
+        None => match std::env::var_os("HOME").filter(|home| !home.is_empty()) {
+            Some(home) => std::path::PathBuf::from(home).join(".aixodia"),
+            None => std::path::PathBuf::from("."),
+        },
+    }
 }
 
 fn upload_dir() -> String {

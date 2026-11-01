@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{oneshot, watch};
@@ -34,6 +34,10 @@ const REGISTER_TIMEOUT: Duration = Duration::from_secs(45);
 /// Delay before restarting a tunnel that exited on its own.
 const RESTART_DELAY: Duration = Duration::from_secs(5);
 
+/// How long a tunnel left by a previous process image gets to leave after
+/// SIGTERM before it is killed outright.
+const STALE_REAP_WAIT: Duration = Duration::from_millis(1500);
+
 /// The start of every quick-tunnel URL.
 const URL_PREFIX: &str = "https://";
 
@@ -44,6 +48,12 @@ const URL_SUFFIX: &str = ".trycloudflare.com";
 #[derive(Clone)]
 pub struct Tunnel {
     url: String,
+    /// The cloudflared process behind this tunnel. The keeper records it so the
+    /// next process image can reap it: `execve` keeps the engine's pid but
+    /// leaves the children of the image it replaced running, and a crash leaves
+    /// them to init — either way the old quick tunnel stays up and keeps
+    /// answering on a URL D1 no longer names.
+    pid: Option<u32>,
     done: watch::Receiver<bool>,
     kill: watch::Sender<bool>,
 }
@@ -125,6 +135,7 @@ pub async fn start_cloudflared(cancel: CancellationToken, path: &Path) -> anyhow
     command.stderr(std::process::Stdio::piped());
     command.kill_on_drop(true);
     let mut child = command.spawn()?;
+    let pid = child.id();
 
     let stderr = child
         .stderr
@@ -204,9 +215,86 @@ pub async fn start_cloudflared(cancel: CancellationToken, path: &Path) -> anyhow
 
     Ok(Tunnel {
         url,
+        pid,
         done: done_rx,
         kill: kill.expect("kill sender"),
     })
+}
+
+/// The name the keeper records its cloudflared pid under, beside the launcher's
+/// `aixodia.pid`.
+pub const PIDFILE: &str = "cloudflared.pid";
+
+/// Whether `pid` is a running cloudflared quick tunnel. A zombie has an empty
+/// command line and a recycled pid names whatever took its place, so both read
+/// false. Every argument is matched rather than only the first so that a
+/// `#!/bin/sh` stand-in in a test reads as the binary it is named for.
+pub fn is_stale_tunnel(pid: u32) -> bool {
+    let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    let argv: Vec<String> = raw
+        .split(|byte| *byte == 0)
+        .filter(|arg| !arg.is_empty())
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect();
+    let names_cloudflared = argv.iter().any(|arg| {
+        Path::new(arg)
+            .file_name()
+            .map(|name| name == "cloudflared")
+            .unwrap_or(false)
+    });
+    names_cloudflared && argv.iter().any(|arg| arg == "tunnel")
+}
+
+/// The pid a keeper recorded as its tunnel, when the file holds one.
+fn recorded_pid(pidfile: &Path) -> Option<u32> {
+    let raw = std::fs::read_to_string(pidfile).ok()?;
+    raw.trim().parse().ok()
+}
+
+fn signal(pid: u32, sig: i32) {
+    unsafe {
+        libc::kill(pid as libc::pid_t, sig);
+    }
+}
+
+/// Ends the cloudflared a previous process image left behind, so neither an
+/// `execve` handover nor a crash can pile a second live quick tunnel onto the
+/// one D1 names. Returns the pid it ended, or none when there was nothing of
+/// ours to end.
+pub fn reap_stale_tunnel(pidfile: &Path) -> Option<u32> {
+    let pid = recorded_pid(pidfile)?;
+    // The engine's own pid survives a handover, so a pidfile that names it — or
+    // nothing else that could legitimately be a cloudflared — is never signalled.
+    if pid <= 1 || pid == std::process::id() || !is_stale_tunnel(pid) {
+        return None;
+    }
+    signal(pid, libc::SIGTERM);
+    let deadline = Instant::now() + STALE_REAP_WAIT;
+    while is_stale_tunnel(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if is_stale_tunnel(pid) {
+        signal(pid, libc::SIGKILL);
+    }
+    // Take the exit so the dead tunnel does not sit as a zombie: after a
+    // handover it is a child of this same pid, and nothing else will wait for it.
+    unsafe {
+        libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG);
+    }
+    Some(pid)
+}
+
+/// Records the pid of the tunnel just started, for the next process image.
+fn record_pid(pidfile: &Path, pid: Option<u32>) {
+    let Some(pid) = pid else { return };
+    if let Some(dir) = pidfile.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(err) = std::fs::write(pidfile, format!("{pid}\n")) {
+        tracing::warn!("tunnel pidfile: {err}");
+    }
 }
 
 /// Owns the cloudflared quick tunnel. It starts one, hands every (re)start's
@@ -215,19 +303,24 @@ pub async fn start_cloudflared(cancel: CancellationToken, path: &Path) -> anyhow
 pub struct Keeper {
     path: PathBuf,
     publish: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    pidfile: PathBuf,
     mu: Mutex<Option<Tunnel>>,
 }
 
 impl Keeper {
     /// Builds a keeper for the cloudflared binary at `path`. `publish` receives
-    /// the URL of every (re)start, and may be `None`.
+    /// the URL of every (re)start, and may be `None`. `pidfile` is where each
+    /// start records its cloudflared pid, so the next process image can reap a
+    /// tunnel that outlived the one that dialed it.
     pub fn new(
         path: impl Into<PathBuf>,
         publish: Option<Arc<dyn Fn(String) + Send + Sync>>,
+        pidfile: impl Into<PathBuf>,
     ) -> Self {
         Self {
             path: path.into(),
             publish,
+            pidfile: pidfile.into(),
             mu: Mutex::new(None),
         }
     }
@@ -255,9 +348,13 @@ impl Keeper {
 
     /// Keeps a tunnel up for the life of `cancel`.
     pub async fn run(&self, cancel: CancellationToken) {
+        if let Some(pid) = reap_stale_tunnel(&self.pidfile) {
+            tracing::info!("tunnel: reaped cloudflared {pid} left by the previous build");
+        }
         while !cancel.is_cancelled() {
             match start_cloudflared(cancel.clone(), &self.path).await {
                 Ok(tunnel) => {
+                    record_pid(&self.pidfile, tunnel.pid);
                     let url = tunnel.url().to_string();
                     self.set(Some(tunnel));
                     tracing::info!("tunnel url: {url}");
@@ -499,7 +596,7 @@ mod tests {
     // republished.
     #[tokio::test]
     async fn keeper_republishes_the_url_when_cloudflared_restarts() {
-        let (_dir, path) = fake_cloudflared(
+        let (dir, path) = fake_cloudflared(
             "n=$(cat \"$0.n\" 2>/dev/null || echo 0)\n\
              n=$((n+1))\n\
              echo $n > \"$0.n\"\n\
@@ -513,7 +610,7 @@ mod tests {
         });
         let cancel = CancellationToken::new();
 
-        let keeper = Arc::new(Keeper::new(path, Some(publish)));
+        let keeper = Arc::new(Keeper::new(path, Some(publish), dir.path().join(PIDFILE)));
         let task = {
             let keeper = Arc::clone(&keeper);
             let cancel = cancel.clone();
@@ -523,8 +620,83 @@ mod tests {
         assert_eq!(wait_url(&mut urls).await, "https://t1.trycloudflare.com");
         assert_eq!(wait_url(&mut urls).await, "https://t2.trycloudflare.com");
 
+        // Every start records its pid, which is what the next image reaps.
+        let recorded = std::fs::read_to_string(dir.path().join(PIDFILE))
+            .expect("the keeper records its cloudflared pid")
+            .trim()
+            .to_owned();
+        let recorded: u32 = recorded.parse().expect("a numeric pid");
+        assert!(
+            is_stale_tunnel(recorded),
+            "the recorded pid is a live tunnel"
+        );
+
         cancel.cancel();
         task.abort();
+    }
+
+    // The defect this closes: `execve` keeps the engine's pid but leaves the
+    // children of the image it replaced running, and a crash leaves them to
+    // init. Either way every update used to pile one more live quick tunnel onto
+    // the address D1 names.
+    #[tokio::test]
+    async fn a_tunnel_left_by_the_previous_build_is_reaped() {
+        let (dir, path) = fake_cloudflared(
+            "echo 'INF Your quick Tunnel has been created! Visit it at https://stale.trycloudflare.com' >&2\n\
+             echo 'INF Registered tunnel connection connIndex=0' >&2\n\
+             sleep 30\n",
+        );
+        let pidfile = dir.path().join(PIDFILE);
+        let cancel = CancellationToken::new();
+
+        let tunnel = start_cloudflared(cancel.clone(), &path)
+            .await
+            .expect("startCloudflared");
+        let pid = tunnel.pid.expect("a spawned cloudflared has a pid");
+        assert!(is_stale_tunnel(pid));
+        std::fs::write(&pidfile, format!("{pid}\n")).expect("record the pid");
+
+        assert_eq!(reap_stale_tunnel(&pidfile), Some(pid));
+        assert!(
+            !is_stale_tunnel(pid),
+            "the tunnel the previous build left behind must be gone"
+        );
+        assert_eq!(
+            reap_stale_tunnel(&pidfile),
+            None,
+            "a second reap finds nothing to do"
+        );
+    }
+
+    #[test]
+    fn a_pidfile_naming_anything_else_is_left_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join(PIDFILE);
+
+        let mut other = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        std::fs::write(&pidfile, format!("{}\n", other.id())).expect("record the pid");
+        assert_eq!(
+            reap_stale_tunnel(&pidfile),
+            None,
+            "a pid recycled onto an unrelated process must never be signalled"
+        );
+        assert!(
+            other.try_wait().expect("try_wait").is_none(),
+            "the unrelated process must still be running"
+        );
+        let _ = other.kill();
+        let _ = other.wait();
+
+        std::fs::write(&pidfile, "not a pid\n").expect("write garbage");
+        assert_eq!(reap_stale_tunnel(&pidfile), None, "garbage is not a pid");
+        assert_eq!(
+            reap_stale_tunnel(&dir.path().join("absent.pid")),
+            None,
+            "a first boot has nothing to reap"
+        );
     }
 
     // The app reads a fresh daemon/heartbeat as "online". While the tunnel is

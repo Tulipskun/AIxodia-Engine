@@ -1,4 +1,15 @@
 GOAL:
+[IN_PROCESS] An in-place update must not leave the previous build's cloudflared
+            running (operator: "เก็บกวาดตัวเก่า แล้วจัดการป้องกันไม่ให้เกิดขึ้นอีก"). Done
+            so far: the orphan 5910 (`fold-decrease-owners-venture`, up since
+            00:14:43) was SIGTERMed and the published tunnel
+            `gourmet-changes-instrumentation-welfare` still answers
+            `/healthz` v1.162. The prevention is in `tunnel.rs`: a keeper records
+            its cloudflared pid in `$AIXODIA_HOME/cloudflared.pid`, and the next
+            process image reaps that pid before dialing — verified against
+            `/proc/<pid>/cmdline` so a recycled pid is never signalled, and
+            `waitpid`ed so the dead tunnel does not linger as a zombie under the
+            pid `execve` preserved.
 [COMPLETED] 429 classification must read the upstream's own wait, not guess at
             its wording (operator: "ถ้ามีบัคก็แก้บัคก่อน", after asking how to change
             IP to dodge the Opencode 429). The IP route was ruled out first: this
@@ -333,6 +344,22 @@ GOAL:
             live turn on Opencode/big-pickle answered "DEPLOY OK".
 
 PLAN:
+[IN_PROCESS] (1) record the spawned cloudflared pid — `Tunnel.pid` from
+            `child.id()`, written to `$AIXODIA_HOME/cloudflared.pid` by the
+            keeper on every start; (2) `reap_stale_tunnel` at the top of
+            `Keeper::run`: read the pid, confirm `/proc/<pid>/cmdline` really is a
+            cloudflared `tunnel` before signalling anything (a zombie has an empty
+            command line and a recycled pid names another program, so both read
+            false), refuse pid <= 1 and our own pid — which `execve` preserves —
+            SIGTERM, give it `STALE_REAP_WAIT`, SIGKILL if it is still up, then
+            `waitpid(WNOHANG)` so it does not linger as a zombie under the pid the
+            handover kept; (3) `libc` added to the engine crate (already a
+            workspace dependency); (4) tests: the recorded pid is a live tunnel, a
+            stale one is reaped and a second reap finds nothing, an unrelated live
+            process named by a stale pidfile is left running; (5) gate, merge,
+            deploy. Chosen over fixing only the handover path, because a crash or
+            a SIGKILL orphans the tunnel the same way and a pre-exec cancel would
+            not cover either.
 [COMPLETED] (1) `APIError.retry_after: Option<Duration>` + `with_retry_after`;
             `body_retry_after` (retryAfterMs/retry_after at top level, under
             `error`, or in the first `errors` entry; numeric or quoted) and
@@ -1006,6 +1033,22 @@ NOTE:
   before the retry". `do_request` fires it and re-POSTs once. Nothing sets it for
   the built-in providers (a `OnceLock` written only by test code), which is why
   the free-tier window and the retry simply collided.
+- Defect found 2026-11-01 while re-orienting (NOT caused by the v1.162 change):
+  an in-place update orphans the previous cloudflared. `execve` keeps the pid but
+  leaves the old image's children alive, and `Keeper::run` only ever kills the
+  tunnel in its own `mu` slot (`tunnel.rs:270`, on cancel) — nothing reaps a
+  cloudflared that predates the boot. Evidence right now: pid 5832 has two
+  children, 5910 (started 00:14:43, `fold-decrease-owners-venture`) and 46680
+  (01:23:11, `gourmet-changes-instrumentation-welfare`), and both still answer
+  `/healthz` 200 in ~0.35s, because each quick tunnel proxies the same live
+  127.0.0.1:8787. Only the newest URL is in D1, so nothing is broken today; the
+  cost is one leaked process plus one live quick tunnel per update, accumulating
+  under the engine pid, and on shutdown the orphans survive while the listener
+  dies — leaving URLs that resolve to a dead port. Two unreaped `[tmux: client]`
+  zombies (6046, 6067) sit in the same process tree, so the handover path is
+  missing a reap step generally. Not acted on: killing 5910 affects what a phone
+  holding the old URL sees, and a code fix means gate + merge + deploy again, so
+  it is the operator's call.
 - Token hygiene 2026-11-01: the operator pasted the same full-scope PAT again
   (`repo`, `delete_repo`, `admin:org`, `workflow`, `codespace`, `copilot`). It is
   live in `gh` on this host and copied into six places: `/root/.config/gh/hosts.yml`

@@ -78,6 +78,7 @@ dependencies = [
  "async-trait",
  "axum",
  "futures-util",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",
