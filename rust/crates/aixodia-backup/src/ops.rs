@@ -190,6 +190,7 @@ pub fn backup(cfg: &Config, reporter: &Reporter) -> Result<BackupReport> {
     // is not willing to wait out. This runs before the object list is read, since
     // a packed entry names no object of its own.
     let scratch = scratch_dir()?;
+    let mut lost: Vec<String> = Vec::new();
     let mut shards = pack_shards(
         cfg,
         &mut plan.entries,
@@ -197,7 +198,41 @@ pub fn backup(cfg: &Config, reporter: &Reporter) -> Result<BackupReport> {
         &known,
         &scratch,
         reporter,
+        &mut lost,
     )?;
+    if !lost.is_empty() {
+        // Files that had gone by the time their container was built, which on a live
+        // tree is a matter of when, not whether. They leave the manifest exactly as
+        // an unreadable file leaves it when the scan finds one, and every shard's
+        // member positions move with them — a shard whose list pointed at a removed
+        // entry would be rebuilt around the wrong file.
+        tracing::warn!(
+            "backup: {} file(s) went before they could be packed",
+            lost.len()
+        );
+        let gone: HashSet<&str> = lost.iter().map(String::as_str).collect();
+        let mut remap: Vec<usize> = Vec::with_capacity(plan.entries.len());
+        let mut kept: Vec<Entry> = Vec::with_capacity(plan.entries.len());
+        for entry in std::mem::take(&mut plan.entries) {
+            if gone.contains(entry.path.as_str()) {
+                continue;
+            }
+            remap.push(kept.len());
+            kept.push(entry);
+        }
+        plan.entries = kept;
+        for shard in shards.iter_mut() {
+            shard.group = shard
+                .group
+                .iter()
+                .filter_map(|&at| remap.get(at).copied())
+                .collect();
+        }
+        skipped.extend(
+            lost.into_iter()
+                .map(|path| format!("{path} (gone before it could be packed)")),
+        );
+    }
 
     // Which bytes belong to which object key, so a file that turns out to be
     // missing from the bucket can be sent again by name. A packed entry names no
@@ -501,6 +536,11 @@ fn scratch_dir() -> Result<PathBuf> {
 ///
 /// `entries` is updated in place — each packed file gains its shard's position in
 /// the returned list, which is the numbering the published manifest uses.
+///
+/// `lost_names` collects the files that had gone by the time their container was
+/// built. They belong in the manifest's `skipped` list and out of its entries: the
+/// scan treats an unreadable file the same way, and a manifest that named a file no
+/// container holds would be the old bug with better paperwork.
 fn pack_shards(
     cfg: &Config,
     entries: &mut [Entry],
@@ -508,6 +548,7 @@ fn pack_shards(
     known: &HashSet<String>,
     scratch: &Path,
     reporter: &Reporter,
+    lost_names: &mut Vec<String>,
 ) -> Result<Vec<ShardBuild>> {
     let volatile: Vec<String> = VOLATILE.iter().map(|pattern| pattern.to_string()).collect();
     let mut steady: Vec<usize> = Vec::new();
@@ -556,7 +597,6 @@ fn pack_shards(
                     sha256: entries[index].sha256.clone().unwrap_or_default(),
                 })
                 .collect();
-            let raw = members.iter().map(|member| member.size).sum();
             let fingerprint = pack::fingerprint(&members);
             // Two halves to a reuse claim: the member list must match, and the
             // object its bytes live in must actually be in the bucket.
@@ -564,34 +604,52 @@ fn pack_shards(
                 .get(fingerprint.as_str())
                 .filter(|shard| known.contains(&cfg.shard_key(&shard.sha256)))
                 .map(|shard| (shard.sha256.clone(), shard.size));
-            let position = shards.len();
-            let shard = match standing {
-                Some((sha256, size)) => ShardBuild {
-                    key: cfg.shard_key(&sha256),
-                    sha256,
-                    fingerprint,
-                    // The container this fingerprint describes is the previous
-                    // run's, so its length is the previous run's too.
-                    size,
-                    raw,
-                    members: group.len(),
-                    temp: None,
-                    group,
-                },
+            // The files this container actually holds, which is the group as it was
+            // when the container was made rather than as it was scanned: a member
+            // that had gone by the time the shard was built is not in it, and a
+            // rebuild from this list has to leave it out the same way.
+            let mut held: Vec<usize> = group.clone();
+            let (sha256, size, fingerprint, temp) = match standing {
+                Some((sha256, size)) => (sha256, size, fingerprint, None),
                 None => {
                     let temp = scratch.join(format!("{fingerprint}.shard"));
-                    let (sha256, size) = pack::build(&members, &cfg.root, &temp)?;
-                    ShardBuild {
-                        key: cfg.shard_key(&sha256),
-                        sha256,
-                        fingerprint,
-                        size,
-                        raw,
-                        members: group.len(),
-                        temp: Some(temp),
-                        group,
+                    let (sha256, size, lost) = pack::build(&members, &cfg.root, &temp)?;
+                    if sha256.is_empty() {
+                        // Every file in the group had gone. There is no container to
+                        // name, and the files it would have carried are reported.
+                        lost_names.extend(lost);
+                        continue;
+                    }
+                    if lost.is_empty() {
+                        (sha256, size, fingerprint, Some(temp))
+                    } else {
+                        // The container holds fewer files than the group did, so the
+                        // identity it will be reused by has to describe what is in it
+                        // rather than what was asked for.
+                        let kept: Vec<(usize, pack::Member)> = group
+                            .into_iter()
+                            .zip(members)
+                            .filter(|(_, member)| !lost.contains(&member.path))
+                            .collect();
+                        let held_members: Vec<pack::Member> =
+                            kept.iter().map(|(_, member)| member.clone()).collect();
+                        let fingerprint = pack::fingerprint(&held_members);
+                        held = kept.into_iter().map(|(index, _)| index).collect();
+                        lost_names.extend(lost);
+                        (sha256, size, fingerprint, Some(temp))
                     }
                 }
+            };
+            let position = shards.len();
+            let shard = ShardBuild {
+                key: cfg.shard_key(&sha256),
+                size,
+                raw: held.iter().map(|&index| entries[index].size).sum(),
+                members: held.len(),
+                temp,
+                group: held,
+                sha256,
+                fingerprint,
             };
             for index in &shard.group {
                 entries[*index].shard = Some(position);
@@ -635,7 +693,24 @@ fn rebuild_shards(
             })
             .collect();
         let temp = scratch.join(format!("repair-{}.shard", &shard.fingerprint[..16]));
-        let (sha256, size) = pack::build(&members, &cfg.root, &temp)?;
+        let (sha256, size, lost) = pack::build(&members, &cfg.root, &temp)?;
+        if !lost.is_empty() {
+            // A repair has to reproduce the bytes the manifest already names, and a
+            // member that is gone cannot be reproduced. A normal backup drops such a
+            // file from its own shard and carries on; a repair has no such choice, and
+            // saying which file went is better than publishing a short container under
+            // a key that describes a full one.
+            let _ = fs::remove_file(&temp);
+            return Err(Error::Api {
+                operation: "backup".into(),
+                message: format!(
+                    "shard {} cannot be rebuilt: {} of its members went, starting with {}",
+                    shard.fingerprint,
+                    lost.len(),
+                    lost[0]
+                ),
+            });
+        }
         if sha256 != shard.sha256 {
             // The manifest already names a key built from this member list, and the
             // bytes say otherwise. Nothing the manifest claims can be trusted after
@@ -2193,7 +2268,8 @@ mod tests {
                 });
             }
             let out = source.join(format!("container-{position}.shard"));
-            let (sha256, size) = pack::build(&members, &source, &out).expect("a container builds");
+            let (sha256, size, _) =
+                pack::build(&members, &source, &out).expect("a container builds");
             let bytes = fs::read(&out).expect("the container it wrote");
             let _ = fs::remove_file(&out);
             refs.push(ShardRef {
@@ -2641,6 +2717,7 @@ mod tests {
             &HashSet::new(),
             &scratch,
             &reporter,
+            &mut Vec::new(),
         )
         .expect("the first run packs");
         assert_eq!(
@@ -2675,6 +2752,7 @@ mod tests {
             &known,
             &scratch,
             &reporter,
+            &mut Vec::new(),
         )
         .expect("the second run reuses");
         assert_eq!(reused.len(), built.len());
@@ -2723,6 +2801,7 @@ mod tests {
             &HashSet::new(),
             &scratch,
             &reporter,
+            &mut Vec::new(),
         )
         .expect("the first run packs");
         let published = Manifest {
@@ -2751,6 +2830,7 @@ mod tests {
             &known,
             &scratch,
             &reporter,
+            &mut Vec::new(),
         )
         .expect("the changed tree is packed");
 
@@ -2781,6 +2861,7 @@ mod tests {
             &HashSet::new(),
             &scratch,
             &reporter,
+            &mut Vec::new(),
         )
         .expect("the first run packs");
         let published = Manifest {
@@ -2811,11 +2892,63 @@ mod tests {
             &known,
             &scratch,
             &reporter,
+            &mut Vec::new(),
         )
         .expect("the run goes on");
         assert!(
             rebuilt.iter().all(|shard| shard.temp.is_some()),
             "a fingerprint match is not enough: the bytes have to be there"
+        );
+        let _ = fs::remove_dir_all(&cfg.root);
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    /// A backup walks nineteen thousand files and then spends minutes packing them,
+    /// and a live tree loses files in between. A file that went is the scan's news,
+    /// not the backup's: the container is built from what stayed, the gone file is
+    /// named, and the run finishes.
+    #[test]
+    fn a_file_gone_before_its_container_is_built_is_named_and_not_fatal() {
+        let (cfg, mut entries, scratch) = packable_root("gone", &[1 << 20, 1 << 20, 1 << 20]);
+        let reporter = Reporter::new("backup");
+        fs::remove_file(cfg.root.join("f1.bin")).expect("the file goes");
+
+        let mut lost = Vec::new();
+        let built = pack_shards(
+            &cfg,
+            &mut entries,
+            None,
+            &HashSet::new(),
+            &scratch,
+            &reporter,
+            &mut lost,
+        )
+        .expect("a gone file does not cost the backup");
+        assert_eq!(lost, vec!["f1.bin".to_string()], "it is named");
+
+        let held: Vec<usize> = built.iter().flat_map(|shard| shard.group.clone()).collect();
+        assert_eq!(held.len(), 2, "and two files are in the containers");
+        for &at in &held {
+            assert_ne!(entries[at].path, "f1.bin", "the gone file is in no list");
+        }
+        assert!(
+            entries[1].shard.is_none(),
+            "and it carries no claim on a container"
+        );
+        let raw: u64 = built.iter().map(|shard| shard.raw).sum();
+        assert_eq!(raw, 2 << 20, "the container sizes say two files");
+        let survivors: Vec<pack::Member> = held
+            .iter()
+            .map(|&at| pack::Member {
+                path: entries[at].path.clone(),
+                size: entries[at].size,
+                sha256: entries[at].sha256.clone().unwrap_or_default(),
+            })
+            .collect();
+        assert_eq!(
+            built[0].fingerprint,
+            pack::fingerprint(&survivors),
+            "and the identity a reuse is decided by describes what is inside"
         );
         let _ = fs::remove_dir_all(&cfg.root);
         let _ = fs::remove_dir_all(&scratch);

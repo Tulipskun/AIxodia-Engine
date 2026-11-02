@@ -157,14 +157,36 @@ pub fn group(sizes: &[u64]) -> Vec<Vec<usize>> {
     shards
 }
 
-/// Write the container for `members` to `out`, returning its sha256 and its
-/// length. That hash is the key the bucket stores it under.
+/// Write the container for `members` to `out`: its sha256 and length, and the
+/// members it did not put in because they could not be opened. That hash is the key
+/// the bucket stores it under.
 ///
-/// `root` resolves each member's path. A file that cannot be read fails the whole
-/// shard, which is the right answer: a shard that quietly omitted a member would
-/// be published under a hash that claims otherwise, and every later run would
-/// reuse it.
-pub fn build(members: &[Member], root: &Path, out: &Path) -> Result<(String, u64)> {
+/// `root` resolves each member's path. A file that has gone by the time its container
+/// is built is that file's loss and not the run's: the scan already names unreadable
+/// files rather than failing over them, and packing re-reads every file a rebuilt
+/// shard holds — nineteen thousand of them on a live tree — so one vanished temporary
+/// file cannot be allowed to cost a backup. What is *in* the container is what the
+/// hash describes, which is the rule this used to state as "fail the shard": a
+/// member that opened and then broke part way through still fails the whole
+/// container, because half a read is a shard that lies, and a lying shard is reused
+/// by every later run.
+pub fn build(members: &[Member], root: &Path, out: &Path) -> Result<(String, u64, Vec<String>)> {
+    let mut lost: Vec<String> = Vec::new();
+    let keep: Vec<&Member> = members
+        .iter()
+        .filter(|member| match fs::metadata(root.join(&member.path)) {
+            Ok(_) => true,
+            Err(_) => {
+                lost.push(member.path.clone());
+                false
+            }
+        })
+        .collect();
+    if keep.is_empty() {
+        // Nothing to hold, so nothing to name a container by: the caller drops this
+        // group rather than publishing an object nobody can restore a file from.
+        return Ok((String::new(), 0, lost));
+    }
     let file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -177,11 +199,8 @@ pub fn build(members: &[Member], root: &Path, out: &Path) -> Result<(String, u64
     let mut sink = Tracked::new(BufWriter::with_capacity(BUFFER, file));
     sink.put(MAGIC, out)?;
     sink.put(&[FORMAT], out)?;
-    sink.put(&(members.len() as u32).to_le_bytes(), out)?;
-    sink.put(
-        &members.iter().map(|m| m.size).sum::<u64>().to_le_bytes(),
-        out,
-    )?;
+    sink.put(&(keep.len() as u32).to_le_bytes(), out)?;
+    sink.put(&keep.iter().map(|m| m.size).sum::<u64>().to_le_bytes(), out)?;
 
     // Each member's frame is compressed into a sibling of the container first: the
     // container declares a frame's length before its bytes, and zstd does not know
@@ -200,7 +219,7 @@ pub fn build(members: &[Member], root: &Path, out: &Path) -> Result<(String, u64
         .open(&staged)
         .map_err(io)?;
 
-    for member in members {
+    for member in keep {
         if member.size > MAX_MEMBER_SIZE {
             return Err(Error::Api {
                 operation: "pack".into(),
@@ -244,7 +263,7 @@ pub fn build(members: &[Member], root: &Path, out: &Path) -> Result<(String, u64
         path: out.display().to_string(),
         source,
     })?;
-    Ok((hex::encode(hash), written))
+    Ok((hex::encode(hash), written, lost))
 }
 
 /// One member's bytes, as a single zstd frame appended to `sink`.
@@ -535,6 +554,83 @@ mod tests {
         }
     }
 
+    /// A backup walks the tree and then packs it minutes apart, and a live tree
+    /// loses files in between. One gone file must not cost the whole backup, so a
+    /// member that cannot be opened is dropped and named — the same way the scan
+    /// treats a file it cannot read.
+    #[test]
+    fn a_member_that_went_is_named_and_the_rest_is_packed() {
+        let root = tree("vanished");
+        fs::write(root.join("gone.txt"), b"here while the tree was walked").unwrap();
+        fs::write(root.join("two.txt"), "beta".repeat(900)).unwrap();
+        let mut members = vec![member("gone.txt", &root), member("two.txt", &root)];
+        fs::remove_file(root.join("gone.txt")).expect("the file goes");
+
+        let out = root.join(".shard");
+        let (sha256, size, lost) = build(&members, &root, &out).expect("a shard");
+        assert_eq!(lost, vec!["gone.txt".to_string()], "the one that went");
+        assert!(!sha256.is_empty(), "and the shard still exists");
+        assert!(size > 0, "with the bytes that stayed");
+
+        let mut reached = Vec::new();
+        extract(
+            &out,
+            &mut |path| {
+                reached.push(path.to_string());
+                let found = members.iter().find(|m| m.path == path)?;
+                Some(destination(found, &root))
+            },
+            &mut |_, _| {},
+        )
+        .expect("a container of one member is a container");
+        assert_eq!(reached, vec!["two.txt"], "and it holds only that");
+
+        // What the header claims has to be what the body holds, or a restore reads
+        // the container as short of the file it is missing.
+        members.retain(|member| member.path != "gone.txt");
+        let bytes = fs::read(&out).expect("the shard");
+        let count = u32::from_le_bytes(
+            bytes[MAGIC.len() + 1..MAGIC.len() + 5]
+                .try_into()
+                .expect("a header"),
+        );
+        let raw = u64::from_le_bytes(
+            bytes[MAGIC.len() + 5..HEADER_LEN]
+                .try_into()
+                .expect("a header"),
+        );
+        assert_eq!(count as usize, members.len(), "the count is the kept one");
+        assert_eq!(raw, members.iter().map(|m| m.size).sum::<u64>());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A group whose every member went is not an error and not an object: it names
+    /// what is missing and leaves nothing for the bucket to hold.
+    #[test]
+    fn a_group_that_entirely_went_builds_nothing() {
+        let root = tree("all-vanished");
+        let members = vec![
+            Member {
+                path: "one.txt".into(),
+                size: 10,
+                sha256: String::new(),
+            },
+            Member {
+                path: "two.txt".into(),
+                size: 20,
+                sha256: String::new(),
+            },
+        ];
+        let out = root.join(".shard");
+        let (sha256, size, lost) =
+            build(&members, &root, &out).expect("nothing to pack is not an error");
+        assert!(sha256.is_empty(), "no bytes, no identity");
+        assert_eq!(size, 0);
+        assert_eq!(lost.len(), 2, "and both are named: {lost:?}");
+        assert!(!out.exists(), "and no half-written container is left");
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// The claim warm reuse rests on: nothing about a shard depends on when it was
     /// built, so the fingerprint can stand in for the bytes.
     #[test]
@@ -545,9 +641,9 @@ mod tests {
         let members = vec![member("two.txt", &root), member("sub/one.txt", &root)];
         let out = root.join(".shard");
 
-        let (first, first_len) = build(&members, &root, &out).expect("a shard");
+        let (first, first_len, _) = build(&members, &root, &out).expect("a shard");
         let kept = fs::read(&out).expect("the shard");
-        let (second, second_len) = build(&members, &root, &out).expect("the other shard");
+        let (second, second_len, _) = build(&members, &root, &out).expect("the other shard");
 
         assert_eq!(first, second, "the hash is an identity");
         assert_eq!(
@@ -623,7 +719,7 @@ mod tests {
             member("two.txt", &root),
         ];
         let out = root.join(".shard");
-        let (_sha, size) = build(&members, &root, &out).expect("a shard");
+        let (_sha, size, _) = build(&members, &root, &out).expect("a shard");
         assert!(size < 8_192, "three small files pack small: {size}");
 
         // The caller owns the tree it is writing, including the directories: this
