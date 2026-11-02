@@ -14,11 +14,46 @@ use http::header::{AUTHORIZATION, USER_AGENT};
 use xet::xet_session::XetSessionBuilder;
 use xet_data::processing::Sha256Policy;
 
+use xet_runtime::config::XetConfig;
+
 use crate::{Config, Error, Reporter, Result};
 
 /// Files per commit. Small enough that one bad file costs one chunk of retry,
 /// large enough that the hub is not asked for a new write token per file.
 const COMMIT_CHUNK: usize = 1000;
+
+/// Upload connections the CAS client opens straight away.
+///
+/// The client's own default is two, and its adaptive controller only steps that
+/// up once twenty megabytes of transfers have completed — which a tree of thirty
+/// thousand files of a few kilobytes each takes a long time to reach, because
+/// every one of them is a round trip rather than a stream. A first backup of a
+/// Rust toolchain measured four minutes and fourteen seconds for 901 MB at two
+/// connections; the wide start is what makes a bulk backup feel like a copy
+/// instead of a queue.
+const UPLOAD_CONCURRENCY: usize = 16;
+
+/// The floor the controller may retreat to when the link turns bad.
+const UPLOAD_CONCURRENCY_MIN: usize = 4;
+
+/// The client's own preset for high-performance mode.
+const UPLOAD_ADJUSTMENT_BYTES: &str = "1mb";
+
+/// The session config, with the upload path tuned for many small objects. A
+/// wrong dotted path would keep the client's default silently, so the values
+/// are read back and the paths are pinned by a test.
+fn upload_config() -> Result<XetConfig> {
+    XetConfig::new()
+        .with_config("client.ac_initial_upload_concurrency", UPLOAD_CONCURRENCY)
+        .and_then(|c| c.with_config("client.ac_min_upload_concurrency", UPLOAD_CONCURRENCY_MIN))
+        .and_then(|c| {
+            c.with_config(
+                "client.ac_min_bytes_required_for_adjustment",
+                UPLOAD_ADJUSTMENT_BYTES,
+            )
+        })
+        .map_err(|e| Error::Xet(format!("upload concurrency: {e}")))
+}
 
 /// What to ingest for one key.
 pub struct Job {
@@ -84,7 +119,7 @@ fn run(
     headers.insert(USER_AGENT, "aixodia-engine-backup".parse().unwrap());
     let refresh_url = format!("{endpoint}/api/buckets/{bucket}/xet-write-token");
 
-    let session = XetSessionBuilder::new()
+    let session = XetSessionBuilder::new_with_config(upload_config()?)
         .build()
         .map_err(|e| Error::Xet(e.to_string()))?;
     let mut out = Vec::with_capacity(jobs.len());
@@ -163,4 +198,23 @@ fn ingest_chunk(
         )));
     }
     Ok(done)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A dotted path the client does not know is accepted silently by most
+    /// config layers, and would leave the upload at two connections forever.
+    #[test]
+    fn the_upload_paths_are_the_ones_the_client_reads() {
+        let cfg = upload_config().expect("the concurrency paths are real config paths");
+        assert_eq!(cfg.client.ac_initial_upload_concurrency, UPLOAD_CONCURRENCY);
+        assert_eq!(cfg.client.ac_min_upload_concurrency, UPLOAD_CONCURRENCY_MIN);
+        let adjustment_bytes: u64 = cfg.client.ac_min_bytes_required_for_adjustment.into();
+        // The client reads "1mb" as a decimal megabyte, which is the point: the
+        // threshold is what has to be transferred before the controller is
+        // allowed to react, and twenty of them never arrives in a small-file tree.
+        assert_eq!(adjustment_bytes, 1_000_000);
+    }
 }

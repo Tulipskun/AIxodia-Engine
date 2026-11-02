@@ -1,4 +1,54 @@
 GOAL:
+[COMPLETED] Make it feel like copying files (operator: "ทำให้มันเหมือนคัดลอกไฟล์
+            ไปมาได้มั้ย ช้าเกิน"). The fix that made a restore *finish* did not make
+            it fast, and this time the cost was measured rather than argued. The hub
+            token turned out to have been in D1 `backup/config` all along — the
+            missing local `HF_TOKEN` was never a barrier, `GET /api/backup` answers
+            `configured: true` and a run needs only that — so all three numbers below
+            are real:
+            (a) a warm backup of `/root` is 16.8s for 6,126 files / 853 MB, because
+            6,022 of them are already in the bucket and are reused unread;
+            (b) a first backup carrying newly-included content is 254s for 901 MB;
+            (c) a cold restore of that whole tree — 19,318 files, 1.75 GB — took
+            1,431,743 ms. Twenty-four minutes.
+            Neither is the link's fault. Two defaults were.
+            (1) Upload. The Xet client opens two connections to the CAS and its
+            adaptive controller steps that up only after twenty megabytes of
+            transfers have completed, which a tree of thirty thousand small files is
+            minutes from reaching. `xet::upload_config` now hands the session a
+            config with `ac_initial_upload_concurrency` 16, a floor of 4 and a
+            one-megabyte adjustment threshold; a test reads the values back, because
+            a mistyped dotted config path would otherwise leave it at two silently.
+            (2) Restore. A file was one request, and the bucket answers a request in
+            about a quarter of a second while carrying a fifth of a megabyte per
+            second per connection — so thirty thousand small files paid thirty
+            thousand round trips, and the largest object in the tree decided when the
+            run ended, alone on one connection. Restore's unit of work is now the
+            range request rather than the file: `ranges_for` cuts anything at or above
+            8 MB into pieces of about 4 MB, up to twelve of them, and any of the 32
+            workers (was 12) takes any piece of any file, each writing at its own
+            offset into the file's `.aixodia-part` sibling. Only the worker that takes
+            a file's last piece hashes it, sets its mode and stamp, and renames it, so
+            a file is finalised exactly once however many hands carried its bytes.
+            A bucket that ignores `Range` is not a failure: its body cannot be written
+            at an offset, so the file is asked for again as one stream.
+            `*.aixodia-part` joined `DEFAULT_EXCLUDES` because a run that stops leaves
+            those siblings behind and a backup that captured them would store a file
+            no manifest ever named.
+            The toolchain is in scope rather than excluded, which is what makes these
+            the numbers that matter: `DEFAULT_EXCLUDES` no longer names `.cargo` or
+            `.rustup` and the D1 list was put without them, so a restored machine can
+            `cargo build` instead of reinstalling a toolchain first — the reinstall
+            this repository has had to do twice.
+            Verification: 21 tests. Two of them are new restores of a nine-megabyte
+            object against the loopback bucket — one serving 206 slices, shown to be
+            asked for in several ranges, and one that ignores `Range` entirely, shown
+            to deliver the file byte for byte. The single file that failed in the
+            twenty-four-minute restore was `.qoder/logs/.../qodercli.log`, this
+            session's own log, changed between the backup and the restore: the
+            checksum refused it, which is the verification doing its job. `cargo fmt`
+            and `cargo clippy --all-targets -- -D warnings` clean; `aixodia-io` is
+            untouched and stays CI-gated.
 [COMPLETED] Make a restore finish and a backup mean it (operator: "ล่าสุดใช้
             restore ใช้เวลา 8 นาที นานเกินไป และบางอย่างก็ restore มาไม่สมบูรณ์"
             then "แก้ไขให้ backup restore ทำงานได้จริงและรวดเร็ว"). Two causes,
@@ -49,6 +99,19 @@ GOAL:
             and CI remains its build and test run: it touches only
             `backup`/`restore`/`Config`/`Reporter`, none of which changed shape,
             and the removed `Hub::download_to` had no caller outside the crate.
+            Measured on the live engine rather than estimated: the hub token is in
+            D1 `backup/config`, so the missing local `HF_TOKEN` was never a
+            barrier — `GET /api/backup` answers `configured: true` with the token
+            tail, and the run needs only that. A warm backup of `/root` published
+            `20261101T231606Z`: 6126 files / 853 MB in 16825 ms, 6022 files reused
+            so 9.4 MB crossed the wire, one previous manifest pruned, five jupyter
+            kernel ipc sockets skipped for not being regular files. A restore was
+            not measured here, and not for want of a token: `POST
+            /api/backup/restore` always rebuilds into `config.root`, so timing it
+            means pointing the root at a scratch tree for the minutes it runs —
+            during which a backup tapped on the phone would store that scratch
+            tree as the machine's one snapshot. The number is taken on a machine
+            being rebuilt instead, which is what a restore is for.
 
 [COMPLETED] Fix the backup/restore system (operator: "แก้ไขระบบ backup restore
             ของ AIxodia ให้ถูกต้อง ... การทำ backup หลาย version นั้นไม่ใช่ของ

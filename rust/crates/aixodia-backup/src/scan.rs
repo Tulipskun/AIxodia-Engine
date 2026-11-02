@@ -14,6 +14,12 @@ use crate::{Error, Kind, Manifest, Result};
 /// operator's data. A pattern without a `/` is matched against every path
 /// component, so `target` prunes `aixodia-engine/rust/target` wherever it
 /// appears; a pattern with `/` is matched against the whole relative path.
+///
+/// The Rust toolchain is deliberately not on this list. A machine that has been
+/// restored but cannot build is indistinguishable, from the operator's side,
+/// from a restore that lost the tree — and it is what the old scope was doing:
+/// `.cargo` and `.rustup` here cost a reinstall of the toolchain after every
+/// rebuild, which reads as an incomplete restore.
 pub const DEFAULT_EXCLUDES: &[&str] = &[
     "target",
     "node_modules",
@@ -22,8 +28,6 @@ pub const DEFAULT_EXCLUDES: &[&str] = &[
     "venv",
     "poetry-cache",
     ".cache",
-    ".cargo",
-    ".rustup",
     ".npm",
     ".npm/_cacache",
     ".julia",
@@ -36,6 +40,11 @@ pub const DEFAULT_EXCLUDES: &[&str] = &[
     "*.pyc",
     "*.swp",
     "core.*",
+    // A restore writes each file's pieces into one of these and renames it over
+    // the final name, so a half-run leaves them behind. They are a stopped run's
+    // debris, never the operator's data, and a backup that captured them would
+    // store a file no manifest ever named.
+    "*.aixodia-part",
 ];
 
 /// One filesystem entry as found on disk, before it is decided whether its
@@ -413,6 +422,14 @@ mod tests {
         assert!(is_excluded("a/b/__pycache__/c.pyc", &excludes));
         assert!(!is_excluded("aixodia-engine/rust/Cargo.toml", &excludes));
         assert!(!is_excluded(".aixodia/aixodia.log", &excludes));
+        assert!(is_excluded(".ssh/config.aixodia-part", &excludes));
+        // A restored machine has to be able to build again, so the toolchain is
+        // in the scope and not in this list.
+        assert!(!is_excluded(".cargo/bin/cargo", &excludes));
+        assert!(!is_excluded(
+            ".rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc",
+            &excludes
+        ));
     }
 
     #[test]

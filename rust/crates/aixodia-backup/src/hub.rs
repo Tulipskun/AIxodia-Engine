@@ -5,10 +5,11 @@
 //! Xet, so [`crate::xet`] pushes bytes to the CAS and this module registers the
 //! resulting file hashes under a key.
 
+use std::io::Seek;
 use std::path::Path;
 use std::time::Duration;
 
-use http::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, LINK, USER_AGENT};
+use http::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, LINK, RANGE, USER_AGENT};
 use serde::Deserialize;
 
 use crate::{
@@ -351,17 +352,36 @@ pub struct Resolver {
 }
 
 impl Resolver {
-    /// `GET /buckets/{bucket}/resolve/{key}`, straight into `path`. A temporary
-    /// sibling is written so a half-received file never poses as a restored one.
-    pub fn download_to(&self, key: &str, size: u64, path: &Path) -> Result<u64> {
+    /// `GET /buckets/{bucket}/resolve/{key}` into `path`, which the caller owns:
+    /// it is the temporary sibling a half-received file is written to, so no
+    /// piece of this code has to know where the final name is.
+    ///
+    /// `range` is `(first, last)` byte indices, inclusive. A large object is
+    /// fetched as several ranges at once because the bucket serves roughly a
+    /// fifth of a megabyte per second per connection, so one ninety-megabyte
+    /// binary is a seven-minute tail on an otherwise finished restore. `None`
+    /// asks for the whole object.
+    pub fn download_piece(
+        &self,
+        key: &str,
+        range: Option<(u64, u64)>,
+        want_bytes: u64,
+        path: &Path,
+    ) -> Result<u64> {
         let url = format!("{}/{}", self.resolve, encode_key(key));
-        let response = self
+        let mut request = self
             .client
             .get(&url)
-            .timeout(Duration::from_secs(object_timeout_secs(size, self.window)))
+            .timeout(Duration::from_secs(object_timeout_secs(
+                want_bytes,
+                self.window,
+            )))
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
-            .header(ACCEPT_ENCODING, "identity")
-            .send()?;
+            .header(ACCEPT_ENCODING, "identity");
+        if let Some((first, last)) = range {
+            request = request.header(RANGE, format!("bytes={first}-{last}"));
+        }
+        let response = request.send()?;
         let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return Err(Error::Hub {
@@ -380,23 +400,42 @@ impl Resolver {
                 body: trim_body(&body),
             });
         }
-        let tmp = temp_path(path);
-        let mut file = std::fs::File::create(&tmp).map_err(|source| Error::Io {
-            path: tmp.display().to_string(),
-            source,
-        })?;
+        // A 200 to a ranged request means the bucket answered for the whole
+        // object. Writing that body at an offset would corrupt the file in a
+        // way the hash would only catch at the end, so it is refused instead.
+        let offset = range.map_or(0, |(first, _)| first);
+        // A 200 to a ranged request means the bucket answered for the whole
+        // object. Writing that body at an offset would corrupt the file in a way
+        // the hash would only catch at the end, so it is refused instead.
+        if offset > 0 && status != reqwest::StatusCode::PARTIAL_CONTENT {
+            return Err(Error::Api {
+                operation: "download".into(),
+                message: format!("{key}: the bucket ignored a range request at byte {offset}"),
+            });
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            // Pieces of the same file are written by different workers, so what
+            // another one already landed has to stay.
+            .truncate(false)
+            .open(path)
+            .map_err(|source| Error::Io {
+                path: path.display().to_string(),
+                source,
+            })?;
+        file.seek(std::io::SeekFrom::Start(offset))
+            .map_err(|source| Error::Io {
+                path: path.display().to_string(),
+                source,
+            })?;
         let mut stream = response;
         let written = std::io::copy(&mut stream, &mut file).map_err(|source| {
-            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(path);
             Error::Io {
-                path: tmp.display().to_string(),
+                path: path.display().to_string(),
                 source,
             }
-        })?;
-        drop(file);
-        std::fs::rename(&tmp, path).map_err(|source| Error::Io {
-            path: path.display().to_string(),
-            source,
         })?;
         Ok(written)
     }
@@ -432,7 +471,7 @@ fn link_next(headers: &http::HeaderMap) -> Option<String> {
     None
 }
 
-fn temp_path(path: &Path) -> std::path::PathBuf {
+pub(crate) fn temp_path(path: &Path) -> std::path::PathBuf {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())

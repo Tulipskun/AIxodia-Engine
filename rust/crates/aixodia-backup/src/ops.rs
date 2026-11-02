@@ -15,7 +15,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 use std::time::{Duration, UNIX_EPOCH};
 
 use crate::scan::{self, Scanned};
@@ -24,6 +27,21 @@ use crate::{
     Config, Counts, Entry, Error, Hub, Kind, Manifest, Phase, Reporter, Resolver, Result,
     RESTORE_ATTEMPTS, RESTORE_CONCURRENCY,
 };
+/// A file at or above this size is fetched as several range requests.
+///
+/// The bucket serves roughly a fifth of a megabyte per second to one connection
+/// and is generous with many, so the split point is where a single stream stops
+/// being the fastest answer: a ninety-megabyte binary left whole is a
+/// seven-minute tail on a restore that has otherwise finished.
+const RANGE_MIN_SIZE: u64 = 8 * 1024 * 1024;
+/// The bytes each range request asks for.
+const RANGE_TARGET: u64 = 4 * 1024 * 1024;
+/// The most a single file is cut into, so one huge object cannot eat the run.
+const RANGE_MAX_PIECES: usize = 12;
+/// A file slower than this gets a line of its own, because it is the only way a
+/// restore that took minutes can say afterwards where they went.
+const SLOW_FILE_MS: u64 = 2_000;
+
 /// What a backup run did. Every byte count is post-exclusion.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct BackupReport {
@@ -467,51 +485,154 @@ pub fn restore(cfg: &Config, root: &Path, reporter: &Reporter) -> Result<Restore
     }
 
     let wanted_files = files.len();
-    let queue = Arc::new(Mutex::new(VecDeque::from(files)));
     let counters = Arc::new(Mutex::new((0usize, 0u64, 0usize)));
     let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(problems));
-    // A file slower than this gets a line of its own, because it is the only
-    // way a restore that took minutes can say afterwards where they went.
-    const SLOW_FILE_MS: u64 = 2_000;
     let slowest: Arc<Mutex<(u64, String)>> = Arc::new(Mutex::new((0, String::new())));
+
+    // The unit of work is a range request, not a file. The bucket answers a
+    // download at a fraction of a megabyte per second per connection, so one
+    // ninety-megabyte binary is a seven-minute tail on a restore that is
+    // otherwise finished — and a single request cannot use more than one
+    // connection. A large file is therefore cut into pieces that land in the
+    // same temporary sibling at their own offsets, and any worker may take any
+    // piece of any file.
+    let mut slots: Vec<Slot> = Vec::new();
+    let mut queue: VecDeque<Piece> = VecDeque::new();
+    for (entry, path) in files {
+        let label = entry.path.clone();
+        let want = entry.sha256.clone().unwrap_or_default();
+        let Some(key) = entry.object_key(&cfg.prefix) else {
+            note(&errors, format!("{label}: no object key"));
+            reporter.tick();
+            continue;
+        };
+        if let Ok(found) = fs::symlink_metadata(&path) {
+            if found.is_file() && found.len() == entry.size {
+                // A restore is the only writer of a restored file's stamp, so an
+                // mtime that matches is enough to know the bytes are current.
+                let fresh = entry.mtime > 0 && found.mtime() == entry.mtime;
+                let same = !want.is_empty() && scan::hash_file(&path).is_ok_and(|got| got == want);
+                if fresh || same {
+                    if let Err(source) = fs::set_permissions(
+                        &path,
+                        fs::Permissions::from_mode(entry.mode.max(0o600)),
+                    ) {
+                        note(&errors, format!("{label}: set mode: {source}"));
+                    } else {
+                        set_mtime(&path, entry.mtime);
+                        counters.lock().unwrap_or_else(|e| e.into_inner()).2 += 1;
+                    }
+                    reporter.tick();
+                    continue;
+                }
+            } else if !found.is_file() {
+                // Something else occupies the path: a symlink, or a directory
+                // where a file belongs. Refusing to replace a directory is how a
+                // restore dies at the moment the machine needs it most.
+                if found.is_dir() {
+                    tracing::warn!(
+                        "restore: {label} is a directory in a file's place; replacing it"
+                    );
+                }
+                let removing = if found.is_dir() {
+                    fs::remove_dir_all(&path)
+                } else {
+                    fs::remove_file(&path)
+                };
+                if let Err(source) = removing {
+                    note(&errors, format!("{label}: replace what is there: {source}"));
+                    reporter.tick();
+                    continue;
+                }
+            }
+        }
+        if let Some(parent) = path.parent() {
+            if let Err(source) = fs::create_dir_all(parent) {
+                note(&errors, format!("{label}: {}: {source}", parent.display()));
+                reporter.tick();
+                continue;
+            }
+        }
+        if entry.size == 0 {
+            // Nothing to fetch: an empty file is entirely its own content.
+            if let Err(source) = fs::File::create(&path) {
+                note(&errors, format!("{label}: create: {source}"));
+                reporter.tick();
+                continue;
+            }
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(entry.mode.max(0o600)));
+            set_mtime(&path, entry.mtime);
+            counters.lock().unwrap_or_else(|e| e.into_inner()).0 += 1;
+            reporter.tick();
+            continue;
+        }
+        let temp = crate::hub::temp_path(&path);
+        if let Err(source) = sized_temp(&temp, entry.size) {
+            note(&errors, format!("{label}: {}: {source}", temp.display()));
+            reporter.tick();
+            continue;
+        }
+        let ranges = ranges_for(entry.size);
+        let index = slots.len();
+        slots.push(Slot {
+            index,
+            label,
+            key,
+            path,
+            temp,
+            want,
+            size: entry.size,
+            mode: entry.mode,
+            mtime: entry.mtime,
+            outstanding: AtomicUsize::new(ranges.len()),
+            failed: Mutex::new(None),
+            verifies: AtomicUsize::new(0),
+            started: std::time::Instant::now(),
+        });
+        queue.extend(ranges.into_iter().map(|(first, last)| Piece {
+            slot: index,
+            first,
+            last,
+            attempts: 0,
+        }));
+    }
+    let slots = Arc::new(slots);
+    let queue = Arc::new(Mutex::new(queue));
     // One window on the bucket per worker. A `reqwest` blocking client drives
-    // every request it is handed from a single internal thread, so twelve
-    // workers sharing one client queue behind each other — and behind whatever
-    // one of them happens to be stuck on.
+    // every request it is handed from a single internal thread, so workers that
+    // share one client queue behind each other — and behind whatever one of them
+    // happens to be stuck on.
     let downloaders = (0..RESTORE_CONCURRENCY)
         .map(|_| hub.downloader())
         .collect::<Result<Vec<_>>>()?;
     let transferring = std::time::Instant::now();
     std::thread::scope(|scope| {
         for downloader in &downloaders {
-            let (queue, counters, errors, slowest, reporter, cfg) =
-                (&queue, &counters, &errors, &slowest, reporter.clone(), cfg);
+            let (slots, queue, counters, errors, slowest, reporter) = (
+                &slots,
+                &queue,
+                &counters,
+                &errors,
+                &slowest,
+                reporter.clone(),
+            );
             scope.spawn(move || loop {
                 let next = queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
-                let Some((entry, path)) = next else { break };
-                let each = std::time::Instant::now();
-                match restore_file(downloader, cfg, &entry, &path) {
-                    Ok((bytes, unchanged)) => {
-                        let mut c = counters.lock().unwrap_or_else(|e| e.into_inner());
-                        c.0 += 1;
-                        c.1 += bytes;
-                        if unchanged {
-                            c.2 += 1;
-                        }
-                    }
-                    Err(err) => errors
+                let Some(piece) = next else { break };
+                let slot = &slots[piece.slot];
+                if let Some(again) = run_piece(downloader, slot, piece) {
+                    queue
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .push(format!("{}: {err}", entry.path)),
+                        .push_back(again);
+                    continue;
                 }
-                let took = elapsed_ms(each);
-                if took >= SLOW_FILE_MS {
-                    let mut top = slowest.lock().unwrap_or_else(|e| e.into_inner());
-                    if took > top.0 {
-                        *top = (took, entry.path.clone());
-                    }
+                // Only the worker that takes the last piece of a file finalises
+                // it, so a file is hashed and renamed exactly once however many
+                // hands carried its bytes.
+                if slot.outstanding.fetch_sub(1, Ordering::AcqRel) == 1 {
+                    finish_slot(slot, queue, counters, errors, slowest, &reporter);
                 }
-                reporter.tick();
             });
         }
     });
@@ -558,116 +679,233 @@ pub fn restore(cfg: &Config, root: &Path, reporter: &Reporter) -> Result<Restore
     })
 }
 
-/// Download, verify, then set mode and times. A file that already holds the
-/// manifest's content is left alone — that is the whole cost of a repeat
-/// restore. Its mtime matching is enough to know it does: a restore is the
-/// only writer of that stamp, so an untouched file keeps it.
-fn restore_file(
-    downloader: &Resolver,
-    cfg: &Config,
-    entry: &Entry,
-    path: &Path,
-) -> Result<(u64, bool)> {
-    let key = entry
-        .object_key(&cfg.prefix)
-        .ok_or_else(|| Error::Manifest(entry.path.clone(), "no object key".into()))?;
-    let want = entry.sha256.clone().unwrap_or_default();
-    let meta = fs::symlink_metadata(path);
-    if let Ok(meta) = meta.as_ref() {
-        if meta.is_file() && meta.len() == entry.size {
-            let fresh = entry.mtime > 0 && meta.mtime() == entry.mtime;
-            if fresh || (!want.is_empty() && scan::hash_file(path)? == want) {
-                set_mtime(path, entry.mtime);
-                let _ =
-                    fs::set_permissions(path, fs::Permissions::from_mode(entry.mode.max(0o600)));
-                return Ok((0, true));
-            }
-        }
-    }
-    if let Ok(existing) = meta.as_ref() {
-        if !existing.is_file() {
-            // Something else occupies the path: a symlink, or a directory where
-            // a file belongs. A half-restored or hand-made tree can present
-            // either, and refusing to replace a directory is how a restore dies
-            // at the exact moment the machine needs it most.
-            let removing = if existing.is_dir() {
-                tracing::warn!(
-                    "restore: {} is a directory in a file's place; replacing it",
-                    path.display()
-                );
-                fs::remove_dir_all(path)
-            } else {
-                fs::remove_file(path)
-            };
-            removing.map_err(|source| Error::Io {
-                path: path.display().to_string(),
-                source,
-            })?;
-        }
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| Error::Io {
-            path: parent.display().to_string(),
-            source,
-        })?;
-    }
-    let written = fetch_object(downloader, &key, &want, entry.size, path)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(entry.mode.max(0o600))).map_err(
-        |source| Error::Io {
-            path: path.display().to_string(),
-            source,
-        },
-    )?;
-    set_mtime(path, entry.mtime);
-    Ok((written, false))
+/// A file waiting for its bytes, and how much of them is still on the wire.
+///
+/// Pieces of one file are written into `temp`, the sibling the manifest's own
+/// name is renamed over at the end, so no partial file is ever the one a user
+/// sees at the path.
+struct Slot {
+    index: usize,
+    /// The manifest path, for the report.
+    label: String,
+    key: String,
+    path: PathBuf,
+    temp: PathBuf,
+    want: String,
+    size: u64,
+    mode: u32,
+    mtime: i64,
+    /// Pieces that have not settled yet. Reaching zero is what finalises the
+    /// file, and only the worker that takes it to zero runs that.
+    outstanding: AtomicUsize,
+    /// The first error any piece of this file met. Later ones are the same
+    /// broken object seen again, and one line names it.
+    failed: Mutex<Option<String>>,
+    /// Whole-file refetches already spent on a body that did not hash right.
+    verifies: AtomicUsize,
+    started: std::time::Instant,
 }
 
-/// Fetch `key` into `path` and make sure the bytes are the content the manifest
-/// names, asking again when a stream dies. Verification happens inside the
-/// retry, because the CDN can hand back a stale or truncated shard for a good
-/// key: the file is not worth reporting as failed until that has been asked a
-/// second time. An answer that will not change — a missing or refused object —
-/// is not asked at all.
-fn fetch_object(
-    downloader: &Resolver,
-    key: &str,
-    want: &str,
-    size: u64,
-    path: &Path,
-) -> Result<u64> {
-    let mut attempts = 0usize;
-    loop {
-        attempts += 1;
-        let outcome = downloader.download_to(key, size, path).and_then(|written| {
-            if want.is_empty() {
-                return Ok(written);
-            }
-            let got = scan::hash_file(path)?;
-            if got != want {
-                return Err(Error::Verify {
-                    path: path.display().to_string(),
-                    want: want.to_string(),
-                    got,
-                });
-            }
-            Ok(written)
-        });
-        let err = match outcome {
-            Ok(written) => return Ok(written),
-            Err(err) => err,
-        };
-        if matches!(err, Error::Verify { .. }) {
-            // Do not leave bytes at the path that are not this file's own.
-            let _ = fs::remove_file(path);
+impl Slot {
+    fn fail(&self, reason: &str) {
+        let mut failed = self.failed.lock().unwrap_or_else(|e| e.into_inner());
+        if failed.is_none() {
+            *failed = Some(reason.to_string());
         }
-        // An answer that will not change is not worth asking for again, and
-        // four attempts on a file that is simply missing is four timeouts.
-        if err.is_permanent() || attempts >= RESTORE_ATTEMPTS {
-            return Err(err);
-        }
-        tracing::warn!("restore: {key} attempt {attempts} failed ({err}); retrying");
-        std::thread::sleep(retry_delay(attempts));
     }
+}
+
+/// One range request for one slot: the inclusive byte span, and how many times
+/// it has been asked for.
+struct Piece {
+    slot: usize,
+    first: u64,
+    last: u64,
+    attempts: usize,
+}
+
+/// The byte ranges a file of `size` is fetched in. Below the split point the
+/// answer is one span covering the object, which is asked for with no `Range`
+/// header at all — a plain GET is what every server answers correctly and what
+/// the bucket serves without the range bookkeeping.
+fn ranges_for(size: u64) -> Vec<(u64, u64)> {
+    if size < RANGE_MIN_SIZE {
+        return vec![(0, size - 1)];
+    }
+    let pieces = (size.div_ceil(RANGE_TARGET) as usize).min(RANGE_MAX_PIECES);
+    let step = size.div_ceil(pieces as u64);
+    let mut out = Vec::with_capacity(pieces);
+    let mut first = 0u64;
+    while first < size {
+        let last = (first + step - 1).min(size - 1);
+        out.push((first, last));
+        first = last + 1;
+    }
+    out
+}
+
+/// The sibling every piece of one file lands in, already the length the
+/// manifest names so a piece can seek and write without anyone owning the end
+/// of the file.
+fn sized_temp(temp: &Path, size: u64) -> std::io::Result<()> {
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(temp)?;
+    file.set_len(size)?;
+    Ok(())
+}
+
+fn note(errors: &Mutex<Vec<String>>, message: String) {
+    errors
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(message);
+}
+
+fn report_speed(slowest: &Mutex<(u64, String)>, label: &str, took_ms: u64) {
+    if took_ms < SLOW_FILE_MS {
+        return;
+    }
+    let mut top = slowest.lock().unwrap_or_else(|e| e.into_inner());
+    if took_ms > top.0 {
+        *top = (took_ms, label.to_string());
+    }
+}
+
+/// Ask a bucket for one piece. Returns the piece to queue again when this
+/// attempt should be repeated, and nothing once the piece has settled —
+/// successfully or into the slot's recorded failure.
+///
+/// Verification is not here: it needs the whole file, so it happens in
+/// [`finish_slot`], and a file that comes back wrong is fetched again from
+/// nothing. A CDN can hand a stale or truncated body for a good key, which is
+/// why an answer that will not change (a missing or refused object) is never
+/// asked for again, and why four attempts on one file cost under two seconds.
+fn run_piece(downloader: &Resolver, slot: &Slot, piece: Piece) -> Option<Piece> {
+    let whole = piece.first == 0 && piece.last + 1 == slot.size;
+    let range = (!whole).then_some((piece.first, piece.last));
+    let expected = piece.last - piece.first + 1;
+    match downloader.download_piece(&slot.key, range, expected, &slot.temp) {
+        Ok(_) => None,
+        Err(err) => {
+            if err.is_permanent() || piece.attempts + 1 >= RESTORE_ATTEMPTS {
+                slot.fail(&err.to_string());
+                return None;
+            }
+            let redo = if matches!(err, Error::Api { .. }) && !whole {
+                // The bucket answered a range request with the whole object,
+                // which cannot be written at an offset. One stream can be.
+                Piece {
+                    slot: piece.slot,
+                    first: 0,
+                    last: slot.size - 1,
+                    attempts: piece.attempts + 1,
+                }
+            } else {
+                Piece {
+                    attempts: piece.attempts + 1,
+                    ..piece
+                }
+            };
+            tracing::warn!(
+                "restore: {} bytes {}-{} attempt {} failed ({err}); retrying",
+                slot.label,
+                piece.first,
+                piece.last,
+                piece.attempts + 1,
+            );
+            std::thread::sleep(retry_delay(piece.attempts + 1));
+            Some(redo)
+        }
+    }
+}
+
+/// The last piece of one file has landed: check the bytes, then put the file in
+/// place with its mode and its stamp. Anything that goes wrong names the file
+/// and removes the half of it, because a restore that leaves a wrong file at the
+/// path is worse than one that leaves the path empty.
+fn finish_slot(
+    slot: &Slot,
+    queue: &Mutex<VecDeque<Piece>>,
+    counters: &Mutex<(usize, u64, usize)>,
+    errors: &Mutex<Vec<String>>,
+    slowest: &Mutex<(u64, String)>,
+    reporter: &Reporter,
+) {
+    let took = elapsed_ms(slot.started);
+    if let Some(reason) = slot.failed.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        let _ = fs::remove_file(&slot.temp);
+        note(errors, format!("{}: {reason}", slot.label));
+        report_speed(slowest, &slot.label, took);
+        reporter.tick();
+        return;
+    }
+    let wrong = if slot.want.is_empty() {
+        None
+    } else {
+        match scan::hash_file(&slot.temp) {
+            Ok(got) if got == slot.want => None,
+            Ok(got) => Some(format!(
+                "content is not what the manifest names (want {}, got {got})",
+                slot.want
+            )),
+            Err(err) => Some(err.to_string()),
+        }
+    };
+    if let Some(problem) = wrong {
+        if slot.verifies.fetch_add(1, Ordering::AcqRel) < RESTORE_ATTEMPTS - 1 {
+            // Start the file over from nothing, so a second stale body cannot be
+            // read as part of the first one.
+            tracing::warn!(
+                "restore: {} came back wrong ({problem}); fetching it again",
+                slot.label
+            );
+            let _ = fs::remove_file(&slot.temp);
+            if sized_temp(&slot.temp, slot.size).is_ok() {
+                slot.outstanding.store(1, Ordering::Release);
+                queue
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push_back(Piece {
+                        slot: slot.index,
+                        first: 0,
+                        last: slot.size - 1,
+                        attempts: 0,
+                    });
+                return;
+            }
+        }
+        let _ = fs::remove_file(&slot.temp);
+        note(errors, format!("{}: {problem}", slot.label));
+        report_speed(slowest, &slot.label, took);
+        reporter.tick();
+        return;
+    }
+    if let Err(source) =
+        fs::set_permissions(&slot.temp, fs::Permissions::from_mode(slot.mode.max(0o600)))
+    {
+        let _ = fs::remove_file(&slot.temp);
+        note(errors, format!("{}: set mode: {source}", slot.label));
+        report_speed(slowest, &slot.label, took);
+        reporter.tick();
+        return;
+    }
+    set_mtime(&slot.temp, slot.mtime);
+    if let Err(source) = fs::rename(&slot.temp, &slot.path) {
+        let _ = fs::remove_file(&slot.temp);
+        note(errors, format!("{}: put in place: {source}", slot.label));
+        report_speed(slowest, &slot.label, took);
+        reporter.tick();
+        return;
+    }
+    let mut c = counters.lock().unwrap_or_else(|e| e.into_inner());
+    c.0 += 1;
+    c.1 += slot.size;
+    drop(c);
+    report_speed(slowest, &slot.label, took);
+    reporter.tick();
 }
 
 /// 200ms, 400ms, 800ms: long enough for a CDN hop to come back, short enough
@@ -797,6 +1035,12 @@ mod tests {
         /// An error the first time, the bytes after: a CDN hop that dropped.
         Flaky(Vec<u8>),
         Gone,
+        /// Bytes that answer a `Range` header the way a CDN does: the slice, and
+        /// a 206 saying so.
+        Ranged(Vec<u8>),
+        /// Bytes that answer a `Range` header with the whole object, because the
+        /// server never implemented it.
+        Rangeless(Vec<u8>),
     }
 
     /// A bucket that answers from a fixed table on a loopback port, counting
@@ -823,12 +1067,26 @@ mod tests {
                         return;
                     };
                     let path = path.to_string();
+                    let range: Option<(usize, usize)> = request.lines().find_map(|line| {
+                        let spec = line.trim().strip_prefix("Range: bytes=")?;
+                        let (first, last) = spec.split_once('-')?;
+                        Some((first.parse().ok()?, last.parse().ok()?))
+                    });
                     let found = {
                         let routes = routes.lock().unwrap_or_else(|e| e.into_inner());
                         routes.get(&path).map(|route| match route {
                             Route::Bytes(b) => (200, "OK", b.clone()),
                             Route::Flaky(b) => (500, "Internal Server Error", b.clone()),
                             Route::Gone => (404, "Not Found", Vec::new()),
+                            Route::Ranged(b) => match range {
+                                Some((first, last)) => (
+                                    206,
+                                    "Partial Content",
+                                    b[first..last.min(b.len() - 1) + 1].to_vec(),
+                                ),
+                                None => (200, "OK", b.clone()),
+                            },
+                            Route::Rangeless(b) => (200, "OK", b.clone()),
                         })
                     };
                     let Some((status, reason, body)) = found else {
@@ -1092,5 +1350,117 @@ mod tests {
             got: "b".into(),
         }
         .is_permanent());
+    }
+
+    /// A manifest of one file big enough to be cut into range requests, and the
+    /// bytes the fake bucket holds for it. `honours_range` is the difference
+    /// between a CDN and a server that never implemented `Range`.
+    fn big_tree(name: &str, honours_range: bool) -> (Tree, Vec<u8>) {
+        let dir = std::env::temp_dir().join(format!("aix-range-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("a restore root");
+        let prefix = "aixodia/root";
+        let mut body = Vec::new();
+        while (body.len() as u64) < RANGE_MIN_SIZE + 1024 * 1024 {
+            body.extend((0..65_536usize).map(|i| (i % 251) as u8));
+        }
+        let sha = sha(&body);
+        let entries = vec![Entry {
+            path: "big.bin".into(),
+            kind: Kind::File,
+            size: body.len() as u64,
+            mode: 0o644,
+            mtime: 0,
+            target: None,
+            sha256: Some(sha.clone()),
+        }];
+        let url = format!(
+            "/buckets/u/b/resolve/{prefix}/objects/{}/{}",
+            &sha[..2],
+            sha
+        );
+        let mut routes: HashMap<String, Route> = HashMap::new();
+        routes.insert(
+            url.clone(),
+            if honours_range {
+                Route::Ranged(body.clone())
+            } else {
+                Route::Rangeless(body.clone())
+            },
+        );
+        routes.insert(
+            format!("/buckets/u/b/resolve/{prefix}/latest.json"),
+            Route::Bytes(b"{\"name\":\"test\"}".to_vec()),
+        );
+        let manifest = Manifest {
+            version: 1,
+            name: "test".into(),
+            created_at: 0,
+            host: "test".into(),
+            root: dir.display().to_string(),
+            counts: Counts::default(),
+            uploaded_bytes: 0,
+            skipped: vec![],
+            entries,
+        };
+        routes.insert(
+            format!("/buckets/u/b/resolve/{prefix}/manifests/test.json"),
+            Route::Bytes(serde_json::to_vec(&manifest).expect("a manifest")),
+        );
+        let (endpoint, hits) = fake_bucket(routes);
+        let mut urls = HashMap::new();
+        urls.insert("big.bin".to_string(), url);
+        let tree = Tree {
+            cfg: Config {
+                token: "t".into(),
+                bucket: "u/b".into(),
+                endpoint,
+                root: dir.clone(),
+                prefix: prefix.into(),
+                excludes: vec![],
+                ..Default::default()
+            },
+            dir,
+            urls,
+            hits,
+        };
+        (tree, body)
+    }
+
+    /// A twenty-minute restore of a tree full of toolchain binaries is not slow
+    /// because of its thirty thousand small files: it is the largest file,
+    /// carried by one connection at a fifth of a megabyte a second, that decides
+    /// when the run ends. So a big object arrives as several ranges at once.
+    #[test]
+    fn a_large_file_is_carried_by_several_ranges() {
+        let (tree, body) = big_tree("split", true);
+        let reporter = Reporter::new("restore");
+        let report = restore(&tree.cfg, &tree.dir, &reporter).expect("the run finishes");
+
+        assert!(
+            report.failed.is_empty(),
+            "one file, served: {:?}",
+            report.failed
+        );
+        assert_eq!(report.files, 1);
+        assert_eq!(report.bytes, body.len() as u64);
+        assert_eq!(fs::read(tree.dir.join("big.bin")).expect("the file"), body);
+        assert!(
+            hit(&tree.hits, &tree.urls["big.bin"]) >= 3,
+            "a nine-megabyte object is fetched in several ranges, not one stream"
+        );
+    }
+
+    /// A server that answers a range request with the whole object cannot have
+    /// its body written at an offset. Refusing it is only right if the file still
+    /// comes across, which is the point of the fallback in `run_piece`.
+    #[test]
+    fn a_bucket_that_ignores_ranges_still_delivers_the_file() {
+        let (tree, body) = big_tree("ignorant", false);
+        let reporter = Reporter::new("restore");
+        let report = restore(&tree.cfg, &tree.dir, &reporter).expect("the run finishes");
+
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(fs::read(tree.dir.join("big.bin")).expect("the file"), body);
     }
 }

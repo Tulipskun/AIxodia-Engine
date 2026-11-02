@@ -19,3 +19,4 @@ thiserror.workspace = true
 tracing.workspace = true
 hf-xet = "1.8"
 xet-data = "1.8"
+xet-runtime = "1.8"
