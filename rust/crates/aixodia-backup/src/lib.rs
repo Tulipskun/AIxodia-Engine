@@ -47,16 +47,17 @@ pub const DEFAULT_PREFIX: &str = "aixodia/root";
 
 /// Concurrent downloads during a restore.
 ///
-/// Measured on this host restoring 1.75 GB of 32,761 files with twelve workers:
-/// about two and a half megabytes a second, one round trip per small file and
-/// one stream per large one, for eleven minutes. The bucket answers a request in
-/// roughly a quarter of a second and serves a fifth of a megabyte per second per
-/// connection, so the link is nowhere near full while the workers wait: the win
-/// is in having more of them in flight, and in cutting a large file into several
-/// streams (see `RANGE_MIN_SIZE` in `ops`). Each worker still gets its own
-/// connection pool and its own thread to drive it, so one stalled stream cannot
-/// hold up the others.
-pub const RESTORE_CONCURRENCY: usize = 32;
+/// Measured on this host (two cores) restoring 1.75 GB across 32,761 files into
+/// an empty root: twelve workers took 1,431,743 ms, thirty-two took 897,617 ms.
+/// The bucket answers a request in roughly a quarter of a second and serves a
+/// fraction of a megabyte per second per connection, so the link is nowhere near
+/// full while the workers wait — receive traffic peaked at forty-six megabytes a
+/// second with the CPU at eighteen percent. The win is in having more of them in
+/// flight, and in cutting a large file into several streams (see
+/// `RANGE_MIN_SIZE` in `ops`). Each worker still gets its own connection pool
+/// and its own thread to drive it, so one stalled stream cannot hold up the
+/// others.
+pub const RESTORE_CONCURRENCY: usize = 64;
 
 /// Attempts per file before a restore gives up on it. A half-open connection
 /// to the CDN is routine on a mobile uplink; refusing the whole restore for

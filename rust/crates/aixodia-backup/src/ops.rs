@@ -522,7 +522,7 @@ pub fn restore(cfg: &Config, root: &Path, reporter: &Reporter) -> Result<Restore
                         set_mtime(&path, entry.mtime);
                         counters.lock().unwrap_or_else(|e| e.into_inner()).2 += 1;
                     }
-                    reporter.tick();
+                    reporter.advance(1, entry.size);
                     continue;
                 }
             } else if !found.is_file() {
@@ -905,7 +905,10 @@ fn finish_slot(
     c.1 += slot.size;
     drop(c);
     report_speed(slowest, &slot.label, took);
-    reporter.tick();
+    // The byte count moves only here: a file is restored when its last piece
+    // landed and it was verified, so a progress bar never shows a partial as a
+    // whole file.
+    reporter.advance(1, slot.size);
 }
 
 /// 200ms, 400ms, 800ms: long enough for a CDN hop to come back, short enough

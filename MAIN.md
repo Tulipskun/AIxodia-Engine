@@ -1,4 +1,19 @@
 GOAL:
+[COMPLETED] Carry the same restore at more workers (operator: "ทำให้มันเหมือนคัดลอกไฟล์
+            ไปมาได้มั้ย ช้าเกิน", continued). The range-splitting build was deployed
+            and measured against the tree it was designed for, in the same bucket,
+            into a fresh empty root: 897,617 ms for the same 19,318 files and
+            1,749,974,406 bytes that had taken 1,431,743 ms — 1.60x, and the same
+            one rejected log file. While it ran, the host received up to 46 MB/s
+            with the engine at 18% CPU and thirty-two workers, so the wait was the
+            bucket's per-connection share rather than this machine's. `RESTORE_CONCURRENCY`
+            is therefore 64, and the comment on it now carries the measured numbers
+            instead of an estimate. A second change went with it because a progress
+            bar that lies is the same complaint in a smaller voice: `bytes_done` sat
+            at zero through a whole restore, since every completion reported through
+            `tick()`, so a finished file now reports its size and a restore of 1.75 GB
+            shows 1.75 GB arriving. Verification: 21 tests, `cargo fmt`, and
+            `cargo clippy --all-targets -- -D warnings` clean.
 [COMPLETED] Make it feel like copying files (operator: "ทำให้มันเหมือนคัดลอกไฟล์
             ไปมาได้มั้ย ช้าเกิน"). The fix that made a restore *finish* did not make
             it fast, and this time the cost was measured rather than argued. The hub
@@ -853,6 +868,22 @@ so suspect the WebView xterm.js client or a bytes path that mangles ESC[Z
             from D1; 0 rows left, sessions=19
 
 NOTE:
+- 2026-11-02T01:15Z: the range-split build shipped (release `96d4f01` green,
+  asset `b88d1e80…`) and the cold restore was re-measured on it: 897,617 ms
+  against the 1,431,743 ms baseline, same tree, same bucket, one rejected file.
+  Two things about getting a build onto the running engine are worth recording,
+  because both cost time tonight. (1) `kill -USR1 <pid>` can be a no-op: the
+  handler returns without a word when `idle()` is false, and the only trace of
+  that is a `tracing::info!` nobody reads. `/healthz` answers
+  `{"idle":true,"pid":…,"update":"signal:USR1"}`, so read it first and signal
+  again once it says idle — that is exactly what applied the build on the second
+  try. (2) `/root/.aixodia/aixodia.pid` names pid 5832, which has been dead for
+  hours, while the engine answers on 3257. `aixodia update` requires the
+  pidfile and `/healthz` to name the same pid, so with a stale pidfile it falls
+  through to the stop-and-restart path — which would have ended the session.
+  Signalling the live pid read from `/healthz` is the safe route; the pidfile
+  needs its own fix. The measurement scratch (`/tmp/aixmeasure-*`) is deleted
+  and the D1 root is back at `/root` (the script's EXIT trap printed it).
 - 2026-11-01T08:42Z: the backup is live on this machine. v1.164 self-installed
   from the rolling release at 08:37:30 (pid 5832 preserved, `engine started`
   08:37:33, listening 08:37:42, tunnel re-registered), the hub token and bucket
