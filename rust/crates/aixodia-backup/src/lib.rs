@@ -47,17 +47,20 @@ pub const DEFAULT_PREFIX: &str = "aixodia/root";
 
 /// Concurrent downloads during a restore.
 ///
-/// Measured on this host (two cores) restoring 1.75 GB across 32,761 files into
-/// an empty root: twelve workers took 1,431,743 ms, thirty-two took 897,617 ms.
-/// The bucket answers a request in roughly a quarter of a second and serves a
-/// fraction of a megabyte per second per connection, so the link is nowhere near
-/// full while the workers wait — receive traffic peaked at forty-six megabytes a
-/// second with the CPU at eighteen percent. The win is in having more of them in
-/// flight, and in cutting a large file into several streams (see
-/// `RANGE_MIN_SIZE` in `ops`). Each worker still gets its own connection pool
-/// and its own thread to drive it, so one stalled stream cannot hold up the
-/// others.
-pub const RESTORE_CONCURRENCY: usize = 64;
+/// Measured on this host (two cores) restoring the same 1.75 GB across 32,761
+/// entries into an empty root, from the same bucket: twelve workers took
+/// 1,431,743 ms; thirty-two took 897,617 ms and one rejected file; sixty-four
+/// finished in 497,347 ms and named 3,779 failures — thirty-nine percent of the
+/// tree refused at `http 429`. That last number is not a faster restore, it is
+/// an incomplete one wearing a faster clock, so thirty-two stands as the
+/// measured ceiling rather than a compromise. The hub shares a fraction of a
+/// megabyte per second per connection and begins throttling somewhere above
+/// thirty-two simultaneous downloads; the work that still pays is cutting a
+/// large file into several streams (see `RANGE_MIN_SIZE` in `ops`), which is how
+/// the receive rate reached forty-six megabytes a second at eighteen percent
+/// CPU. Each worker gets its own connection pool and its own thread to drive it,
+/// so one stalled stream cannot hold up the others.
+pub const RESTORE_CONCURRENCY: usize = 32;
 
 /// Attempts per file before a restore gives up on it. A half-open connection
 /// to the CDN is routine on a mobile uplink; refusing the whole restore for
@@ -131,6 +134,17 @@ impl Error {
             Error::Config(_) | Error::Manifest(..) | Error::Escape(_) | Error::Xet(_) => true,
             _ => false,
         }
+    }
+
+    /// Whether the hub said "not now" rather than "no". These are the answers
+    /// whose own remedy is a wait, and the fast backoff below is shorter than
+    /// the window they describe: measured at sixty-four workers, thirty-nine
+    /// percent of a tree was lost to `http 429` inside two seconds of retries.
+    pub fn is_throttled(&self) -> bool {
+        matches!(
+            self,
+            Error::Hub { status, .. } if matches!(*status, 408 | 425 | 429 | 503)
+        )
     }
 }
 

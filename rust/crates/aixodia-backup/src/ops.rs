@@ -816,7 +816,7 @@ fn run_piece(downloader: &Resolver, slot: &Slot, piece: Piece) -> Option<Piece> 
                 piece.last,
                 piece.attempts + 1,
             );
-            std::thread::sleep(retry_delay(piece.attempts + 1));
+            std::thread::sleep(retry_delay(piece.attempts + 1, err.is_throttled()));
             Some(redo)
         }
     }
@@ -913,8 +913,13 @@ fn finish_slot(
 
 /// 200ms, 400ms, 800ms: long enough for a CDN hop to come back, short enough
 /// that four attempts on one file cost under two seconds rather than minutes.
-fn retry_delay(attempt: usize) -> Duration {
-    Duration::from_millis(200 * 2u64.pow(attempt.saturating_sub(1) as u32).min(8))
+/// A throttle is the exception, because its own remedy is a wait longer than
+/// that budget: the bucket's `429` window outlasts a fast retry, and a restore
+/// that retries inside it loses the file to its own eagerness. So a refused
+/// `429`/`503` comes back after 2s, 4s, 8s.
+fn retry_delay(attempt: usize, throttled: bool) -> Duration {
+    let base = if throttled { 2_000 } else { 200 };
+    Duration::from_millis(base * 2u64.pow(attempt.saturating_sub(1) as u32).min(8))
 }
 
 fn read_link_text(path: &Path) -> Option<String> {
@@ -1317,13 +1322,40 @@ mod tests {
 
     #[test]
     fn a_retry_waits_a_short_and_bounded_time() {
-        assert_eq!(retry_delay(1), Duration::from_millis(200));
-        assert_eq!(retry_delay(2), Duration::from_millis(400));
-        assert_eq!(retry_delay(4), Duration::from_millis(1600));
+        assert_eq!(retry_delay(1, false), Duration::from_millis(200));
+        assert_eq!(retry_delay(2, false), Duration::from_millis(400));
+        assert_eq!(retry_delay(4, false), Duration::from_millis(1600));
         assert_eq!(
-            retry_delay(40),
+            retry_delay(40, false),
             Duration::from_millis(1600),
             "it stops growing"
+        );
+    }
+
+    /// A `429` retried inside its own window is a lost file, and at sixty-four
+    /// workers that is how 3,779 of them went: the whole budget for one file
+    /// ran out in under two seconds while the hub was only pausing.
+    #[test]
+    fn a_throttle_is_answered_with_a_wait_that_outlasts_it() {
+        assert_eq!(retry_delay(1, true), Duration::from_millis(2_000));
+        assert_eq!(retry_delay(2, true), Duration::from_millis(4_000));
+        assert_eq!(retry_delay(3, true), Duration::from_millis(8_000));
+        assert!(Error::Hub {
+            operation: "download".into(),
+            key: "k".into(),
+            status: 429,
+            body: "too many".into(),
+        }
+        .is_throttled());
+        assert!(
+            !Error::Hub {
+                operation: "download".into(),
+                key: "k".into(),
+                status: 404,
+                body: "gone".into(),
+            }
+            .is_throttled(),
+            "an object the bucket does not have is never worth waiting for"
         );
     }
 

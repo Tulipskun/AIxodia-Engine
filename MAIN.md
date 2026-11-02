@@ -5,14 +5,25 @@ GOAL:
             into a fresh empty root: 897,617 ms for the same 19,318 files and
             1,749,974,406 bytes that had taken 1,431,743 ms — 1.60x, and the same
             one rejected log file. While it ran, the host received up to 46 MB/s
-            with the engine at 18% CPU and thirty-two workers, so the wait was the
-            bucket's per-connection share rather than this machine's. `RESTORE_CONCURRENCY`
-            is therefore 64, and the comment on it now carries the measured numbers
-            instead of an estimate. A second change went with it because a progress
-            bar that lies is the same complaint in a smaller voice: `bytes_done` sat
-            at zero through a whole restore, since every completion reported through
-            `tick()`, so a finished file now reports its size and a restore of 1.75 GB
-            shows 1.75 GB arriving. Verification: 21 tests, `cargo fmt`, and
+            with the engine at 18% CPU and thirty-two workers, so the wait looked
+            like the bucket's per-connection share rather than this machine's, and
+            sixty-four workers were tried. That experiment is the most valuable
+            number in this file: it finished in 497,347 ms and named 3,779
+            failures, thirty-nine percent of the tree refused at `http 429` by the
+            hub. A faster restore that returns two-thirds of a machine is not
+            faster, it is the original bug wearing a better clock — and it also
+            said the retry budget was wrong, because 429 was treated as transient
+            and retried at 200/400/800 ms, entirely inside the throttle window. So
+            `RESTORE_CONCURRENCY` stands at the measured thirty-two,
+            `Error::is_throttled` names 408/425/429/503, and a throttled piece
+            waits 2s, 4s, 8s instead of burning its four attempts in 1.4 seconds;
+            a test pins both schedules, since the fast one is what lost those
+            files. A second change went with it because a progress bar that lies
+            is the same complaint in a smaller voice: `bytes_done` sat at zero
+            through a whole restore, since every completion reported through
+            `tick()`, so a finished file now reports its size and a restore of
+            1.75 GB shows 1.75 GB arriving — read off the live run, where it stood
+            at 61 MB six seconds in. Verification: 22 tests, `cargo fmt`, and
             `cargo clippy --all-targets -- -D warnings` clean.
 [COMPLETED] Make it feel like copying files (operator: "ทำให้มันเหมือนคัดลอกไฟล์
             ไปมาได้มั้ย ช้าเกิน"). The fix that made a restore *finish* did not make
@@ -871,19 +882,26 @@ NOTE:
 - 2026-11-02T01:15Z: the range-split build shipped (release `96d4f01` green,
   asset `b88d1e80…`) and the cold restore was re-measured on it: 897,617 ms
   against the 1,431,743 ms baseline, same tree, same bucket, one rejected file.
+  Then 64 workers were tried: 497,347 ms with 3,779 files lost to `http 429`,
+  which is why the constant is back to 32 and a throttle now waits 2s/4s/8s.
   Two things about getting a build onto the running engine are worth recording,
   because both cost time tonight. (1) `kill -USR1 <pid>` can be a no-op: the
-  handler returns without a word when `idle()` is false, and the only trace of
-  that is a `tracing::info!` nobody reads. `/healthz` answers
-  `{"idle":true,"pid":…,"update":"signal:USR1"}`, so read it first and signal
-  again once it says idle — that is exactly what applied the build on the second
-  try. (2) `/root/.aixodia/aixodia.pid` names pid 5832, which has been dead for
-  hours, while the engine answers on 3257. `aixodia update` requires the
-  pidfile and `/healthz` to name the same pid, so with a stale pidfile it falls
-  through to the stop-and-restart path — which would have ended the session.
-  Signalling the live pid read from `/healthz` is the safe route; the pidfile
-  needs its own fix. The measurement scratch (`/tmp/aixmeasure-*`) is deleted
-  and the D1 root is back at `/root` (the script's EXIT trap printed it).
+  handler returns without a word when `idle()` is false, and the only trace is a
+  `tracing::info!` nobody reads. `/healthz` answers
+  `{"idle":true,"pid":…,"update":"signal:USR1"}`, so read it before signalling.
+  The ten-minute check does work on its own — the `84060b5` asset was applied by
+  the running engine at 01:16:42 with no signal from anyone (pid preserved,
+  `started` moved, `/proc/3257/exe` matching the release digest). (2)
+  `/root/.aixodia/aixodia.pid` named pid 5832, dead since the 18:27 start of the
+  live engine on 3257, and `aixodia update` refuses the in-place handshake when
+  the pidfile and `/healthz` disagree — it falls through to stop-and-restart,
+  which would have ended the session. The pidfile now names 3257; whoever starts
+  the engine outside `aixodia start` owes that file, and `aixodia update` still
+  reported "no answer after 180s" because this engine's tracing does not go to
+  `$LOG_FILE` (only a launcher-started engine writes there), so read `/healthz`
+  and the digest rather than trusting its exit. The measurement scratch
+  (`/tmp/aixmeasure-*`) is deleted, no `.aixodia-part` is left under `/root`, and
+  the D1 root is back at `/root` (the script's EXIT trap printed it twice).
 - 2026-11-01T08:42Z: the backup is live on this machine. v1.164 self-installed
   from the rolling release at 08:37:30 (pid 5832 preserved, `engine started`
   08:37:33, listening 08:37:42, tunnel re-registered), the hub token and bucket
