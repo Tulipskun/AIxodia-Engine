@@ -1,4 +1,57 @@
 GOAL:
+[IN PROGRESS] Pack the tree into shard objects so a restore stops paying per file
+            (operator: "ช้ามาก ลองวิธีอื่น เช่นการ pack file .zst แล้วค่อย upload
+            เน้นการใช้งานจริงได้และเร็ว"). Both earlier rounds of this were
+            measurements and both ran out: 32 workers is the hub's ceiling on this
+            host (897,617 ms, complete), and 64 workers finished in 497,347 ms while
+            losing 3,779 files to `http 429`. The cost was never bandwidth — 46 MB/s
+            at 18% CPU — it was one round trip per file: nineteen thousand requests
+            at about 240 ms apiece, divided by 32, is ~145 s of pure latency before a
+            byte is written. So the unit of transfer changes. This tree is strongly
+            bimodal — 20 files hold 70% of its bytes, and zstd-3 puts those at
+            15.8–39.6% of their size — so the same content goes from 1.75 GB on the
+            wire to a few dozen container objects. Ten requests, not nineteen
+            thousand.
+            `pack.rs` is the container: `AIXSH1`, a member list, then one **zstd frame
+            per member**. Per-member frames are load-bearing, not tidy — a shard
+            decodes front to back without holding its body in memory, and a truncated
+            shard loses its tail rather than everything. Mode and mtime are deliberately
+            *outside* it, in the manifest, so a `chmod` or a touch never rebuilds a
+            container; the fingerprint is over ordered `(path, size, sha256)` records,
+            which is what makes warm reuse decidable without reading a file. Members
+            are grouped to a 32 MiB raw budget — sharding is what keeps one refused
+            request from costing the tree — and the paths that change every run
+            (`.aixodia`, `logs`, `*.log`, `*.pid`, `*.state`) are grouped into trailing
+            shards so a log line cannot pin a steady shard's rebuild.
+            Manifest v2 adds `Entry.shard` and `Manifest.shards`, every new field
+            `#[serde(default)]`: the version number is informational and the document's
+            shape is the compatibility lever, so a v1 backup still restores per object
+            and the operator's current backup needs no migration before this ships.
+            Restore reuses the machinery that was already right — slots, pieces,
+            last-piece-wins finalisation, throttle-aware backoff — with a `Seal` that
+            says what a finished slot turns into, and a container is extracted by the
+            worker that sealed it. Progress advances per *member* at member size,
+            because a bar that counts containers is the lying-bar bug again.
+            Two integrity holes closed on the way, both of them the same shape as the
+            original incident: a piece whose body came back shorter than its range was
+            retried and then named rather than assembled into a short file, and the
+            shard walk now ends by naming every member it never spoke for — so a
+            container that holds fewer files than the manifest claims is a reported
+            failure, not a tree quietly missing a file. A blast-radius test pins the
+            other half: one lost container costs its own members and no more.
+            Verification: 42 tests in `aixodia-backup` (7 for the container, 11 new for
+            packing at the operation level), `cargo fmt` clean, and
+            `cargo clippy --all-targets -- -D warnings` clean. Two deliberate
+            departures from the plan it was built from: extraction happens on the
+            sealing worker rather than on two dedicated threads, because streaming a
+            member straight into its own temp bounds memory without the extra stage;
+            and no `reuse: false` flag was needed, because a volatile member changes its
+            shard's fingerprint and is rebuilt for free. The fake bucket needed no
+            `Content-Range` fix — it already writes a `Content-Length` for the slice it
+            returns — but it can now serve a short body, which is what the first hole
+            above is tested against. The honest regression, stated before measuring:
+            a warm backup goes from 16.8 s to more, because a changed member costs its
+            shard's rebuild instead of one file's hash.
 [COMPLETED] Carry the same restore at more workers (operator: "ทำให้มันเหมือนคัดลอกไฟล์
             ไปมาได้มั้ย ช้าเกิน", continued). The range-splitting build was deployed
             and measured against the tree it was designed for, in the same bucket,

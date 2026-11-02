@@ -4,23 +4,29 @@
 //! The layout is content addressed and holds exactly one backup at a time:
 //!
 //! ```text
-//! <prefix>/objects/<aa>/<sha256>      one object per distinct file content
-//! <prefix>/manifests/<utc>.json       the manifest of the newest backup run
-//! <prefix>/latest.json                pointer at that manifest
+//! <prefix>/objects/<aa>/<sha256>       one file's content, addressed by its hash
+//! <prefix>/shards/<aa>/<sha256>        many files' content, packed and compressed
+//! <prefix>/manifests/<utc>.json        the manifest of the newest backup run
+//! <prefix>/latest.json                 pointer at that manifest
 //! ```
 //!
-//! Each run replaces the manifest before it, so the bucket holds the tree as
-//! it was at the last successful backup and nothing older. Objects are never
+//! Each run replaces the manifest before it, so the bucket holds the tree as it
+//! was at the last successful backup and nothing older. Objects are never
 //! deleted: they are what makes the next run cheap, and Xet dedups their
 //! bytes, so unchanged content costs nothing to keep.
 //!
 //! Two properties make this fast. A file whose size and mtime still match the
 //! previous manifest is never read or hashed, so an unchanged tree costs one
 //! `stat` per file and no bytes on the wire. And because an object key is the
-//! file's sha256, content that already exists in the bucket needs no upload at
+//! content's sha256, bytes that already exist in the bucket need no upload at
 //! all — the new manifest simply points at the key that is already there. What
-//! does move goes through Xet, which dedups at chunk level, so a file that
-//! only grew uploads the growth.
+//! does move goes through Xet, which dedups at chunk level, so a file that only
+//! grew uploads the growth.
+//!
+//! Almost every file goes into a shard rather than into an object of its own,
+//! because the round trip is what a restore pays for: see [`pack`]. A manifest
+//! that names no shards is read the old way, one object per file, so a backup
+//! taken before this exists still restores.
 //!
 //! Nothing here is `async`, so a caller cannot hold a tokio worker: start
 //! [`backup`] and [`restore`] with `std::thread::spawn` and read progress from
@@ -29,6 +35,7 @@
 
 mod hub;
 pub mod ops;
+mod pack;
 pub mod scan;
 mod xet;
 
@@ -206,6 +213,12 @@ impl Config {
         format!("{}/objects/{}/{}", self.prefix, &sha256[..2], sha256)
     }
 
+    /// Where a packed shard lives. The same address as an object's, one directory
+    /// over, so a bucket listing says at a glance which of the two it is.
+    pub fn shard_key(&self, sha256: &str) -> String {
+        format!("{}/shards/{}/{}", self.prefix, &sha256[..2], sha256)
+    }
+
     pub fn manifest_key(&self, name: &str) -> String {
         format!("{}/manifests/{}.json", self.prefix, name)
     }
@@ -215,9 +228,10 @@ impl Config {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
+    #[default]
     File,
     Dir,
     Symlink,
@@ -226,7 +240,7 @@ pub enum Kind {
 /// One filesystem entry. `path` is relative to the backup root with `/`
 /// separators and never starts with `/`, so a manifest cannot name a target
 /// outside the root it was taken from.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Entry {
     pub path: String,
     pub kind: Kind,
@@ -241,12 +255,61 @@ pub struct Entry {
     pub target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// Which [`Manifest::shards`] carries this file's bytes, when it is packed
+    /// rather than standing as an object of its own.
+    ///
+    /// `#[serde(default)]` is the compatibility lever here, and it is the reason
+    /// the manifest's `version` needs no new machinery: a v1 document simply has
+    /// no shards, and a reader of either kind can read both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard: Option<usize>,
 }
 
 impl Entry {
+    /// The object this entry's bytes live in, or `None` when they live in a shard
+    /// or there are none to have. A packed entry deliberately answers nothing here:
+    /// the keys a run must guarantee in the bucket are the shard's, and a manifest
+    /// that also claimed a per-file object for it would be audited for an upload
+    /// that was never meant to happen.
     pub fn object_key(&self, prefix: &str) -> Option<String> {
+        if self.shard.is_some() {
+            return None;
+        }
         let sha = self.sha256.as_deref()?;
         Some(format!("{prefix}/objects/{}/{}", &sha[..2], sha))
+    }
+
+    /// Whether this file arrives as one member of a packed shard.
+    pub fn is_packed(&self) -> bool {
+        self.shard.is_some()
+    }
+}
+
+/// One packed shard: the object its members' bytes live in, and what says whether
+/// that object can be reused as it stands.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ShardRef {
+    /// sha256 of the container, which is also the key it is stored under.
+    pub sha256: String,
+    /// The identity of the member list the container was built from; see
+    /// [`pack::fingerprint`]. Equal fingerprints mean equal bytes, which is what
+    /// lets a run reuse a shard without reading a single one of its files.
+    pub fingerprint: String,
+    /// Bytes on the wire: the container's own length.
+    #[serde(default)]
+    pub size: u64,
+    /// The files inside it.
+    #[serde(default)]
+    pub members: usize,
+    /// The raw bytes those files hold, so a run can say what a shard is worth
+    /// without adding up its members.
+    #[serde(default)]
+    pub raw: u64,
+}
+
+impl ShardRef {
+    pub fn object_key(&self, prefix: &str) -> String {
+        format!("{prefix}/shards/{}/{}", &self.sha256[..2], self.sha256)
     }
 }
 
@@ -260,6 +323,9 @@ pub struct Counts {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Manifest {
+    /// `1` named one object per file; `2` adds [`Manifest::shards`]. Nothing
+    /// branches on this: every field that `2` added defaults, so the shape of the
+    /// document says which layout a backup is in.
     pub version: u32,
     /// `20261101T053000Z`; also the manifest's name in the bucket.
     pub name: String,
@@ -275,17 +341,30 @@ pub struct Manifest {
     #[serde(default)]
     pub skipped: Vec<String>,
     pub entries: Vec<Entry>,
+    /// The packed containers, in the order their members were grouped. Empty for a
+    /// backup that stored every file as an object of its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shards: Vec<ShardRef>,
 }
 
 impl Manifest {
-    /// The object keys this manifest needs, for garbage collection.
+    /// The object keys this manifest needs, for garbage collection and for the
+    /// audit that says the bucket really holds them. A packed file contributes its
+    /// shard and not itself: an object no entry points at is not something this
+    /// backup needs.
     pub fn object_keys(&self) -> Vec<String> {
         let mut keys: Vec<String> = self
             .entries
             .iter()
+            .filter(|e| !e.is_packed())
             .filter_map(|e| e.sha256.clone())
             .map(|s| format!("objects/{}/{}", &s[..2], s))
             .collect();
+        keys.extend(
+            self.shards
+                .iter()
+                .map(|s| format!("shards/{}/{}", &s.sha256[..2], s.sha256)),
+        );
         keys.sort();
         keys.dedup();
         keys
@@ -499,6 +578,7 @@ mod tests {
             mtime: 0,
             target: None,
             sha256: Some(sha.into()),
+            shard: None,
         };
         let manifest = Manifest {
             version: 1,
@@ -514,7 +594,93 @@ mod tests {
                 entry("1111111111111111111111111111111111111111111111111111111111111111"),
                 entry("2222222222222222222222222222222222222222222222222222222222222222"),
             ],
+            shards: vec![],
         };
         assert_eq!(manifest.object_keys().len(), 2);
+    }
+
+    /// A manifest that names no shards is what is in the bucket right now, and a
+    /// reader that understands packing must still ask for exactly its objects.
+    #[test]
+    fn a_packed_manifest_needs_its_shards_and_nothing_else() {
+        let packed = Entry {
+            path: "in-a-shard.txt".into(),
+            kind: Kind::File,
+            size: 10,
+            mode: 0o644,
+            mtime: 0,
+            target: None,
+            sha256: Some("3".repeat(64)),
+            shard: Some(0),
+        };
+        assert!(packed.is_packed());
+        assert_eq!(
+            packed.object_key("aixodia/root"),
+            None,
+            "a packed file points at no object of its own, so nothing audits an \
+             upload that was never meant to happen"
+        );
+        let shard = ShardRef {
+            sha256: "4".repeat(64),
+            fingerprint: "f".into(),
+            size: 100,
+            members: 1,
+            raw: 10,
+        };
+        let manifest = Manifest {
+            version: 2,
+            name: "n".into(),
+            created_at: 0,
+            host: "h".into(),
+            root: "/root".into(),
+            counts: Counts::default(),
+            uploaded_bytes: 0,
+            skipped: vec![],
+            entries: vec![
+                packed,
+                Entry {
+                    path: "alone.txt".into(),
+                    sha256: Some("5".repeat(64)),
+                    ..Default::default()
+                },
+            ],
+            shards: vec![shard.clone()],
+        };
+        assert_eq!(
+            manifest.object_keys(),
+            vec![
+                format!("objects/55/{}", "5".repeat(64)),
+                format!("shards/44/{}", "4".repeat(64)),
+            ],
+            "the packed file's own hash is not a key this backup needs"
+        );
+        assert_eq!(
+            shard.object_key("aixodia/root"),
+            format!("aixodia/root/shards/44/{}", "4".repeat(64))
+        );
+    }
+
+    /// Everything `version` 2 added defaults, which is the whole reason an old
+    /// document still reads and no migration is needed for one.
+    #[test]
+    fn a_version_one_manifest_reads_as_an_unpacked_one() {
+        let v1 = r#"{"version":1,"name":"n","created_at":0,"host":"h","root":"/root",
+            "counts":{"files":1,"dirs":0,"symlinks":0,"bytes":3},
+            "uploaded_bytes":3,"skipped":[],
+            "entries":[{"path":"a.txt","kind":"file","size":3,"mode":420,"mtime":0,
+                        "sha256":"6666666666666666666666666666666666666666666666666666666666666666"}]}"#;
+        let manifest: Manifest = serde_json::from_str(v1).expect("the old shape still reads");
+        assert!(manifest.shards.is_empty());
+        assert_eq!(manifest.entries[0].shard, None);
+        assert!(!manifest.entries[0].is_packed());
+        let written = serde_json::to_string(&manifest).expect("and writes back");
+        assert!(
+            !written.contains("\"shards\""),
+            "an unpacked manifest says nothing about shards: {written}"
+        );
+        assert!(
+            !written.contains("\"shard\""),
+            "and leaves the field out of every entry: {written}"
+        );
     }
 }

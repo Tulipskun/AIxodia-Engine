@@ -21,6 +21,7 @@ use std::sync::{
 };
 use std::time::{Duration, UNIX_EPOCH};
 
+use crate::pack;
 use crate::scan::{self, Scanned};
 use crate::xet::{self, Job, Source};
 use crate::{
@@ -58,6 +59,16 @@ pub struct BackupReport {
     pub uploaded_bytes: u64,
     pub files_reused: usize,
     pub objects_reused: usize,
+    /// How many packed shards the backup is made of.
+    pub shards: usize,
+    /// How many of them the bucket already held, byte for byte, so that nothing
+    /// about their files was read again.
+    pub shards_reused: usize,
+    /// Files that travelled inside a shard rather than as an object of their own.
+    pub packed: usize,
+    /// The raw bytes those files hold, which is what a restore writes and the wire
+    /// never sees: `uploaded_bytes` is what actually went across.
+    pub packed_bytes: u64,
     pub skipped: Vec<String>,
     /// The manifest this run replaced. There is never more than one stored.
     pub deleted_manifests: usize,
@@ -84,11 +95,45 @@ pub struct RestoreReport {
 }
 
 /// A content object that still has to be ingested.
+#[derive(Clone)]
 struct Pending {
     key: String,
     path: PathBuf,
     sha256: Option<String>,
     size: u64,
+}
+
+/// One shard of the backup: what the manifest will say about it, and where its
+/// bytes are if they still have to go up.
+///
+/// A reused shard has no `temp`, because there is nothing to send: the bucket
+/// already holds the container its fingerprint describes.
+#[derive(Clone)]
+struct ShardBuild {
+    key: String,
+    sha256: String,
+    fingerprint: String,
+    /// Bytes on the wire.
+    size: u64,
+    /// Bytes the members hold when they are unpacked.
+    raw: u64,
+    members: usize,
+    temp: Option<PathBuf>,
+    /// What to pack, kept so a shard the bucket turns out not to hold can be built
+    /// again without a second scan of the tree.
+    group: Vec<usize>,
+}
+
+impl ShardBuild {
+    fn reference(&self) -> crate::ShardRef {
+        crate::ShardRef {
+            sha256: self.sha256.clone(),
+            fingerprint: self.fingerprint.clone(),
+            size: self.size,
+            members: self.members,
+            raw: self.raw,
+        }
+    }
 }
 
 pub fn backup(cfg: &Config, reporter: &Reporter) -> Result<BackupReport> {
@@ -121,7 +166,7 @@ pub fn backup(cfg: &Config, reporter: &Reporter) -> Result<BackupReport> {
     );
 
     let mut unreadable = Vec::new();
-    let plan = scan::plan(
+    let mut plan = scan::plan(
         &cfg.root,
         scanned,
         previous.as_ref(),
@@ -140,68 +185,118 @@ pub fn backup(cfg: &Config, reporter: &Reporter) -> Result<BackupReport> {
         ),
     );
 
-    // Which bytes belong to which object key, so an upload can be described by
-    // the entry that needs it.
-    let mut by_key: HashMap<String, &Entry> = HashMap::new();
+    // Everything that can be packed is, and packed here: a restore pays for its
+    // round trips, and nineteen thousand of them is the eight minutes the operator
+    // is not willing to wait out. This runs before the object list is read, since
+    // a packed entry names no object of its own.
+    let scratch = scratch_dir()?;
+    let mut shards = pack_shards(
+        cfg,
+        &mut plan.entries,
+        previous.as_ref(),
+        &known,
+        &scratch,
+        reporter,
+    )?;
+
+    // Which bytes belong to which object key, so a file that turns out to be
+    // missing from the bucket can be sent again by name. A packed entry names no
+    // key of its own, so what is left here is the short list of files that still
+    // travel as single objects.
+    let mut owners: HashMap<String, Pending> = HashMap::new();
     for entry in &plan.entries {
-        if let Some(key) = entry.object_key(&cfg.prefix) {
-            by_key.entry(key).or_insert(entry);
+        let Some(key) = entry.object_key(&cfg.prefix) else {
+            continue;
+        };
+        if owners.contains_key(&key) {
+            // Two files, one content: the second reuses the first's object.
+            continue;
         }
+        owners.insert(
+            key.clone(),
+            Pending {
+                key: key.clone(),
+                path: crate::join_under(&cfg.root, &entry.path)?,
+                sha256: entry.sha256.clone(),
+                size: entry.size,
+            },
+        );
     }
     let mut pending: Vec<Pending> = Vec::new();
     let mut objects_reused = 0usize;
-    {
-        let mut seen: HashSet<String> = HashSet::new();
-        for (path, key) in &plan.uploads {
-            if !seen.insert(key.clone()) {
-                // Two new files, one content: the second reuses the first.
-                objects_reused += 1;
-                continue;
-            }
-            let entry = by_key.get(key.as_str()).copied();
-            pending.push(Pending {
-                key: key.clone(),
-                path: path.clone(),
-                sha256: entry.and_then(|e| e.sha256.clone()),
-                size: entry.map(|e| e.size).unwrap_or(0),
-            });
+    let mut object_keys: Vec<&String> = owners.keys().collect();
+    object_keys.sort();
+    for key in object_keys {
+        if known.contains(key) {
+            // The previous manifest named it, and objects are never deleted.
+            objects_reused += 1;
+            continue;
         }
+        pending.push(owners[key].clone());
     }
-    // Objects are never deleted, so a file the previous manifest already
-    // named is in the bucket, and only the remaining keys are worth asking
-    // about.
-    let keys: Vec<String> = pending.iter().map(|p| p.key.clone()).collect();
-    if !keys.is_empty() {
+
+    // A newly built shard is asked about in the same breath as an object, because
+    // a run stopped after uploading and before publishing would otherwise send the
+    // same container again.
+    let mut to_ask: Vec<String> = Vec::new();
+    for shard in shards.iter().filter(|s| s.temp.is_some()) {
+        to_ask.push(shard.key.clone());
+    }
+    for object in &pending {
+        to_ask.push(object.key.clone());
+    }
+    if !to_ask.is_empty() {
         reporter.set(
             Phase::Uploading,
-            format!("asking the bucket about {} object(s)", keys.len()),
+            format!("asking the bucket about {} object(s)", to_ask.len()),
         );
-        let existing: HashSet<String> = hub.existing_keys(&keys)?.into_iter().collect();
-        objects_reused += existing.len();
+        let existing: HashSet<String> = hub.existing_keys(&to_ask)?.into_iter().collect();
+        let before = pending.len();
         pending.retain(|p| !existing.contains(&p.key));
+        objects_reused += before - pending.len();
+        for shard in shards.iter_mut() {
+            if existing.contains(&shard.key) {
+                // The bucket holds these bytes already, so the container built for
+                // them was work done for nothing, and it goes with the rest of the
+                // scratch when the run ends.
+                shard.temp = None;
+            }
+        }
     }
 
     let mut uploaded_bytes = 0u64;
-    if pending.is_empty() {
+    let going: Vec<&ShardBuild> = shards.iter().filter(|s| s.temp.is_some()).collect();
+    if pending.is_empty() && going.is_empty() {
         reporter.set(Phase::Uploading, "nothing new to upload");
     } else {
         reporter.set(
             Phase::Uploading,
             format!(
-                "{} object(s), {} byte(s)",
+                "{} shard(s) and {} object(s), {} byte(s)",
+                going.len(),
                 pending.len(),
-                pending.iter().map(|p| p.size).sum::<u64>()
+                going.iter().map(|s| s.size).sum::<u64>()
+                    + pending.iter().map(|p| p.size).sum::<u64>()
             ),
         );
-        let jobs: Vec<Job> = pending
-            .into_iter()
-            .map(|p| Job {
-                key: p.key,
-                source: Source::File(p.path),
-                sha256: p.sha256,
-                size: p.size,
-            })
-            .collect();
+        let mut jobs: Vec<Job> = Vec::new();
+        for shard in going {
+            // `going` is exactly the shards with a container on disk.
+            if let Some(temp) = &shard.temp {
+                jobs.push(Job {
+                    key: shard.key.clone(),
+                    source: Source::File(temp.clone()),
+                    sha256: Some(shard.sha256.clone()),
+                    size: shard.size,
+                });
+            }
+        }
+        jobs.extend(pending.into_iter().map(|p| Job {
+            key: p.key,
+            source: Source::File(p.path),
+            sha256: p.sha256,
+            size: p.size,
+        }));
         let done = xet::ingest(cfg, jobs, reporter.clone())?;
         let now = epoch_ms();
         let items: Vec<(String, String, i64, Option<&str>)> = done
@@ -212,26 +307,35 @@ pub fn backup(cfg: &Config, reporter: &Reporter) -> Result<BackupReport> {
         uploaded_bytes = done.iter().map(|d| d.size).sum();
     }
 
-    // A manifest naming an object the bucket does not hold is how a restore
-    // comes back with holes in the tree, so the bucket is asked whether it holds
-    // every key before the manifest is published. Objects are never deleted, so
-    // a healthy bucket answers this in one request and nothing else happens.
-    let mut wanted: Vec<String> = plan
-        .entries
-        .iter()
-        .filter_map(|e| e.object_key(&cfg.prefix))
-        .collect();
-    wanted.sort();
-    wanted.dedup();
-    let present: HashSet<String> = hub.existing_keys(&wanted)?.into_iter().collect();
-    let mut absent: Vec<String> = wanted
-        .into_iter()
-        .filter(|key| !present.contains(key))
-        .collect();
+    let counts = count(&plan.entries);
+    let name = crate::stamp_utc();
+    let mut manifest = Manifest {
+        version: 2,
+        name: name.clone(),
+        created_at: crate::now_unix(),
+        host: crate::hostname(),
+        root: cfg.root.display().to_string(),
+        counts,
+        uploaded_bytes,
+        skipped: skipped.clone(),
+        entries: plan.entries,
+        shards: shards.iter().map(ShardBuild::reference).collect(),
+    };
+
+    // A manifest naming an object the bucket does not hold is how a restore comes
+    // back with holes in the tree, so the bucket is asked whether it holds every
+    // key — shards included — before the manifest is published. This is now a
+    // request about a few dozen keys rather than nineteen thousand, which is the
+    // other thing packing bought.
+    let mut absent: Vec<String> = manifest.absolute(&cfg.prefix);
+    {
+        let present: HashSet<String> = hub.existing_keys(&absent)?.into_iter().collect();
+        absent.retain(|key| !present.contains(key));
+    }
     if !absent.is_empty() {
-        // Trusting the previous manifest's key list was what let a hole through:
-        // an object the last run believed was there is re-sent here, once, and
-        // then believed only if the bucket says so.
+        // Trusting the previous manifest's key list was what let a hole through: an
+        // object the last run believed was there is re-sent here, once, and then
+        // believed only if the bucket says so.
         tracing::warn!(
             "backup: {} object(s) the bucket did not hold: {}",
             absent.len(),
@@ -244,7 +348,26 @@ pub fn backup(cfg: &Config, reporter: &Reporter) -> Result<BackupReport> {
                 absent.len()
             ),
         );
-        uploaded_bytes += upload_objects(&hub, cfg, reporter, &absent, &by_key)?;
+        let missing_shards: Vec<String> = absent
+            .iter()
+            .filter(|key| shards.iter().any(|s| key == &&s.key))
+            .cloned()
+            .collect();
+        let missing_objects: Vec<String> = absent
+            .iter()
+            .filter(|key| owners.contains_key(*key))
+            .cloned()
+            .collect();
+        uploaded_bytes += rebuild_shards(
+            &hub,
+            cfg,
+            reporter,
+            &shards,
+            &missing_shards,
+            &scratch,
+            &manifest.entries,
+        )?;
+        uploaded_bytes += upload_objects(&hub, cfg, reporter, &missing_objects, &owners)?;
         let now: HashSet<String> = hub.existing_keys(&absent)?.into_iter().collect();
         absent.retain(|key| !now.contains(key));
         if !absent.is_empty() {
@@ -256,8 +379,8 @@ pub fn backup(cfg: &Config, reporter: &Reporter) -> Result<BackupReport> {
         }
         if !absent.is_empty() {
             // Refuse to publish. `latest.json` still names the manifest that was
-            // good before this run, so the next restore gets a tree that is
-            // whole; a half-true manifest is the thing that broke the machine.
+            // good before this run, so the next restore gets a tree that is whole;
+            // a half-true manifest is the thing that broke the machine.
             return Err(Error::Api {
                 operation: "backup".into(),
                 message: format!(
@@ -269,19 +392,7 @@ pub fn backup(cfg: &Config, reporter: &Reporter) -> Result<BackupReport> {
         }
     }
 
-    let counts = count(&plan.entries);
-    let name = crate::stamp_utc();
-    let manifest = Manifest {
-        version: 1,
-        name: name.clone(),
-        created_at: crate::now_unix(),
-        host: crate::hostname(),
-        root: cfg.root.display().to_string(),
-        counts,
-        uploaded_bytes,
-        skipped: skipped.clone(),
-        entries: plan.entries,
-    };
+    manifest.uploaded_bytes = uploaded_bytes;
     let manifest_key = hub.manifest_key(&name);
     let pointer = serde_json::json!({
         "name": manifest.name,
@@ -325,13 +436,21 @@ pub fn backup(cfg: &Config, reporter: &Reporter) -> Result<BackupReport> {
         stale.len()
     };
 
+    // The containers were only ever a way to get bytes onto the wire. The scratch
+    // holds them until the manifest that names them is published, and nothing after.
+    let _ = fs::remove_dir_all(&scratch);
+
+    let shards_reused = shards.iter().filter(|s| s.temp.is_none()).count();
+    let packed = shards.iter().map(|s| s.members).sum::<usize>();
     reporter.set(
         Phase::Done,
         format!(
-            "{} file(s), {} byte(s) uploaded, {} reused",
+            "{} file(s) in {} shard(s) ({} reused as they stood), {} byte(s) uploaded, {} file(s) re-hashed for nothing",
             manifest.counts.files,
+            shards.len(),
+            shards_reused,
             uploaded_bytes,
-            plan.reused + objects_reused
+            plan.reused
         ),
     );
     Ok(BackupReport {
@@ -346,10 +465,209 @@ pub fn backup(cfg: &Config, reporter: &Reporter) -> Result<BackupReport> {
         uploaded_bytes,
         files_reused: plan.reused,
         objects_reused,
+        shards: shards.len(),
+        shards_reused,
+        packed,
+        packed_bytes: shards.iter().map(|s| s.raw).sum(),
         skipped,
         deleted_manifests,
         duration_ms: elapsed_ms(started),
     })
+}
+
+/// Paths that write themselves. A log line or a state save changes its file's
+/// bytes on its own account, so those files are grouped into shards of their own
+/// at the end of the run: a shard that mixed them with the toolchain would be
+/// rebuilt, and its thirty-two megabytes re-sent, every time a log turns over.
+const VOLATILE: &[&str] = &[".aixodia", "logs", "*.log", "*.pid", "*.state"];
+
+/// Where the containers are built. Not under the root, because a backup of `/root`
+/// must not find its own scratch in the tree it is scanning.
+fn scratch_dir() -> Result<PathBuf> {
+    let dir = std::env::temp_dir().join(format!("aixodia-shards-{}", std::process::id()));
+    fs::create_dir_all(&dir).map_err(|source| Error::Io {
+        path: dir.display().to_string(),
+        source,
+    })?;
+    Ok(dir)
+}
+
+/// Put every file the manifest names into a shard, and say which.
+///
+/// Reuse is decided without reading a file: a group whose member list is identical
+/// to a shard of the previous manifest describes identical bytes, so its stored key
+/// can be written straight into the new manifest and neither the files nor the
+/// container are touched again. Only groups that are new or changed are built.
+///
+/// `entries` is updated in place — each packed file gains its shard's position in
+/// the returned list, which is the numbering the published manifest uses.
+fn pack_shards(
+    cfg: &Config,
+    entries: &mut [Entry],
+    previous: Option<&Manifest>,
+    known: &HashSet<String>,
+    scratch: &Path,
+    reporter: &Reporter,
+) -> Result<Vec<ShardBuild>> {
+    let volatile: Vec<String> = VOLATILE.iter().map(|pattern| pattern.to_string()).collect();
+    let mut steady: Vec<usize> = Vec::new();
+    let mut shifting: Vec<usize> = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if entry.kind != Kind::File || entry.sha256.is_none() {
+            // A directory and a link carry nothing a frame could hold, and a file
+            // whose content was never read has no identity to pack.
+            continue;
+        }
+        if scan::is_excluded(&entry.path, &volatile) {
+            shifting.push(index);
+        } else {
+            steady.push(index);
+        }
+    }
+    reporter.set(
+        Phase::Uploading,
+        format!(
+            "packing {} file(s) into shards",
+            steady.len() + shifting.len()
+        ),
+    );
+
+    let previous_by_fingerprint: HashMap<&str, &crate::ShardRef> = previous
+        .map(|manifest| {
+            manifest
+                .shards
+                .iter()
+                .map(|shard| (shard.fingerprint.as_str(), shard))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut shards: Vec<ShardBuild> = Vec::new();
+    for set in [steady, shifting] {
+        let sizes: Vec<u64> = set.iter().map(|&index| entries[index].size).collect();
+        for group in pack::group(&sizes) {
+            // Positions in `entries`, so a shard can be rebuilt by name alone.
+            let group: Vec<usize> = group.into_iter().map(|at| set[at]).collect();
+            let members: Vec<pack::Member> = group
+                .iter()
+                .map(|&index| pack::Member {
+                    path: entries[index].path.clone(),
+                    size: entries[index].size,
+                    sha256: entries[index].sha256.clone().unwrap_or_default(),
+                })
+                .collect();
+            let raw = members.iter().map(|member| member.size).sum();
+            let fingerprint = pack::fingerprint(&members);
+            // Two halves to a reuse claim: the member list must match, and the
+            // object its bytes live in must actually be in the bucket.
+            let standing = previous_by_fingerprint
+                .get(fingerprint.as_str())
+                .filter(|shard| known.contains(&cfg.shard_key(&shard.sha256)))
+                .map(|shard| (shard.sha256.clone(), shard.size));
+            let position = shards.len();
+            let shard = match standing {
+                Some((sha256, size)) => ShardBuild {
+                    key: cfg.shard_key(&sha256),
+                    sha256,
+                    fingerprint,
+                    // The container this fingerprint describes is the previous
+                    // run's, so its length is the previous run's too.
+                    size,
+                    raw,
+                    members: group.len(),
+                    temp: None,
+                    group,
+                },
+                None => {
+                    let temp = scratch.join(format!("{fingerprint}.shard"));
+                    let (sha256, size) = pack::build(&members, &cfg.root, &temp)?;
+                    ShardBuild {
+                        key: cfg.shard_key(&sha256),
+                        sha256,
+                        fingerprint,
+                        size,
+                        raw,
+                        members: group.len(),
+                        temp: Some(temp),
+                        group,
+                    }
+                }
+            };
+            for index in &shard.group {
+                entries[*index].shard = Some(position);
+            }
+            shards.push(shard);
+        }
+    }
+    Ok(shards)
+}
+
+/// Build and send the containers the bucket turned out not to hold.
+///
+/// A reused shard is a claim about a previous run, and a claim the bucket denies is
+/// repaired here rather than published: this is the half of the pre-publish audit
+/// that only packing has, and a manifest naming a container that is not there is
+/// exactly the hole that cost the operator a tree.
+fn rebuild_shards(
+    hub: &Hub,
+    cfg: &Config,
+    reporter: &Reporter,
+    shards: &[ShardBuild],
+    keys: &[String],
+    scratch: &Path,
+    entries: &[Entry],
+) -> Result<u64> {
+    let mut jobs = Vec::new();
+    for key in keys {
+        let shard = shards
+            .iter()
+            .find(|shard| &shard.key == key)
+            .ok_or_else(|| {
+                Error::Manifest(key.clone(), "no shard of this manifest names it".into())
+            })?;
+        let members: Vec<pack::Member> = shard
+            .group
+            .iter()
+            .map(|&index| pack::Member {
+                path: entries[index].path.clone(),
+                size: entries[index].size,
+                sha256: entries[index].sha256.clone().unwrap_or_default(),
+            })
+            .collect();
+        let temp = scratch.join(format!("repair-{}.shard", &shard.fingerprint[..16]));
+        let (sha256, size) = pack::build(&members, &cfg.root, &temp)?;
+        if sha256 != shard.sha256 {
+            // The manifest already names a key built from this member list, and the
+            // bytes say otherwise. Nothing the manifest claims can be trusted after
+            // that, and publishing a container under a hash that is not its own is
+            // how every later restore of it fails verification.
+            let _ = fs::remove_file(&temp);
+            return Err(Error::Api {
+                operation: "backup".into(),
+                message: format!(
+                    "shard {} rebuilt as {sha256} and not {}; its member list does not describe these bytes",
+                    shard.fingerprint, shard.sha256
+                ),
+            });
+        }
+        jobs.push(Job {
+            key: key.clone(),
+            source: Source::File(temp),
+            sha256: Some(sha256),
+            size,
+        });
+    }
+    if jobs.is_empty() {
+        return Ok(0);
+    }
+    let done = xet::ingest(cfg, jobs, reporter.clone())?;
+    let now = epoch_ms();
+    let items: Vec<(String, String, i64, Option<&str>)> = done
+        .iter()
+        .map(|d| (d.key.clone(), d.xet_hash.clone(), now, None))
+        .collect();
+    hub.add_files(&items)?;
+    Ok(done.iter().map(|d| d.size).sum())
 }
 
 /// The manifest `latest.json` points at, or `None` when there is no backup yet.
@@ -488,6 +806,10 @@ pub fn restore(cfg: &Config, root: &Path, reporter: &Reporter) -> Result<Restore
     let counters = Arc::new(Mutex::new((0usize, 0u64, 0usize)));
     let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(problems));
     let slowest: Arc<Mutex<(u64, String)>> = Arc::new(Mutex::new((0, String::new())));
+    // Where a container is held while its members are taken out of it. Not in the
+    // tree: what appears there is what the manifest names, and a shard is nobody's
+    // file. A v1 restore never writes in it.
+    let scratch = scratch_dir()?;
 
     // The unit of work is a range request, not a file. The bucket answers a
     // download at a fraction of a megabyte per second per connection, so one
@@ -498,14 +820,13 @@ pub fn restore(cfg: &Config, root: &Path, reporter: &Reporter) -> Result<Restore
     // piece of any file.
     let mut slots: Vec<Slot> = Vec::new();
     let mut queue: VecDeque<Piece> = VecDeque::new();
+    // The files still owed by a container, by shard position. A file whose bytes are
+    // already in the tree never appears here, which is why a warm restore of a packed
+    // backup asks the bucket for nothing at all.
+    let mut members: HashMap<usize, Vec<(String, MemberTarget)>> = HashMap::new();
     for (entry, path) in files {
         let label = entry.path.clone();
         let want = entry.sha256.clone().unwrap_or_default();
-        let Some(key) = entry.object_key(&cfg.prefix) else {
-            note(&errors, format!("{label}: no object key"));
-            reporter.tick();
-            continue;
-        };
         if let Ok(found) = fs::symlink_metadata(&path) {
             if found.is_file() && found.len() == entry.size {
                 // A restore is the only writer of a restored file's stamp, so an
@@ -566,6 +887,40 @@ pub fn restore(cfg: &Config, root: &Path, reporter: &Reporter) -> Result<Restore
             reporter.tick();
             continue;
         }
+        // Packed or standing alone. A file the manifest put inside a container waits
+        // for that container; one it stored as its own object is fetched here, which
+        // is the whole of a v1 manifest's story.
+        if let Some(at) = entry.shard {
+            if manifest.shards.get(at).is_none() {
+                // A number past the end of the shard list is this file's problem, and
+                // no reason to abandon the rest of the tree.
+                note(
+                    &errors,
+                    format!("{label}: shard {at} is not in this manifest"),
+                );
+                reporter.tick();
+                continue;
+            }
+            members.entry(at).or_default().push((
+                label,
+                MemberTarget {
+                    temp: crate::hub::temp_path(&path),
+                    // Its sibling is created when it is decoded, not now: a pre-sized
+                    // one would promise a length this file has not earned yet.
+                    path,
+                    want,
+                    size: entry.size,
+                    mode: entry.mode,
+                    mtime: entry.mtime,
+                },
+            ));
+            continue;
+        }
+        let Some(key) = entry.object_key(&cfg.prefix) else {
+            note(&errors, format!("{label}: no object key"));
+            reporter.tick();
+            continue;
+        };
         let temp = crate::hub::temp_path(&path);
         if let Err(source) = sized_temp(&temp, entry.size) {
             note(&errors, format!("{label}: {}: {source}", temp.display()));
@@ -584,6 +939,59 @@ pub fn restore(cfg: &Config, root: &Path, reporter: &Reporter) -> Result<Restore
             size: entry.size,
             mode: entry.mode,
             mtime: entry.mtime,
+            seal: Seal::File,
+            shard: None,
+            outstanding: AtomicUsize::new(ranges.len()),
+            failed: Mutex::new(None),
+            verifies: AtomicUsize::new(0),
+            started: std::time::Instant::now(),
+        });
+        queue.extend(ranges.into_iter().map(|(first, last)| Piece {
+            slot: index,
+            first,
+            last,
+            attempts: 0,
+        }));
+    }
+
+    // One slot per container that still owes a file. This is where packing earns its
+    // keep: thirty-odd requests, each range-split like a large file and carried by
+    // whichever worker is free, instead of nineteen thousand of them.
+    let mut groups: Vec<(usize, Vec<(String, MemberTarget)>)> = members.into_iter().collect();
+    groups.sort_by_key(|(at, _)| *at);
+    for (at, group) in groups {
+        let Some(shard) = manifest.shards.get(at) else {
+            continue;
+        };
+        let seal = Arc::new(Mutex::new(ShardSeal {
+            targets: group.into_iter().collect(),
+        }));
+        if shard.size == 0 {
+            // There is nothing to fetch from an empty object, and a file nobody could
+            // write is named rather than left silent.
+            let lost = seal.lock().unwrap_or_else(|e| e.into_inner()).owed();
+            for label in lost {
+                note(&errors, format!("{label}: its shard is empty"));
+                reporter.tick();
+            }
+            continue;
+        }
+        let temp = scratch.join(format!("restore-{at}.shard"));
+        let ranges = ranges_for(shard.size);
+        let index = slots.len();
+        slots.push(Slot {
+            index,
+            label: format!("shard {at}/{}", manifest.shards.len()),
+            key: shard.object_key(&cfg.prefix),
+            // A container has no name in the tree: its members are what appear there.
+            path: temp.clone(),
+            temp,
+            want: shard.sha256.clone(),
+            size: shard.size,
+            mode: 0,
+            mtime: 0,
+            seal: Seal::Shard,
+            shard: Some(seal),
             outstanding: AtomicUsize::new(ranges.len()),
             failed: Mutex::new(None),
             verifies: AtomicUsize::new(0),
@@ -666,6 +1074,9 @@ pub fn restore(cfg: &Config, root: &Path, reporter: &Reporter) -> Result<Restore
             format!("{files_out} file(s) restored under {}", root.display()),
         );
     }
+    // The containers were only ever a way to get many files down at once. What the
+    // tree holds afterwards is what the manifest names.
+    let _ = fs::remove_dir_all(&scratch);
     Ok(RestoreReport {
         name: manifest.name.clone(),
         root: root.display().to_string(),
@@ -679,14 +1090,59 @@ pub fn restore(cfg: &Config, root: &Path, reporter: &Reporter) -> Result<Restore
     })
 }
 
+/// What a settled slot's bytes turn into: a file that stands as an object of its
+/// own, or a container holding other files' bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Seal {
+    File,
+    Shard,
+}
+
+/// One packed file, waiting for the container that carries its bytes.
+#[derive(Clone, Debug)]
+struct MemberTarget {
+    /// Where it goes once its content has been verified.
+    path: PathBuf,
+    /// The sibling it is decoded into. Making the final name appear only at the
+    /// end is what keeps a half-restored tree indistinguishable from a tree that
+    /// was not started, exactly as it is for a file of its own.
+    temp: PathBuf,
+    want: String,
+    size: u64,
+    mode: u32,
+    mtime: i64,
+}
+
+/// The files one container carries.
+///
+/// A shard is a request that either succeeds or does not, but what a restore has to
+/// report is files, so this is the list a shard's failure has to be spread over. A
+/// member leaves it only when it has either landed or been named as failed, so what
+/// is still in here at the end is exactly the tree's remaining holes.
+struct ShardSeal {
+    /// By manifest path, which is what the container names each member by.
+    targets: HashMap<String, MemberTarget>,
+}
+
+impl ShardSeal {
+    /// The paths still owed, in a fixed order, so two runs over the same failure
+    /// read the same way.
+    fn owed(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.targets.keys().cloned().collect();
+        names.sort();
+        names
+    }
+}
+
 /// A file waiting for its bytes, and how much of them is still on the wire.
 ///
 /// Pieces of one file are written into `temp`, the sibling the manifest's own
 /// name is renamed over at the end, so no partial file is ever the one a user
-/// sees at the path.
+/// sees at the path. For a container, `temp` is the shard and the renaming happens
+/// one member at a time inside [`Self::shard`].
 struct Slot {
     index: usize,
-    /// The manifest path, for the report.
+    /// The manifest path, or the shard's position, for the report.
     label: String,
     key: String,
     path: PathBuf,
@@ -695,6 +1151,9 @@ struct Slot {
     size: u64,
     mode: u32,
     mtime: i64,
+    seal: Seal,
+    /// The members a container slot still owes. `None` for a file of its own.
+    shard: Option<Arc<Mutex<ShardSeal>>>,
     /// Pieces that have not settled yet. Reaching zero is what finalises the
     /// file, and only the worker that takes it to zero runs that.
     outstanding: AtomicUsize,
@@ -788,7 +1247,30 @@ fn run_piece(downloader: &Resolver, slot: &Slot, piece: Piece) -> Option<Piece> 
     let range = (!whole).then_some((piece.first, piece.last));
     let expected = piece.last - piece.first + 1;
     match downloader.download_piece(&slot.key, range, expected, &slot.temp) {
-        Ok(_) => None,
+        Ok(written) if written >= expected => None,
+        Ok(written) => {
+            // A body shorter than the range asked for leaves a hole in the middle of
+            // the file that nothing would notice until the hash at the end, by which
+            // time the reason is a mystery. A longer one is the bucket answering a
+            // ranged request with the whole object, which is a different problem and
+            // handled below as a retry of the file. So only a shortfall is spoken of
+            // here, and asked for again.
+            if piece.attempts + 1 >= RESTORE_ATTEMPTS {
+                slot.fail(&format!("the bucket gave {written} of {expected} bytes"));
+                return None;
+            }
+            tracing::warn!(
+                "restore: {} bytes {}-{} came back {written} of {expected}; retrying",
+                slot.label,
+                piece.first,
+                piece.last,
+            );
+            std::thread::sleep(retry_delay(piece.attempts + 1, false));
+            Some(Piece {
+                attempts: piece.attempts + 1,
+                ..piece
+            })
+        }
         Err(err) => {
             if err.is_permanent() || piece.attempts + 1 >= RESTORE_ATTEMPTS {
                 slot.fail(&err.to_string());
@@ -837,9 +1319,8 @@ fn finish_slot(
     let took = elapsed_ms(slot.started);
     if let Some(reason) = slot.failed.lock().unwrap_or_else(|e| e.into_inner()).take() {
         let _ = fs::remove_file(&slot.temp);
-        note(errors, format!("{}: {reason}", slot.label));
+        miss(slot, errors, &reason, reporter);
         report_speed(slowest, &slot.label, took);
-        reporter.tick();
         return;
     }
     let wrong = if slot.want.is_empty() {
@@ -878,9 +1359,12 @@ fn finish_slot(
             }
         }
         let _ = fs::remove_file(&slot.temp);
-        note(errors, format!("{}: {problem}", slot.label));
+        miss(slot, errors, &problem, reporter);
         report_speed(slowest, &slot.label, took);
-        reporter.tick();
+        return;
+    }
+    if slot.seal == Seal::Shard {
+        unpack(slot, counters, errors, slowest, reporter, took);
         return;
     }
     if let Err(source) =
@@ -900,15 +1384,142 @@ fn finish_slot(
         reporter.tick();
         return;
     }
-    let mut c = counters.lock().unwrap_or_else(|e| e.into_inner());
-    c.0 += 1;
-    c.1 += slot.size;
-    drop(c);
+    count_file(counters, slot.size);
     report_speed(slowest, &slot.label, took);
     // The byte count moves only here: a file is restored when its last piece
     // landed and it was verified, so a progress bar never shows a partial as a
     // whole file.
     reporter.advance(1, slot.size);
+}
+
+/// Name what a slot that could not be completed leaves the tree short of: itself for
+/// a file, and every member for a container. A shard is not something the operator
+/// can go and look for; the files it was carrying are.
+fn miss(slot: &Slot, errors: &Mutex<Vec<String>>, reason: &str, reporter: &Reporter) {
+    match slot
+        .shard
+        .as_ref()
+        .map(|seal| seal.lock().unwrap_or_else(|e| e.into_inner()).owed())
+    {
+        None => {
+            note(errors, format!("{}: {reason}", slot.label));
+            reporter.tick();
+        }
+        Some(lost) => {
+            for path in lost {
+                note(
+                    errors,
+                    format!("{path}: carried by {}: {reason}", slot.label),
+                );
+                reporter.tick();
+            }
+        }
+    }
+}
+
+/// The container is whole and it is the one the manifest named: hand its files to the
+/// tree.
+///
+/// Each member is verified, stamped, put in place and counted on its own, so the
+/// progress bar still moves by files rather than by containers and a member that
+/// cannot be written costs exactly itself. Nothing is left in the tree of the
+/// container: it was only a way to carry many files at once.
+///
+/// The ledger is the point. A member leaves it when it has been spoken for — landed,
+/// or refused with a reason — and whatever is still in it when the walk ends is named
+/// as failed. That covers both ways a container can be a lie: one that stops part way,
+/// and one that simply does not hold a file the manifest put inside it. The second is
+/// the hole that cost the operator a tree, and it is silent without this sweep.
+fn unpack(
+    slot: &Slot,
+    counters: &Mutex<(usize, u64, usize)>,
+    errors: &Mutex<Vec<String>>,
+    slowest: &Mutex<(u64, String)>,
+    reporter: &Reporter,
+    took: u64,
+) {
+    let Some(this) = slot.shard.clone() else {
+        // A slot that says it carries a container and names none is a bug in this
+        // file, not a state a restore can be asked to survive.
+        miss(slot, errors, "its shard was never asked for", reporter);
+        return;
+    };
+    let walked = pack::extract(
+        &slot.temp,
+        &mut |path| {
+            let found = this.lock().unwrap_or_else(|e| e.into_inner());
+            found.targets.get(path).map(|target| pack::Destination {
+                size: target.size,
+                sha256: (!target.want.is_empty()).then(|| target.want.clone()),
+                temp: target.temp.clone(),
+            })
+        },
+        &mut |path, outcome| {
+            let target = this
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .targets
+                .remove(path);
+            match (outcome, target) {
+                (Ok(_), Some(target)) => settle_member(path, target, counters, errors, reporter),
+                (Err(why), _) => {
+                    // Whatever was decoded was refused and removed; the name at `path`
+                    // is still the one the manifest meant.
+                    note(errors, format!("{path}: {why}"));
+                    reporter.tick();
+                }
+                (Ok(_), None) => {}
+            }
+        },
+    );
+    let reason = match &walked {
+        Ok(()) => "its container does not hold it".to_string(),
+        Err(err) => format!("its shard ended at {err}"),
+    };
+    let left = this.lock().unwrap_or_else(|e| e.into_inner()).owed();
+    for path in left {
+        note(errors, format!("{path}: {reason}"));
+        reporter.tick();
+    }
+    let _ = fs::remove_file(&slot.temp);
+    report_speed(slowest, &slot.label, took);
+}
+
+/// One member's bytes are on disk, verified by the container's own pass: give it its
+/// mode, its stamp, and its name.
+fn settle_member(
+    label: &str,
+    target: MemberTarget,
+    counters: &Mutex<(usize, u64, usize)>,
+    errors: &Mutex<Vec<String>>,
+    reporter: &Reporter,
+) {
+    if let Err(source) = fs::set_permissions(
+        &target.temp,
+        fs::Permissions::from_mode(target.mode.max(0o600)),
+    ) {
+        let _ = fs::remove_file(&target.temp);
+        note(errors, format!("{label}: set mode: {source}"));
+        reporter.tick();
+        return;
+    }
+    set_mtime(&target.temp, target.mtime);
+    if let Err(source) = fs::rename(&target.temp, &target.path) {
+        let _ = fs::remove_file(&target.temp);
+        note(errors, format!("{label}: put in place: {source}"));
+        reporter.tick();
+        return;
+    }
+    count_file(counters, target.size);
+    // By member, at the member's own size: a progress bar that counted containers
+    // would show a restore of nineteen thousand files finishing in thirty steps.
+    reporter.advance(1, target.size);
+}
+
+fn count_file(counters: &Mutex<(usize, u64, usize)>, size: u64) {
+    let mut c = counters.lock().unwrap_or_else(|e| e.into_inner());
+    c.0 += 1;
+    c.1 += size;
 }
 
 /// 200ms, 400ms, 800ms: long enough for a CDN hop to come back, short enough
@@ -928,26 +1539,27 @@ fn read_link_text(path: &Path) -> Option<String> {
         .map(|t| t.to_string_lossy().to_string())
 }
 
-/// Send the content `keys` name and register it under them, reading each file
-/// out of the tree again. This is the repair path for an object the bucket was
-/// believed to hold and did not.
+/// Send the content `keys` name and register it under them. This is the repair
+/// path for an object the bucket was believed to hold and did not, and it reads
+/// each file out of the tree again — a file that has to be re-sent is a file this
+/// run never hashed, since reuse is what made believing possible.
 fn upload_objects(
     hub: &Hub,
     cfg: &Config,
     reporter: &Reporter,
     keys: &[String],
-    by_key: &HashMap<String, &Entry>,
+    owners: &HashMap<String, Pending>,
 ) -> Result<u64> {
     let mut jobs = Vec::with_capacity(keys.len());
     for key in keys {
-        let entry = *by_key.get(key.as_str()).ok_or_else(|| {
+        let want = owners.get(key.as_str()).ok_or_else(|| {
             Error::Manifest(key.clone(), "no entry of this manifest names it".into())
         })?;
         jobs.push(Job {
             key: key.clone(),
-            source: Source::File(crate::join_under(&cfg.root, &entry.path)?),
-            sha256: entry.sha256.clone(),
-            size: entry.size,
+            source: Source::File(want.path.clone()),
+            sha256: want.sha256.clone(),
+            size: want.size,
         });
     }
     let done = xet::ingest(cfg, jobs, reporter.clone())?;
@@ -1030,6 +1642,7 @@ fn elapsed_ms(started: std::time::Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ShardRef;
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -1049,6 +1662,9 @@ mod tests {
         /// Bytes that answer a `Range` header with the whole object, because the
         /// server never implemented it.
         Rangeless(Vec<u8>),
+        /// Fewer bytes than were asked for, and a `Content-Length` that agrees with
+        /// the body rather than the range: a CDN handing back a truncated object.
+        ShortBody(Vec<u8>, usize),
     }
 
     /// A bucket that answers from a fixed table on a loopback port, counting
@@ -1095,6 +1711,9 @@ mod tests {
                                 None => (200, "OK", b.clone()),
                             },
                             Route::Rangeless(b) => (200, "OK", b.clone()),
+                            Route::ShortBody(b, take) => {
+                                (200, "OK", b[..(*take).min(b.len())].to_vec())
+                            }
                         })
                     };
                     let Some((status, reason, body)) = found else {
@@ -1171,6 +1790,7 @@ mod tests {
                 mtime: 0,
                 target: None,
                 sha256: Some(sha.clone()),
+                ..Default::default()
             });
             let url = format!(
                 "/buckets/u/b/resolve/{prefix}/objects/{}/{}",
@@ -1198,6 +1818,7 @@ mod tests {
                 mtime: 0,
                 target: None,
                 sha256: None,
+                ..Default::default()
             });
         }
         let manifest = Manifest {
@@ -1210,6 +1831,7 @@ mod tests {
             uploaded_bytes: 0,
             skipped: vec![],
             entries,
+            shards: vec![],
         };
         routes.insert(
             format!("/buckets/u/b/resolve/{prefix}/latest.json"),
@@ -1408,6 +2030,7 @@ mod tests {
             mtime: 0,
             target: None,
             sha256: Some(sha.clone()),
+            ..Default::default()
         }];
         let url = format!(
             "/buckets/u/b/resolve/{prefix}/objects/{}/{}",
@@ -1437,6 +2060,7 @@ mod tests {
             uploaded_bytes: 0,
             skipped: vec![],
             entries,
+            shards: vec![],
         };
         routes.insert(
             format!("/buckets/u/b/resolve/{prefix}/manifests/test.json"),
@@ -1497,5 +2121,795 @@ mod tests {
 
         assert!(report.failed.is_empty(), "{:?}", report.failed);
         assert_eq!(fs::read(tree.dir.join("big.bin")).expect("the file"), body);
+    }
+
+    /// Where a container is fetched from: the same address as an object's, one
+    /// directory over.
+    fn shard_url(prefix: &str, sha: &str) -> String {
+        format!("/buckets/u/b/resolve/{prefix}/shards/{}/{}", &sha[..2], sha)
+    }
+
+    /// A bucket holding containers packed from `bodies`, and a v2 manifest naming
+    /// them. `shards` says how many members go in each container, in the order they
+    /// are listed; `missing` says which containers the bucket does not have.
+    ///
+    /// The directories and links are added by the fixture rather than passed in, so
+    /// every packed restore test also proves the two kinds that stay outside the
+    /// containers.
+    fn packed_tree_with(
+        name: &str,
+        bodies: &[(String, Vec<u8>)],
+        shards: &[usize],
+        missing: &[usize],
+        short: Option<usize>,
+        alter: impl FnOnce(&mut Manifest),
+    ) -> Tree {
+        let source =
+            std::env::temp_dir().join(format!("aix-packed-src-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("aix-packed-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&source);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&source).expect("a packing root");
+        fs::create_dir_all(&dir).expect("a restore root");
+        let prefix = "aixodia/root";
+
+        for (path, body) in bodies {
+            let full = source.join(path);
+            if let Some(parent) = full.parent() {
+                fs::create_dir_all(parent).expect("a parent directory");
+            }
+            fs::write(&full, body).expect("a file to pack");
+        }
+        let mut entries: Vec<Entry> = Vec::new();
+        let mut routes: HashMap<String, Route> = HashMap::new();
+        let mut urls: HashMap<String, String> = HashMap::new();
+        let mut refs: Vec<ShardRef> = Vec::new();
+        let mut taken = 0usize;
+        for (position, count) in shards.iter().enumerate() {
+            let slice = &bodies[taken..taken + count];
+            taken += count;
+            let members: Vec<pack::Member> = slice
+                .iter()
+                .map(|(path, body)| pack::Member {
+                    path: path.clone(),
+                    size: body.len() as u64,
+                    sha256: sha(body),
+                })
+                .collect();
+            for (index, member) in members.iter().enumerate() {
+                entries.push(Entry {
+                    path: member.path.clone(),
+                    kind: Kind::File,
+                    size: member.size,
+                    mode: if member.path.ends_with(".sh") {
+                        0o755
+                    } else {
+                        0o644
+                    },
+                    mtime: 1_700_000_000 + index as i64,
+                    target: None,
+                    sha256: Some(member.sha256.clone()),
+                    shard: Some(position),
+                });
+            }
+            let out = source.join(format!("container-{position}.shard"));
+            let (sha256, size) = pack::build(&members, &source, &out).expect("a container builds");
+            let bytes = fs::read(&out).expect("the container it wrote");
+            let _ = fs::remove_file(&out);
+            refs.push(ShardRef {
+                sha256: sha256.clone(),
+                fingerprint: pack::fingerprint(&members),
+                size,
+                members: members.len(),
+                raw: members.iter().map(|member| member.size).sum(),
+            });
+            let url = shard_url(prefix, &sha256);
+            routes.insert(
+                url.clone(),
+                if missing.contains(&position) {
+                    Route::Gone
+                } else if Some(position) == short {
+                    // The container arrives cut in half, which is the same hole a
+                    // truncated object is: fewer bytes than the piece asked for.
+                    let take = bytes.len() / 2;
+                    Route::ShortBody(bytes, take)
+                } else {
+                    Route::Bytes(bytes)
+                },
+            );
+            urls.insert(format!(":{position}"), url);
+        }
+        entries.push(Entry {
+            path: "sub".into(),
+            kind: Kind::Dir,
+            size: 0,
+            mode: 0o755,
+            mtime: 0,
+            target: None,
+            sha256: None,
+            shard: None,
+        });
+        entries.push(Entry {
+            path: "link.txt".into(),
+            kind: Kind::Symlink,
+            size: 0,
+            mode: 0o777,
+            mtime: 0,
+            target: Some("a.txt".into()),
+            sha256: None,
+            shard: None,
+        });
+
+        let mut manifest = Manifest {
+            version: 2,
+            name: "test".into(),
+            created_at: 0,
+            host: "test".into(),
+            root: dir.display().to_string(),
+            counts: Counts::default(),
+            uploaded_bytes: 0,
+            skipped: vec![],
+            entries,
+            shards: refs,
+        };
+        alter(&mut manifest);
+        // The tree the containers were built from has no further use: what is being
+        // restored from now on is the bucket.
+        let _ = fs::remove_dir_all(&source);
+        routes.insert(
+            format!("/buckets/u/b/resolve/{prefix}/latest.json"),
+            Route::Bytes(b"{\"name\":\"test\"}".to_vec()),
+        );
+        routes.insert(
+            format!("/buckets/u/b/resolve/{prefix}/manifests/test.json"),
+            Route::Bytes(serde_json::to_vec(&manifest).expect("a manifest")),
+        );
+        let (endpoint, hits) = fake_bucket(routes);
+        Tree {
+            cfg: Config {
+                token: "t".into(),
+                bucket: "u/b".into(),
+                endpoint,
+                root: dir.clone(),
+                prefix: prefix.into(),
+                excludes: vec![],
+                ..Default::default()
+            },
+            dir,
+            urls,
+            hits,
+        }
+    }
+
+    /// A tree of one container, all of it served.
+    fn packed_tree(name: &str, bodies: &[(String, Vec<u8>)], shards: &[usize]) -> Tree {
+        packed_tree_with(name, bodies, shards, &[], None, |_| {})
+    }
+
+    /// The claim packing rests on: nineteen thousand files come back from a handful
+    /// of requests, and the tree afterwards is what the manifest named — the bytes,
+    /// the modes, the stamps, and the two kinds a container cannot hold.
+    #[test]
+    fn a_packed_restore_writes_the_tree_from_its_containers() {
+        let bodies = vec![
+            ("a.txt".to_string(), b"first".to_vec()),
+            ("sub/b.txt".to_string(), b"second".to_vec()),
+            (
+                "run.sh".to_string(),
+                "echo a very long line\n".repeat(200).into_bytes(),
+            ),
+        ];
+        let tree = packed_tree("whole", &bodies, &[3]);
+        let reporter = Reporter::new("restore");
+        let report = restore(&tree.cfg, &tree.dir, &reporter).expect("the run finishes");
+
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(report.files, 3, "the members of one container");
+        assert_eq!(
+            report.bytes,
+            bodies.iter().map(|(_, b)| b.len() as u64).sum::<u64>()
+        );
+        for (path, body) in &bodies {
+            assert_eq!(
+                fs::read(tree.dir.join(path)).expect("the member"),
+                *body,
+                "{path}"
+            );
+        }
+        assert_eq!(
+            fs::metadata(tree.dir.join("run.sh"))
+                .expect("the script")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755,
+            "a packed member keeps the mode its entry named"
+        );
+        assert_eq!(
+            fs::metadata(tree.dir.join("a.txt"))
+                .expect("the file")
+                .mtime(),
+            1_700_000_000
+        );
+        assert!(
+            tree.dir.join("sub").is_dir(),
+            "a directory stays outside the container and still arrives"
+        );
+        assert_eq!(
+            fs::read_link(tree.dir.join("link.txt")).expect("the link"),
+            PathBuf::from("a.txt")
+        );
+        assert_eq!(
+            hit(&tree.hits, &tree.urls[":0"]),
+            1,
+            "three files, one request: that is the whole argument for packing"
+        );
+        let _ = fs::remove_dir_all(&tree.dir);
+    }
+
+    /// One bad container is a bad hour for the files it carried and nothing else:
+    /// the tree's other members still land, and every lost path is named rather
+    /// than left for the operator to discover.
+    #[test]
+    fn one_lost_container_costs_its_members_and_no_more() {
+        let bodies = vec![
+            ("keep1.txt".to_string(), b"one".to_vec()),
+            ("keep2.txt".to_string(), b"two".to_vec()),
+            ("lost1.txt".to_string(), b"three".to_vec()),
+            ("lost2.txt".to_string(), b"four".to_vec()),
+        ];
+        let tree = packed_tree_with("blast", &bodies, &[2, 2], &[1], None, |_| {});
+        let reporter = Reporter::new("restore");
+        let report = restore(&tree.cfg, &tree.dir, &reporter).expect("the run finishes");
+
+        assert_eq!(
+            fs::read(tree.dir.join("keep1.txt")).expect("the member"),
+            b"one"
+        );
+        assert_eq!(
+            fs::read(tree.dir.join("keep2.txt")).expect("the member"),
+            b"two"
+        );
+        assert!(
+            !tree.dir.join("lost1.txt").exists(),
+            "a member of the container that is not there"
+        );
+        assert_eq!(report.files, 2);
+        assert_eq!(
+            report.failed.len(),
+            2,
+            "the lost container's members, and nothing else: {:?}",
+            report.failed
+        );
+        let named = report.failed.join("\n");
+        for path in ["lost1.txt", "lost2.txt"] {
+            assert!(named.contains(path), "{path} is not named in {named}");
+        }
+        for path in ["keep1.txt", "keep2.txt"] {
+            assert!(
+                !named.contains(path),
+                "{path} was written; it is not a failure"
+            );
+        }
+        let _ = fs::remove_dir_all(&tree.dir);
+    }
+
+    /// A container that arrives cut short must not be assembled anyway. Its bytes
+    /// are a few hundred of the ones the manifest declared, so the length check on
+    /// the piece is what turns "half a shard" into a named set of files instead of a
+    /// hash error nobody could read.
+    #[test]
+    fn a_truncated_container_is_refused_and_its_members_are_named() {
+        let bodies = vec![
+            ("a.txt".to_string(), b"aaaa".repeat(4096)),
+            ("b.txt".to_string(), b"bbbb".repeat(4096)),
+        ];
+        let tree = packed_tree_with("short", &bodies, &[2], &[], Some(0), |_| {});
+        let reporter = Reporter::new("restore");
+        let report = restore(&tree.cfg, &tree.dir, &reporter).expect("the run finishes");
+
+        assert_eq!(report.files, 0, "nothing of a half container is a file");
+        assert_eq!(
+            report.failed.len(),
+            2,
+            "both members are named: {:?}",
+            report.failed
+        );
+        assert!(
+            !tree.dir.join("a.txt").exists() && !tree.dir.join("b.txt").exists(),
+            "a partial container leaves no partial files"
+        );
+        let _ = fs::remove_dir_all(&tree.dir);
+    }
+
+    /// A file number the shard list cannot answer is that file's problem. The
+    /// container it should have come from still delivers whoever is in it.
+    #[test]
+    fn a_shard_number_past_the_end_names_its_own_entry() {
+        let bodies = vec![
+            ("a.txt".to_string(), b"first".to_vec()),
+            ("b.txt".to_string(), b"second".to_vec()),
+        ];
+        let tree = packed_tree_with("bogus", &bodies, &[2], &[], None, |manifest| {
+            manifest.entries[1].shard = Some(999);
+        });
+        let reporter = Reporter::new("restore");
+        let report = restore(&tree.cfg, &tree.dir, &reporter).expect("the run finishes");
+
+        assert_eq!(
+            fs::read(tree.dir.join("a.txt")).expect("the member"),
+            b"first"
+        );
+        assert_eq!(report.files, 1);
+        assert_eq!(
+            report.failed,
+            vec!["b.txt: shard 999 is not in this manifest".to_string()],
+            "the bogus index costs one entry, and says which"
+        );
+        let _ = fs::remove_dir_all(&tree.dir);
+    }
+
+    /// A manifest that puts a file inside a container the container does not hold is
+    /// the exact shape of the hole that cost the operator a tree: the shard arrives,
+    /// verifies, and the tree is still short. So the walk ends by naming whatever it
+    /// never spoke for, and a completed run means a whole tree.
+    #[test]
+    fn a_container_that_holds_fewer_files_than_named_says_which() {
+        let bodies = vec![
+            ("a.txt".to_string(), b"first".to_vec()),
+            ("b.txt".to_string(), b"second".to_vec()),
+        ];
+        let tree = packed_tree_with("ghost", &bodies, &[2], &[], None, |manifest| {
+            manifest.entries.push(Entry {
+                path: "ghost.txt".into(),
+                kind: Kind::File,
+                size: 6,
+                mode: 0o644,
+                mtime: 0,
+                target: None,
+                sha256: Some(sha(b"nobody")),
+                shard: Some(0),
+            });
+        });
+        let reporter = Reporter::new("restore");
+        let report = restore(&tree.cfg, &tree.dir, &reporter).expect("the run finishes");
+
+        assert_eq!(
+            fs::read(tree.dir.join("a.txt")).expect("the member"),
+            b"first"
+        );
+        assert_eq!(
+            fs::read(tree.dir.join("b.txt")).expect("the member"),
+            b"second"
+        );
+        assert_eq!(report.files, 2, "the two the container really held");
+        assert_eq!(
+            report.failed,
+            vec!["ghost.txt: its container does not hold it".to_string()],
+            "the missing one is named, not counted as a success"
+        );
+        let _ = fs::remove_dir_all(&tree.dir);
+    }
+
+    /// Nothing in the v2 reader makes a v1 backup unreadable: a manifest with no
+    /// shards has no container to fetch, so every file is still its own object and
+    /// the operator's current backup restores exactly as it did before packing.
+    #[test]
+    fn a_manifest_without_shards_still_arrives_one_object_at_a_time() {
+        let tree = tree("v1");
+        let reporter = Reporter::new("restore");
+        let report = restore(&tree.cfg, &tree.dir, &reporter).expect("the run finishes");
+
+        assert_eq!(report.files, 3, "{:?}", report.failed);
+        for path in ["a.txt", "sub/b.txt", "flaky.txt"] {
+            let url = &tree.urls[path];
+            assert!(
+                hit(&tree.hits, url) >= 1,
+                "{path} is fetched as its own object"
+            );
+        }
+        let _ = fs::remove_dir_all(&tree.dir);
+    }
+
+    /// A packed manifest names two kinds of key, and the pre-publish audit and the
+    /// keep-list are only correct if both are there. A file that went into a
+    /// container must not also be asked for as an object — that is the difference
+    /// between a backup that audits thirty keys and one that audits none.
+    #[test]
+    fn a_packed_manifest_names_its_containers_and_no_ghost_objects() {
+        let packed = sha(b"first");
+        let direct = sha(b"second");
+        let manifest = Manifest {
+            version: 2,
+            name: "test".into(),
+            created_at: 0,
+            host: "test".into(),
+            root: String::new(),
+            counts: Counts::default(),
+            uploaded_bytes: 0,
+            skipped: vec![],
+            entries: vec![
+                Entry {
+                    path: "a.txt".into(),
+                    kind: Kind::File,
+                    size: 5,
+                    mode: 0o644,
+                    mtime: 0,
+                    target: None,
+                    sha256: Some(sha(b"first")),
+                    shard: Some(0),
+                },
+                Entry {
+                    path: "keep.txt".into(),
+                    kind: Kind::File,
+                    size: 6,
+                    mode: 0o644,
+                    mtime: 0,
+                    target: None,
+                    sha256: Some(sha(b"second")),
+                    shard: None,
+                },
+                Entry {
+                    path: "link.txt".into(),
+                    kind: Kind::Symlink,
+                    size: 0,
+                    mode: 0o777,
+                    mtime: 0,
+                    target: Some("keep.txt".into()),
+                    sha256: None,
+                    shard: None,
+                },
+            ],
+            shards: vec![ShardRef {
+                sha256: "ab".to_string() + &"c".repeat(62),
+                fingerprint: "f".repeat(64),
+                size: 10,
+                members: 1,
+                raw: 5,
+            }],
+        };
+        let keys = manifest.object_keys();
+        let absolute = manifest.absolute("aixodia/root");
+        assert_eq!(keys.len(), 2, "{keys:?}");
+        assert!(
+            absolute.contains(&manifest.shards[0].object_key("aixodia/root")),
+            "the container is on the list, or the audit and the pruning delete it"
+        );
+        assert!(
+            absolute.contains(&format!("aixodia/root/objects/{}/{}", &direct[..2], direct)),
+            "a file outside a container keeps its own object"
+        );
+        assert!(
+            !keys.iter().any(|key| key.ends_with(&packed)),
+            "a packed file names no object of its own: {keys:?}"
+        );
+    }
+
+    /// A root whose files are too big to share a container, and the entries a scan
+    /// of it would produce. Sizes are chosen so the grouping lands in two shards:
+    /// seventeen megabytes cannot share a container with anything else of its size.
+    fn packable_root(name: &str, sizes: &[usize]) -> (Config, Vec<Entry>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("aix-build-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("a backup root");
+        let mut entries = Vec::new();
+        for (index, size) in sizes.iter().enumerate() {
+            let path = format!("f{index}.bin");
+            // One byte of difference per file, and the rest zeros: the content is
+            // distinct, which is what a fingerprint is about, and cheap to build.
+            let mut body = vec![0u8; *size];
+            body[0] = index as u8 + 1;
+            fs::write(dir.join(&path), &body).expect("a file to pack");
+            entries.push(Entry {
+                path,
+                kind: Kind::File,
+                size: *size as u64,
+                mode: 0o644,
+                mtime: 0,
+                target: None,
+                sha256: Some(sha(&body)),
+                shard: None,
+            });
+        }
+        let scratch =
+            std::env::temp_dir().join(format!("aix-build-scratch-{name}-{}", std::process::id()));
+        fs::create_dir_all(&scratch).expect("a scratch directory");
+        (
+            Config {
+                token: "t".into(),
+                bucket: "u/b".into(),
+                root: dir.clone(),
+                prefix: "aixodia/root".into(),
+                ..Default::default()
+            },
+            entries,
+            scratch,
+        )
+    }
+
+    /// What the second run of a warm backup is allowed to cost: nothing. The
+    /// member list a shard was built from is its identity, so an unchanged tree
+    /// names the containers the bucket already holds and reads no file at all.
+    #[test]
+    fn an_unchanged_tree_uploads_no_container_bytes() {
+        let (cfg, mut entries, scratch) = packable_root("warm", &[17 << 20, 17 << 20, 1 << 20]);
+        let reporter = Reporter::new("backup");
+        let built = pack_shards(
+            &cfg,
+            &mut entries,
+            None,
+            &HashSet::new(),
+            &scratch,
+            &reporter,
+        )
+        .expect("the first run packs");
+        assert_eq!(
+            built.len(),
+            2,
+            "seventeen megabytes will not share a container"
+        );
+        assert!(
+            built.iter().all(|shard| shard.temp.is_some()),
+            "nothing stands in the bucket yet"
+        );
+
+        let published = Manifest {
+            version: 2,
+            name: "n".into(),
+            created_at: 0,
+            host: "h".into(),
+            root: cfg.root.display().to_string(),
+            counts: Counts::default(),
+            uploaded_bytes: 0,
+            skipped: vec![],
+            entries: entries.clone(),
+            shards: built.iter().map(ShardBuild::reference).collect(),
+        };
+        let known: HashSet<String> = published.absolute(&cfg.prefix).into_iter().collect();
+
+        let mut again = entries.clone();
+        let reused = pack_shards(
+            &cfg,
+            &mut again,
+            Some(&published),
+            &known,
+            &scratch,
+            &reporter,
+        )
+        .expect("the second run reuses");
+        assert_eq!(reused.len(), built.len());
+        for (before, after) in built.iter().zip(&reused) {
+            assert_eq!(
+                before.sha256, after.sha256,
+                "the same members, the same container"
+            );
+            assert!(
+                after.temp.is_none(),
+                "shard {} was built again",
+                after.fingerprint
+            );
+        }
+        let going: u64 = reused
+            .iter()
+            .filter(|s| s.temp.is_some())
+            .map(|s| s.size)
+            .sum();
+        assert_eq!(going, 0, "a warm backup puts no container on the wire");
+        // The numbering the published manifest uses is the one the entries carry.
+        for entry in again.iter().filter(|e| e.shard.is_some()) {
+            let at = entry.shard.expect("just checked");
+            assert!(
+                published.shards[at].members > 0,
+                "{} names a container that holds nothing",
+                entry.path
+            );
+        }
+        let _ = fs::remove_dir_all(&cfg.root);
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    /// The honest cost of packing, and the reason it is survivable: one changed
+    /// file rebuilds the container it lives in and leaves every other container
+    /// alone. A tree of nineteen thousand files where one binary changed is one
+    /// rebuild, not nineteen thousand.
+    #[test]
+    fn one_changed_member_rebuilds_one_container() {
+        let (cfg, mut entries, scratch) = packable_root("shift", &[17 << 20, 17 << 20, 1 << 20]);
+        let reporter = Reporter::new("backup");
+        let built = pack_shards(
+            &cfg,
+            &mut entries,
+            None,
+            &HashSet::new(),
+            &scratch,
+            &reporter,
+        )
+        .expect("the first run packs");
+        let published = Manifest {
+            version: 2,
+            name: "n".into(),
+            created_at: 0,
+            host: "h".into(),
+            root: cfg.root.display().to_string(),
+            counts: Counts::default(),
+            uploaded_bytes: 0,
+            skipped: vec![],
+            entries: entries.clone(),
+            shards: built.iter().map(ShardBuild::reference).collect(),
+        };
+        let known: HashSet<String> = published.absolute(&cfg.prefix).into_iter().collect();
+
+        // The first file's bytes change, and with them the one container it is in.
+        let mut moved = entries.clone();
+        let body = vec![7u8; 17 << 20];
+        moved[0].sha256 = Some(sha(&body));
+        fs::write(cfg.root.join("f0.bin"), &body).expect("a changed file");
+        let rebuilt = pack_shards(
+            &cfg,
+            &mut moved,
+            Some(&published),
+            &known,
+            &scratch,
+            &reporter,
+        )
+        .expect("the changed tree is packed");
+
+        assert_eq!(rebuilt.len(), 2, "the same grouping");
+        assert!(rebuilt[0].temp.is_some(), "the container that held it");
+        assert!(
+            rebuilt[1].temp.is_none(),
+            "its neighbours are seventeen and one megabytes of unchanged bytes"
+        );
+        assert_eq!(rebuilt[1].sha256, built[1].sha256);
+        assert_ne!(rebuilt[0].sha256, built[0].sha256);
+        assert_eq!(rebuilt[0].members, 1);
+        let _ = fs::remove_dir_all(&cfg.root);
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    /// A reuse claim is only good if the bucket agrees: a fingerprint that matches
+    /// a shard the bucket no longer holds must be built again, not published as a
+    /// hole in the tree.
+    #[test]
+    fn a_reused_container_is_only_reused_while_the_bucket_holds_it() {
+        let (cfg, mut entries, scratch) = packable_root("gap", &[17 << 20, 17 << 20, 1 << 20]);
+        let reporter = Reporter::new("backup");
+        let built = pack_shards(
+            &cfg,
+            &mut entries,
+            None,
+            &HashSet::new(),
+            &scratch,
+            &reporter,
+        )
+        .expect("the first run packs");
+        let published = Manifest {
+            version: 2,
+            name: "n".into(),
+            created_at: 0,
+            host: "h".into(),
+            root: cfg.root.display().to_string(),
+            counts: Counts::default(),
+            uploaded_bytes: 0,
+            skipped: vec![],
+            entries: entries.clone(),
+            shards: built.iter().map(ShardBuild::reference).collect(),
+        };
+        // Every key but the containers': the bucket lost them, as it lost the
+        // objects that cost the operator a tree.
+        let known: HashSet<String> = published
+            .entries
+            .iter()
+            .filter_map(|entry| entry.object_key(&cfg.prefix))
+            .collect();
+
+        let mut again = entries.clone();
+        let rebuilt = pack_shards(
+            &cfg,
+            &mut again,
+            Some(&published),
+            &known,
+            &scratch,
+            &reporter,
+        )
+        .expect("the run goes on");
+        assert!(
+            rebuilt.iter().all(|shard| shard.temp.is_some()),
+            "a fingerprint match is not enough: the bytes have to be there"
+        );
+        let _ = fs::remove_dir_all(&cfg.root);
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    /// A file that stops short of the length its range asked for is not a file: it
+    /// is a hole that the hash at the end would call a mystery. The run asks again,
+    /// and when the bucket keeps giving the same short body, the path is named and
+    /// nothing half-written is left standing in the tree.
+    #[test]
+    fn a_body_that_stops_short_is_not_written_off_as_a_file() {
+        let dir = std::env::temp_dir().join(format!("aix-short-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("a restore root");
+        let prefix = "aixodia/root";
+        let body: Vec<u8> = (0..8192usize).map(|i| (i % 251) as u8).collect();
+        let sha = sha(&body);
+        let entries = vec![Entry {
+            path: "half.bin".into(),
+            kind: Kind::File,
+            size: body.len() as u64,
+            mode: 0o644,
+            mtime: 0,
+            target: None,
+            sha256: Some(sha.clone()),
+            shard: None,
+        }];
+        let url = format!(
+            "/buckets/u/b/resolve/{prefix}/objects/{}/{}",
+            &sha[..2],
+            sha
+        );
+        let manifest = Manifest {
+            version: 1,
+            name: "test".into(),
+            created_at: 0,
+            host: "test".into(),
+            root: dir.display().to_string(),
+            counts: Counts::default(),
+            uploaded_bytes: 0,
+            skipped: vec![],
+            entries,
+            shards: vec![],
+        };
+        let mut routes: HashMap<String, Route> = HashMap::new();
+        routes.insert(url.clone(), Route::ShortBody(body.clone(), 4096));
+        routes.insert(
+            format!("/buckets/u/b/resolve/{prefix}/latest.json"),
+            Route::Bytes(b"{\"name\":\"test\"}".to_vec()),
+        );
+        routes.insert(
+            format!("/buckets/u/b/resolve/{prefix}/manifests/test.json"),
+            Route::Bytes(serde_json::to_vec(&manifest).expect("a manifest")),
+        );
+        let (endpoint, hits) = fake_bucket(routes);
+        let cfg = Config {
+            token: "t".into(),
+            bucket: "u/b".into(),
+            endpoint,
+            root: dir.clone(),
+            prefix: prefix.into(),
+            excludes: vec![],
+            ..Default::default()
+        };
+        let report = restore(&cfg, &dir, &Reporter::new("restore")).expect("the run finishes");
+
+        assert_eq!(report.files, 0);
+        assert_eq!(
+            report.failed.len(),
+            1,
+            "one path, named: {:?}",
+            report.failed
+        );
+        assert!(
+            report.failed[0].contains("gave 4096 of 8192 bytes"),
+            "the reason says what came short: {:?}",
+            report.failed
+        );
+        assert!(
+            !dir.join("half.bin").exists(),
+            "a short body never becomes a file"
+        );
+        let left: Vec<String> = fs::read_dir(&dir)
+            .expect("the root it wrote")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains("aixodia-part"))
+            .collect();
+        assert!(left.is_empty(), "no partial is left in the tree: {left:?}");
+        assert_eq!(
+            hit(&hits, &url),
+            RESTORE_ATTEMPTS,
+            "a short body is asked for again, up to the attempts a file gets"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

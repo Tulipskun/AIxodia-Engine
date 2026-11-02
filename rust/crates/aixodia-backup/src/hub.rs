@@ -404,9 +404,6 @@ impl Resolver {
         // object. Writing that body at an offset would corrupt the file in a
         // way the hash would only catch at the end, so it is refused instead.
         let offset = range.map_or(0, |(first, _)| first);
-        // A 200 to a ranged request means the bucket answered for the whole
-        // object. Writing that body at an offset would corrupt the file in a way
-        // the hash would only catch at the end, so it is refused instead.
         if offset > 0 && status != reqwest::StatusCode::PARTIAL_CONTENT {
             return Err(Error::Api {
                 operation: "download".into(),

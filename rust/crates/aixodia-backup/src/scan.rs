@@ -367,6 +367,10 @@ pub fn plan(
                     mtime: item.mtime,
                     target: item.target,
                     sha256: None,
+                    // Only regular files are ever packed: a directory or a link is
+                    // a few bytes of metadata, and the pre-pass makes it before any
+                    // shard is opened.
+                    shard: None,
                 });
                 continue;
             }
@@ -405,6 +409,9 @@ pub fn plan(
             mtime: item.mtime,
             target: None,
             sha256: Some(sha),
+            // `backup` decides which shard a file lands in, once it has every
+            // file's hash and none of its bytes still open.
+            shard: None,
         });
     }
     Ok(plan)
@@ -526,7 +533,9 @@ mod tests {
                 mtime: meta.mtime(),
                 target: None,
                 sha256: Some(same_sha.clone()),
+                shard: None,
             }],
+            shards: vec![],
         };
         let new_sha = hash_file(&dir.join("new.txt")).unwrap();
         let mut known = HashSet::new();
